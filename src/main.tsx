@@ -32,6 +32,7 @@ import {
   FileAudio,
   FolderKanban,
   History,
+  Image as ImageIcon,
   Info,
   ListPlus,
   Loader2,
@@ -438,6 +439,20 @@ type DownloadFormat = {
   audioOnly: boolean;
 };
 
+type DownloadFormatInspection = {
+  durationSeconds?: number | null;
+  isLive: boolean;
+  videoId?: string | null;
+  previewUrl?: string | null;
+  formats: DownloadFormat[];
+};
+
+type ClipRange = {
+  startSeconds: number;
+  endSeconds: number;
+  forceKeyframes: boolean;
+};
+
 type DownloadHistoryItem = {
   id: string;
   createdAt: string;
@@ -463,6 +478,7 @@ type DownloadQueueItem = {
   sourcePage?: string | null;
   formatId?: string | null;
   folderName?: string | null;
+  clip?: ClipRange | null;
   status: "queued" | "downloading" | "done" | "error" | "cancelled";
   progress?: DownloadProgress | null;
   outputPath?: string | null;
@@ -565,6 +581,9 @@ function App() {
   const [active, setActive] = React.useState<SectionId>("clip-hunting");
   const [audioTab, setAudioTab] = React.useState<AudioTab>("extract");
   const [downloaderTab, setDownloaderTab] = React.useState<DownloaderTab>("anime");
+  const [bgState, setBgState] = React.useState<BackgroundState>(DEFAULT_BG_STATE);
+  const [bgPreview, setBgPreview] = React.useState<BackgroundState | null>(null);
+  const [bgModalOpen, setBgModalOpen] = React.useState(false);
   const activeMeta = panelMeta[active];
   const isAudioExtraction = active === "audio-extraction";
   const isClipHunting = active === "clip-hunting";
@@ -574,12 +593,18 @@ function App() {
   const isLogs = active === "logs";
   const isSettings = active === "settings";
 
+  const liveBg = bgPreview ?? bgState;
+  React.useEffect(() => {
+    document.documentElement.classList.toggle("has-app-bg", Boolean(liveBg.imagePath));
+  }, [liveBg.imagePath]);
+
   React.useEffect(() => {
     applyAppTheme(readThemeColors(null));
     invoke<string>("get_config")
       .then((raw) => {
         const payload = parseBridgePayload<AppConfig>(raw);
         applyAppTheme(readThemeColors(payload));
+        setBgState(readBackgroundState(payload));
       })
       .catch((error) => {
         logFrontend("warn", "frontend.theme.config.error", "Could not load saved theme", {
@@ -594,8 +619,13 @@ function App() {
         secondary: isHexColor(colors?.secondary) ? colors.secondary : APP_THEMES[0].colors[1],
       });
     };
+    const onBgOpen = () => setBgModalOpen(true);
     window.addEventListener("theme-changed", onThemeChanged);
-    return () => window.removeEventListener("theme-changed", onThemeChanged);
+    window.addEventListener("bg-customize-open", onBgOpen);
+    return () => {
+      window.removeEventListener("theme-changed", onThemeChanged);
+      window.removeEventListener("bg-customize-open", onBgOpen);
+    };
   }, []);
 
   const modeTabs = isAudioExtraction
@@ -623,7 +653,24 @@ function App() {
 
   return (
     <main className="desktop">
+      <BackgroundLayer state={liveBg} />
       <WindowChrome />
+      {bgModalOpen && (
+        <BackgroundCustomizer
+          initial={bgState}
+          onPreview={setBgPreview}
+          onCommit={(next) => {
+            setBgState(next);
+            setBgPreview(null);
+            setBgModalOpen(false);
+            window.dispatchEvent(new CustomEvent("bg-saved", { detail: next }));
+          }}
+          onCancel={() => {
+            setBgPreview(null);
+            setBgModalOpen(false);
+          }}
+        />
+      )}
       <section className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
         <aside className="sidebar" aria-label="Primary navigation">
           <div className="brand-strip">
@@ -856,6 +903,9 @@ function DownloaderPanel({
           downloadDir: config.download_path || undefined,
           kind: job.kind,
           folderName: job.folderName || undefined,
+          clipStartSeconds: job.clip?.startSeconds ?? undefined,
+          clipEndSeconds: job.clip?.endSeconds ?? undefined,
+          forceKeyframesAtCuts: job.clip ? job.clip.forceKeyframes : undefined,
         });
 
       setQueue((current) => current.map((item) => (
@@ -1602,10 +1652,30 @@ function YoutubeDownloaderPanel({
   const [inspecting, setInspecting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [message, setMessage] = React.useState("Paste a YouTube URL, inspect formats, then queue the version you want.");
+  const [videoId, setVideoId] = React.useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
+  const [durationSeconds, setDurationSeconds] = React.useState<number | null>(null);
+  const [isLive, setIsLive] = React.useState(false);
+  const [trimEnabled, setTrimEnabled] = React.useState(false);
+  const [clipStart, setClipStart] = React.useState(0);
+  const [clipEnd, setClipEnd] = React.useState(0);
+  const [forceKeyframes, setForceKeyframes] = React.useState(true);
 
   const displayFormats = React.useMemo<DownloadFormat[]>(() => [BEST_FORMAT_ENTRY, ...formats], [formats]);
   const selectedFormat = displayFormats.find((format) => format.id === selectedFormatId) ?? displayFormats[0] ?? null;
   const youtubeHistory = history.filter((item) => item.kind !== "anime").slice(0, 8);
+  const trimAvailable = trimEnabled && !!videoId && !isLive && (durationSeconds ?? 0) > 0;
+  const clipDuration = Math.max(0, clipEnd - clipStart);
+
+  function resetTrimState() {
+    setVideoId(null);
+    setPreviewUrl(null);
+    setDurationSeconds(null);
+    setIsLive(false);
+    setTrimEnabled(false);
+    setClipStart(0);
+    setClipEnd(0);
+  }
 
   async function inspectFormats(event?: React.FormEvent<HTMLFormElement>) {
     event?.preventDefault();
@@ -1615,15 +1685,30 @@ function YoutubeDownloaderPanel({
     setError(null);
     setFormats([]);
     setSelectedFormatId(BEST_FORMAT_ID);
+    resetTrimState();
     setMessage("Inspecting downloadable formats...");
     try {
-      const payload = await invoke<DownloadFormat[]>("inspect_download_formats", {
+      const payload = await invoke<DownloadFormatInspection>("inspect_download_formats", {
         url: targetUrl,
         referer: undefined,
       });
-      setFormats(payload);
+      setFormats(payload.formats);
       setSelectedFormatId(BEST_FORMAT_ID);
-      setMessage(payload.length > 0 ? `${payload.length} formats found.` : "Best (auto-merge) is ready.");
+      const duration = payload.durationSeconds ?? null;
+      setDurationSeconds(duration);
+      setIsLive(payload.isLive);
+      setVideoId(payload.videoId ?? extractYoutubeVideoId(targetUrl));
+      setPreviewUrl(payload.previewUrl ?? null);
+      if (duration && duration > 0) {
+        setClipStart(0);
+        setClipEnd(duration);
+      }
+      const formatLine = payload.formats.length > 0
+        ? `${payload.formats.length} formats found.`
+        : "Best (auto-merge) is ready.";
+      const durationLine = duration ? ` Duration: ${formatHms(duration, false)}.` : "";
+      const liveLine = payload.isLive ? " Live stream — clipping disabled." : "";
+      setMessage(`${formatLine}${durationLine}${liveLine}`);
     } catch (formatError) {
       setError(String(formatError));
       setMessage("Format inspection failed.");
@@ -1636,21 +1721,39 @@ function YoutubeDownloaderPanel({
     const targetUrl = url.trim();
     if (!targetUrl || !selectedFormat) return;
     const formatSpec = buildYoutubeFormatSpec(selectedFormat);
+    let clip: ClipRange | null = null;
+    const coversWholeVideo = durationSeconds !== null
+      && clipStart <= 0.5
+      && clipEnd >= durationSeconds - 0.5;
+    if (trimAvailable && clipDuration > 0.05 && !coversWholeVideo) {
+      clip = {
+        startSeconds: clipStart,
+        endSeconds: clipEnd,
+        forceKeyframes,
+      };
+    }
     enqueueDownload({
       kind: "youtube",
       title: inferDownloadTitleFromUrl(targetUrl),
-      subtitle: null,
+      subtitle: clip
+        ? `Clip ${formatHms(clip.startSeconds, false)} - ${formatHms(clip.endSeconds, false)}`
+        : null,
       qualityLabel: selectedFormat.label,
       url: targetUrl,
       referer: null,
       sourcePage: targetUrl,
       formatId: formatSpec,
       folderName: "youtube downloads",
+      clip,
       progress: null,
       outputPath: null,
       error: null,
     });
-    setMessage(`${selectedFormat.label} added to the download queue.`);
+    setMessage(
+      clip
+        ? `Queued ${selectedFormat.label} (clip ${formatHms(clip.startSeconds, false)} - ${formatHms(clip.endSeconds, false)}).`
+        : `${selectedFormat.label} added to the download queue.`,
+    );
   }
 
   return (
@@ -1704,10 +1807,34 @@ function YoutubeDownloaderPanel({
         })}
       </div>
 
+      {!isLive && (durationSeconds ?? 0) > 0 ? (
+        <YoutubeTrimEditor
+          previewUrl={previewUrl}
+          durationSeconds={durationSeconds ?? 0}
+          enabled={trimEnabled}
+          onEnabledChange={setTrimEnabled}
+          startSeconds={clipStart}
+          endSeconds={clipEnd}
+          onChange={(start, end) => {
+            setClipStart(start);
+            setClipEnd(end);
+          }}
+          forceKeyframes={forceKeyframes}
+          onForceKeyframesChange={setForceKeyframes}
+        />
+      ) : isLive ? (
+        <div className="youtube-trim-disabled">
+          <Scissors size={14} strokeWidth={2.1} />
+          <span>Live streams cannot be clipped — yt-dlp does not support sections on live URLs.</span>
+        </div>
+      ) : null}
+
       <div className="youtube-actions">
         <button type="button" disabled={!selectedFormat || !url.trim()} onClick={queueSelectedFormat}>
           <Download size={16} strokeWidth={2.2} />
-          Queue selected format
+          {trimAvailable && clipDuration > 0.05
+            ? `Queue clip (${formatHms(clipDuration, false)})`
+            : "Queue selected format"}
         </button>
       </div>
 
@@ -1734,6 +1861,337 @@ function YoutubeDownloaderPanel({
       </section>
     </section>
   );
+}
+
+function YoutubeTrimEditor({
+  previewUrl,
+  durationSeconds,
+  enabled,
+  onEnabledChange,
+  startSeconds,
+  endSeconds,
+  onChange,
+  forceKeyframes,
+  onForceKeyframesChange,
+}: {
+  previewUrl: string | null;
+  durationSeconds: number;
+  enabled: boolean;
+  onEnabledChange: (next: boolean) => void;
+  startSeconds: number;
+  endSeconds: number;
+  onChange: (start: number, end: number) => void;
+  forceKeyframes: boolean;
+  onForceKeyframesChange: (next: boolean) => void;
+}) {
+  const videoRef = React.useRef<HTMLVideoElement | null>(null);
+  const [playerCurrentTime, setPlayerCurrentTime] = React.useState(0);
+  const [previewError, setPreviewError] = React.useState<string | null>(null);
+  const [startInput, setStartInput] = React.useState(formatHms(startSeconds, true));
+  const [endInput, setEndInput] = React.useState(formatHms(endSeconds, true));
+
+  React.useEffect(() => {
+    setStartInput(formatHms(startSeconds, true));
+  }, [startSeconds]);
+  React.useEffect(() => {
+    setEndInput(formatHms(endSeconds, true));
+  }, [endSeconds]);
+
+  React.useEffect(() => {
+    setPreviewError(null);
+  }, [previewUrl]);
+
+  function readCurrentTime(): number {
+    const t = videoRef.current?.currentTime;
+    return typeof t === "number" && Number.isFinite(t) ? t : 0;
+  }
+
+  function seekPlayer(seconds: number) {
+    if (videoRef.current) {
+      videoRef.current.currentTime = Math.max(0, Math.min(durationSeconds, seconds));
+    }
+    setPlayerCurrentTime(seconds);
+  }
+
+  const clamp = (n: number) => Math.max(0, Math.min(durationSeconds, n));
+
+  function applyStart(next: number) {
+    const safe = clamp(next);
+    const safeEnd = Math.max(safe + 0.1, endSeconds);
+    onChange(safe, Math.min(durationSeconds, safeEnd));
+  }
+  function applyEnd(next: number) {
+    const safe = clamp(next);
+    const safeStart = Math.min(safe - 0.1, startSeconds);
+    onChange(Math.max(0, safeStart), safe);
+  }
+
+  function commitStartInput() {
+    const parsed = parseHms(startInput);
+    if (parsed === null) {
+      setStartInput(formatHms(startSeconds, true));
+      return;
+    }
+    applyStart(parsed);
+  }
+  function commitEndInput() {
+    const parsed = parseHms(endInput);
+    if (parsed === null) {
+      setEndInput(formatHms(endSeconds, true));
+      return;
+    }
+    applyEnd(parsed);
+  }
+
+  const startPercent = durationSeconds > 0 ? (startSeconds / durationSeconds) * 100 : 0;
+  const endPercent = durationSeconds > 0 ? (endSeconds / durationSeconds) * 100 : 100;
+  const playheadPercent = durationSeconds > 0
+    ? Math.max(0, Math.min(100, (playerCurrentTime / durationSeconds) * 100))
+    : 0;
+
+  return (
+    <section className="youtube-trim">
+      <header className="youtube-trim-head">
+        <label className="youtube-trim-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => onEnabledChange(event.target.checked)}
+          />
+          <Scissors size={14} strokeWidth={2.2} />
+          <span>Trim a section</span>
+        </label>
+        {enabled ? (
+          <small>Selection: {formatHms(Math.max(0, endSeconds - startSeconds), false)} of {formatHms(durationSeconds, false)}</small>
+        ) : (
+          <small>Optional. Toggle on to download just a segment.</small>
+        )}
+        {enabled ? (
+          <button
+            type="button"
+            className="youtube-trim-close"
+            onClick={() => onEnabledChange(false)}
+            aria-label="Close trim editor"
+            title="Close trim editor"
+          >
+            <X size={14} strokeWidth={2.4} />
+          </button>
+        ) : null}
+      </header>
+
+      {enabled ? (
+        <div className="youtube-trim-body">
+          <div className="youtube-trim-frame">
+            {previewUrl && !previewError ? (
+              <video
+                ref={videoRef}
+                src={previewUrl}
+                controls
+                preload="metadata"
+                playsInline
+                onTimeUpdate={() => setPlayerCurrentTime(readCurrentTime())}
+                onSeeked={() => setPlayerCurrentTime(readCurrentTime())}
+                onError={() => setPreviewError("Could not load preview stream — type timestamps manually below.")}
+              />
+            ) : (
+              <div className="youtube-trim-frame-fallback">
+                <FileVideo size={20} strokeWidth={2} />
+                <span>{previewError ?? "No progressive preview available for this video."}</span>
+                <small>Type the start and end times manually below.</small>
+              </div>
+            )}
+          </div>
+
+          <div className="youtube-trim-marker-bar">
+            <button
+              type="button"
+              className="youtube-trim-marker-btn is-start"
+              onClick={() => applyStart(readCurrentTime())}
+              title="Use the player's current time as the clip start"
+            >
+              <span className="youtube-trim-marker-glyph">[</span>
+              <span>Set start ({formatHms(playerCurrentTime, false)})</span>
+            </button>
+            <button
+              type="button"
+              className="youtube-trim-marker-btn is-end"
+              onClick={() => applyEnd(readCurrentTime())}
+              title="Use the player's current time as the clip end"
+            >
+              <span>Set end ({formatHms(playerCurrentTime, false)})</span>
+              <span className="youtube-trim-marker-glyph">]</span>
+            </button>
+          </div>
+
+          <div
+            className="youtube-trim-track"
+            style={{
+              ["--start" as string]: `${startPercent}%`,
+              ["--end" as string]: `${endPercent}%`,
+              ["--playhead" as string]: `${playheadPercent}%`,
+            }}
+          >
+            <input
+              className="youtube-trim-range is-start"
+              type="range"
+              min={0}
+              max={Math.max(0.001, durationSeconds)}
+              step={0.05}
+              value={startSeconds}
+              onChange={(event) => applyStart(Number(event.target.value))}
+              aria-label="Clip start"
+            />
+            <input
+              className="youtube-trim-range is-end"
+              type="range"
+              min={0}
+              max={Math.max(0.001, durationSeconds)}
+              step={0.05}
+              value={endSeconds}
+              onChange={(event) => applyEnd(Number(event.target.value))}
+              aria-label="Clip end"
+            />
+            <span className="youtube-trim-playhead" />
+          </div>
+
+          <div className="youtube-trim-fields">
+            <label>
+              <span>Start</span>
+              <input
+                value={startInput}
+                onChange={(event) => setStartInput(event.target.value)}
+                onBlur={commitStartInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitStartInput();
+                  }
+                }}
+                spellCheck={false}
+                placeholder="00:00:00.000"
+              />
+              <button
+                type="button"
+                onClick={() => applyStart(readCurrentTime())}
+                title="Use the player's current time"
+              >
+                Use player
+              </button>
+              <button
+                type="button"
+                onClick={() => seekPlayer(startSeconds)}
+                title="Seek the preview player to this start time"
+              >
+                Preview
+              </button>
+            </label>
+            <label>
+              <span>End</span>
+              <input
+                value={endInput}
+                onChange={(event) => setEndInput(event.target.value)}
+                onBlur={commitEndInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitEndInput();
+                  }
+                }}
+                spellCheck={false}
+                placeholder="00:00:00.000"
+              />
+              <button
+                type="button"
+                onClick={() => applyEnd(readCurrentTime())}
+                title="Use the player's current time"
+              >
+                Use player
+              </button>
+              <button
+                type="button"
+                onClick={() => seekPlayer(Math.max(0, endSeconds - 1))}
+                title="Seek to one second before the end"
+              >
+                Preview
+              </button>
+            </label>
+          </div>
+
+          <div className="youtube-trim-options">
+            <label>
+              <input
+                type="checkbox"
+                checked={forceKeyframes}
+                onChange={(event) => onForceKeyframesChange(event.target.checked)}
+              />
+              <span>Frame-accurate cuts</span>
+              <small>Re-encodes a small region around the boundaries so the cut lands exactly where you set it.</small>
+            </label>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function formatHms(seconds: number, withMillis: boolean): string {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const wholeSeconds = Math.floor(seconds % 60);
+  const ms = Math.round((seconds - Math.floor(seconds)) * 1000);
+  const pad = (value: number, width = 2) => value.toString().padStart(width, "0");
+  const base = `${pad(hours)}:${pad(minutes)}:${pad(wholeSeconds)}`;
+  return withMillis ? `${base}.${pad(ms, 3)}` : base;
+}
+
+function parseHms(input: string): number | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const [secondsPart, msPart] = trimmed.split(".");
+  const ms = msPart ? Number(`0.${msPart.replace(/[^0-9]/g, "")}`) : 0;
+  if (!Number.isFinite(ms)) return null;
+  const segments = secondsPart.split(":").map((segment) => segment.trim());
+  if (segments.some((segment) => segment === "" || !/^\d+$/.test(segment))) return null;
+  let hours = 0;
+  let minutes = 0;
+  let seconds = 0;
+  if (segments.length === 1) {
+    seconds = Number(segments[0]);
+  } else if (segments.length === 2) {
+    minutes = Number(segments[0]);
+    seconds = Number(segments[1]);
+  } else if (segments.length === 3) {
+    hours = Number(segments[0]);
+    minutes = Number(segments[1]);
+    seconds = Number(segments[2]);
+  } else {
+    return null;
+  }
+  const total = hours * 3600 + minutes * 60 + seconds + ms;
+  return Number.isFinite(total) ? total : null;
+}
+
+function extractYoutubeVideoId(url: string): string | null {
+  try {
+    const parsed = new URL(url.trim());
+    const host = parsed.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") {
+      const id = parsed.pathname.split("/").filter(Boolean)[0];
+      return id || null;
+    }
+    if (host.endsWith("youtube.com") || host.endsWith("youtube-nocookie.com")) {
+      const v = parsed.searchParams.get("v");
+      if (v) return v;
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      if (segments[0] === "embed" || segments[0] === "shorts" || segments[0] === "live") {
+        return segments[1] ?? null;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function DownloadQueuePanel({
@@ -4983,7 +5441,329 @@ type AppConfig = {
   theme: AppThemeId;
   theme_color_a: string;
   theme_color_b: string;
+  background_image: string;
+  background_scale: number;
+  background_offset_x: number;
+  background_offset_y: number;
+  background_dim: number;
+  background_blur: number;
 };
+
+type BackgroundState = {
+  imagePath: string;
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  dim: number;
+  blur: number;
+};
+
+const DEFAULT_BG_STATE: BackgroundState = {
+  imagePath: "",
+  scale: 1,
+  offsetX: 50,
+  offsetY: 50,
+  dim: 55,
+  blur: 0,
+};
+
+function clampBgValue(value: unknown, min: number, max: number, fallback: number) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function readBackgroundState(config: Partial<AppConfig> | null | undefined): BackgroundState {
+  return {
+    imagePath: typeof config?.background_image === "string" ? config.background_image : "",
+    scale: clampBgValue(config?.background_scale, 1, 5, DEFAULT_BG_STATE.scale),
+    offsetX: clampBgValue(config?.background_offset_x, 0, 100, DEFAULT_BG_STATE.offsetX),
+    offsetY: clampBgValue(config?.background_offset_y, 0, 100, DEFAULT_BG_STATE.offsetY),
+    dim: clampBgValue(config?.background_dim, 0, 100, DEFAULT_BG_STATE.dim),
+    blur: clampBgValue(config?.background_blur, 0, 40, DEFAULT_BG_STATE.blur),
+  };
+}
+
+function BackgroundLayer({ state }: { state: BackgroundState }) {
+  const hasImage = Boolean(state.imagePath);
+  const url = hasImage ? convertFileSrc(state.imagePath) : "";
+  return (
+    <div
+      className={`app-bg ${hasImage ? "has-image" : ""}`}
+      aria-hidden="true"
+    >
+      {hasImage && (
+        <div
+          className="app-bg-image"
+          style={{
+            backgroundImage: `url("${url}")`,
+            backgroundPosition: `${state.offsetX}% ${state.offsetY}%`,
+            transform: `scale(${state.scale})`,
+            filter: state.blur > 0 ? `blur(${state.blur}px)` : undefined,
+          }}
+        />
+      )}
+      {hasImage && (
+        <div
+          className="app-bg-overlay"
+          style={{ background: `rgba(5, 5, 7, ${state.dim / 100})` }}
+        />
+      )}
+    </div>
+  );
+}
+
+function BackgroundCustomizer({
+  initial,
+  onPreview,
+  onCommit,
+  onCancel,
+}: {
+  initial: BackgroundState;
+  onPreview: (state: BackgroundState) => void;
+  onCommit: (state: BackgroundState) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = React.useState<BackgroundState>(initial);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const frameRef = React.useRef<HTMLDivElement | null>(null);
+  const dragRef = React.useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
+  const draftRef = React.useRef(draft);
+  React.useEffect(() => { draftRef.current = draft; }, [draft]);
+
+  const update = React.useCallback((patch: Partial<BackgroundState>) => {
+    setDraft((current) => {
+      const next = { ...current, ...patch };
+      onPreview(next);
+      return next;
+    });
+  }, [onPreview]);
+
+  const previewUrl = draft.imagePath ? convertFileSrc(draft.imagePath) : "";
+
+  async function chooseImage() {
+    setError(null);
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      setBusy(true);
+      const savedPath = await invoke<string>("save_background_image", { source: selected });
+      update({
+        imagePath: savedPath,
+        scale: 1,
+        offsetX: 50,
+        offsetY: 50,
+      });
+    } catch (e) {
+      setError(readBridgeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearImage() {
+    setError(null);
+    try {
+      setBusy(true);
+      await invoke("clear_background_image");
+      update({ imagePath: "" });
+    } catch (e) {
+      setError(readBridgeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (!draft.imagePath) return;
+    const frame = frameRef.current;
+    if (!frame) return;
+    frame.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      offsetX: draftRef.current.offsetX,
+      offsetY: draftRef.current.offsetY,
+    };
+  }
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    const frame = frameRef.current;
+    if (!drag || !frame) return;
+    const rect = frame.getBoundingClientRect();
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    const scale = draftRef.current.scale;
+    const nextX = clampNumber(drag.offsetX - (dx / rect.width) * 100 / scale, 0, 100);
+    const nextY = clampNumber(drag.offsetY - (dy / rect.height) * 100 / scale, 0, 100);
+    update({ offsetX: nextX, offsetY: nextY });
+  }
+  function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    dragRef.current = null;
+    frameRef.current?.releasePointerCapture(event.pointerId);
+  }
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
+    if (!draft.imagePath) return;
+    event.preventDefault();
+    const delta = -event.deltaY * 0.0015;
+    const next = clampNumber(draftRef.current.scale + delta, 1, 5);
+    update({ scale: Number(next.toFixed(3)) });
+  }
+
+  function reset() {
+    update({ ...DEFAULT_BG_STATE, imagePath: draft.imagePath });
+  }
+
+  async function apply() {
+    setError(null);
+    setBusy(true);
+    try {
+      const fields: Array<[string, string]> = [
+        ["background_image", draft.imagePath],
+        ["background_scale", String(draft.scale)],
+        ["background_offset_x", String(draft.offsetX)],
+        ["background_offset_y", String(draft.offsetY)],
+        ["background_dim", String(Math.round(draft.dim))],
+        ["background_blur", String(Math.round(draft.blur))],
+      ];
+      for (const [key, value] of fields) {
+        await invoke<string>("set_config", { key, value });
+      }
+      onCommit(draft);
+    } catch (e) {
+      setError(readBridgeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="bg-customizer-backdrop" role="dialog" aria-label="Background customizer">
+      <div className="bg-customizer">
+        <div className="bg-customizer-header">
+          <span>Customize background</span>
+          <button type="button" className="bg-customizer-close" onClick={onCancel} aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div
+          ref={frameRef}
+          className={`bg-cropper-frame ${draft.imagePath ? "is-active" : "is-empty"}`}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onWheel={handleWheel}
+        >
+          {draft.imagePath ? (
+            <div
+              className="bg-cropper-image"
+              style={{
+                backgroundImage: `url("${previewUrl}")`,
+                backgroundPosition: `${draft.offsetX}% ${draft.offsetY}%`,
+                transform: `scale(${draft.scale})`,
+                filter: draft.blur > 0 ? `blur(${draft.blur * 0.4}px)` : undefined,
+              }}
+            />
+          ) : (
+            <div className="bg-cropper-empty">
+              <ImageIcon size={28} strokeWidth={1.6} />
+              <span>Pick an image to start</span>
+            </div>
+          )}
+          {draft.imagePath && (
+            <div
+              className="bg-cropper-overlay"
+              style={{ background: `rgba(5, 5, 7, ${draft.dim / 100})` }}
+            />
+          )}
+        </div>
+
+        <div className="bg-customizer-hint">
+          {draft.imagePath ? "Drag inside the frame to pan · scroll to zoom" : ""}
+        </div>
+
+        <div className="bg-customizer-controls">
+          <label className="bg-control">
+            <span>Zoom <em>{draft.scale.toFixed(2)}×</em></span>
+            <input
+              type="range"
+              min={1}
+              max={5}
+              step={0.01}
+              value={draft.scale}
+              onChange={(e) => update({ scale: Number(e.currentTarget.value) })}
+              disabled={!draft.imagePath}
+            />
+          </label>
+          <label className="bg-control">
+            <span>Dim <em>{Math.round(draft.dim)}%</em></span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={draft.dim}
+              onChange={(e) => update({ dim: Number(e.currentTarget.value) })}
+              disabled={!draft.imagePath}
+            />
+          </label>
+          <label className="bg-control">
+            <span>Blur <em>{Math.round(draft.blur)}px</em></span>
+            <input
+              type="range"
+              min={0}
+              max={40}
+              step={1}
+              value={draft.blur}
+              onChange={(e) => update({ blur: Number(e.currentTarget.value) })}
+              disabled={!draft.imagePath}
+            />
+          </label>
+        </div>
+
+        {error && (
+          <div className="settings-notice is-error">
+            <AlertTriangle size={16} /> {error}
+          </div>
+        )}
+
+        <div className="bg-customizer-actions">
+          <div className="bg-customizer-actions-left">
+            <button type="button" className="install-btn is-secondary" onClick={chooseImage} disabled={busy}>
+              <ImageIcon size={16} strokeWidth={2.2} />
+              <span>{draft.imagePath ? "Replace image" : "Choose image"}</span>
+            </button>
+            {draft.imagePath && (
+              <button type="button" className="install-btn is-secondary" onClick={clearImage} disabled={busy}>
+                <Trash2 size={16} strokeWidth={2.2} />
+                <span>Remove</span>
+              </button>
+            )}
+            <button type="button" className="install-btn is-secondary" onClick={reset} disabled={busy || !draft.imagePath}>
+              <span>Reset position</span>
+            </button>
+          </div>
+          <div className="bg-customizer-actions-right">
+            <button type="button" className="install-btn is-secondary" onClick={onCancel} disabled={busy}>
+              <span>Cancel</span>
+            </button>
+            <button type="button" className="install-btn is-primary" onClick={() => void apply()} disabled={busy}>
+              {busy ? <Loader2 size={16} className="audio-spin" /> : <CheckCircle2 size={16} strokeWidth={2.3} />}
+              <span>{busy ? "Saving..." : "Apply"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function SettingsPanel() {
   const [backendConfig, setBackendConfig] = React.useState<AppConfig | null>(null);
@@ -5004,6 +5784,9 @@ function SettingsPanel() {
   React.useEffect(() => {
     void refreshConfig();
     void refreshStatus();
+    const onBgSaved = () => void refreshConfig();
+    window.addEventListener("bg-saved", onBgSaved);
+    return () => window.removeEventListener("bg-saved", onBgSaved);
   }, []);
 
   React.useEffect(() => {
@@ -5081,9 +5864,8 @@ function SettingsPanel() {
     setSetupNotice(null);
     setError(null);
     try {
-      await invoke<string>("set_config", { key: "setup_type", value: mode });
-      await invoke<string>("set_config", { key: "clip_extraction_mode", value: mode });
       await invoke<string>("audio_setup", { mode });
+      await invoke<string>("set_config", { key: "clip_extraction_mode", value: mode });
       setSetupNotice(`${mode === "gpu" ? "GPU" : "CPU"} engine ready.`);
       window.dispatchEvent(new CustomEvent("clipmode-changed", { detail: { mode } }));
       await refreshConfig();
@@ -5124,8 +5906,15 @@ function SettingsPanel() {
   const settingsChecking = !status || !backendConfig;
   const gpuSetupBlocked = status ? !hasGpu : false;
   const depsReady = status?.dependencies.ready ?? false;
-  const gpuAllSet = currentMode === "gpu" && depsReady && hasGpu;
-  const cpuAllSet = currentMode === "cpu" && depsReady;
+  const torchVersion = status?.dependencies.torch_version ?? "";
+  const installedMode: "gpu" | "cpu" | null = torchVersion.includes("+cu")
+    ? "gpu"
+    : torchVersion.includes("+cpu")
+      ? "cpu"
+      : null;
+  const modeMismatch = installedMode !== null && installedMode !== currentMode;
+  const gpuAllSet = currentMode === "gpu" && installedMode === "gpu" && depsReady && hasGpu;
+  const cpuAllSet = currentMode === "cpu" && installedMode === "cpu" && depsReady;
 
   return (
     <div className="settings-panel">
@@ -5150,16 +5939,27 @@ function SettingsPanel() {
             <div className="setting-info">
               <span className="setting-label">Active mode</span>
               <span className="setting-desc">
-                {currentMode === "gpu" ? "GPU (CUDA)" : "CPU-only"}{" · "}
-                {status
-                  ? `${status.hardware.device} · ${status.hardware.provider}`
-                  : "Checking..."}
+                {installedMode === "gpu"
+                  ? "GPU (CUDA)"
+                  : installedMode === "cpu"
+                    ? "CPU-only"
+                    : status
+                      ? "Detecting engine..."
+                      : "Checking..."}
+                {status ? ` · ${status.hardware.device} · ${status.hardware.provider}` : ""}
+                {modeMismatch && installedMode
+                  ? ` · configured for ${currentMode.toUpperCase()}`
+                  : ""}
               </span>
             </div>
 
             <div className="deps-badge">
-              {depsReady ? (
-                <span className="deps-badge-ready">{currentMode.toUpperCase()} READY</span>
+              {modeMismatch && installedMode ? (
+                <span className="deps-badge-missing">
+                  {installedMode.toUpperCase()} installed · {currentMode.toUpperCase()} configured
+                </span>
+              ) : depsReady && installedMode ? (
+                <span className="deps-badge-ready">{installedMode.toUpperCase()} READY</span>
               ) : (
                 <span className="deps-badge-missing">Not installed</span>
               )}
@@ -5350,6 +6150,34 @@ function SettingsPanel() {
                 }}
                 aria-hidden="true"
               />
+            </div>
+          </div>
+
+          <div className="setting-row">
+            <div className="setting-info">
+              <span className="setting-label">Background image</span>
+              <span className="setting-desc">
+                {backendConfig?.background_image
+                  ? "An image is currently set. Open the customizer to reposition, dim, blur, or remove it."
+                  : "Replace the empty black areas of the workspace with a custom image. Opens a cropper for positioning, zoom, dim, and blur."}
+              </span>
+            </div>
+            <div className="bg-setting-actions">
+              {backendConfig?.background_image && (
+                <div
+                  className="bg-setting-thumb"
+                  aria-hidden="true"
+                  style={{ backgroundImage: `url("${convertFileSrc(backendConfig.background_image)}")` }}
+                />
+              )}
+              <button
+                type="button"
+                className="install-btn is-secondary"
+                onClick={() => window.dispatchEvent(new CustomEvent("bg-customize-open"))}
+              >
+                <ImageIcon size={16} strokeWidth={2.2} />
+                <span>{backendConfig?.background_image ? "Customize background" : "Choose background"}</span>
+              </button>
             </div>
           </div>
         </div>

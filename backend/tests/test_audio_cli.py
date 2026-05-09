@@ -16,6 +16,12 @@ class TestSetConfig(unittest.TestCase):
             "theme": "cyan",
             "theme_color_a": "#48d7ff",
             "theme_color_b": "#63e6a2",
+            "background_image": "",
+            "background_scale": 1.0,
+            "background_offset_x": 50.0,
+            "background_offset_y": 50.0,
+            "background_dim": 55,
+            "background_blur": 0,
         }
         payload.update(overrides)
         mock_emit.assert_called_once_with(payload)

@@ -199,6 +199,19 @@ struct MediaDownloadMetadata {
     source_page: Option<String>,
     format_id: Option<String>,
     folder_name: Option<String>,
+    clip_start_seconds: Option<f64>,
+    clip_end_seconds: Option<f64>,
+    force_keyframes_at_cuts: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadFormatInspection {
+    duration_seconds: Option<f64>,
+    is_live: bool,
+    video_id: Option<String>,
+    preview_url: Option<String>,
+    formats: Vec<DownloadFormat>,
 }
 
 struct DownloadIdentity {
@@ -1304,7 +1317,10 @@ async fn inspect_stream(url: String, referer: String) -> Result<Vec<StreamQualit
 }
 
 #[tauri::command]
-async fn inspect_download_formats(url: String, referer: Option<String>) -> Result<Vec<DownloadFormat>, String> {
+async fn inspect_download_formats(
+    url: String,
+    referer: Option<String>,
+) -> Result<DownloadFormatInspection, String> {
     let referer = referer.unwrap_or_default();
     log_info(
         "download.formats.start",
@@ -1335,6 +1351,9 @@ async fn download_media(
     download_dir: Option<String>,
     kind: Option<String>,
     folder_name: Option<String>,
+    clip_start_seconds: Option<f64>,
+    clip_end_seconds: Option<f64>,
+    force_keyframes_at_cuts: Option<bool>,
 ) -> Result<String, String> {
     let metadata = MediaDownloadMetadata {
         kind: kind.unwrap_or_else(|| "youtube".to_string()),
@@ -1344,6 +1363,9 @@ async fn download_media(
         source_page,
         format_id,
         folder_name,
+        clip_start_seconds,
+        clip_end_seconds,
+        force_keyframes_at_cuts: force_keyframes_at_cuts.unwrap_or(false),
     };
     let referer = referer.unwrap_or_default();
     log_info(
@@ -1358,6 +1380,9 @@ async fn download_media(
             "title": &metadata.title,
             "qualityLabel": &metadata.quality_label,
             "downloadDir": &download_dir,
+            "clipStart": metadata.clip_start_seconds,
+            "clipEnd": metadata.clip_end_seconds,
+            "forceKeyframes": metadata.force_keyframes_at_cuts,
         }),
     );
     tauri::async_runtime::spawn_blocking(move || {
@@ -1380,6 +1405,8 @@ fn normalized_referer(referer: &str) -> String {
 
 fn ytdlp_command(root: &Path, url: &str) -> Command {
     let mut command = cmd(root.join("tools").join("yt-dlp.exe"));
+    command.env("PYTHONUNBUFFERED", "1");
+    command.arg("--js-runtimes").arg("node");
     command.arg(url);
     command
 }
@@ -1506,7 +1533,10 @@ fn inspect_stream_formats(url: String, referer: String) -> Result<Vec<StreamQual
     Ok(qualities)
 }
 
-fn inspect_download_format_list(url: String, referer: String) -> Result<Vec<DownloadFormat>, String> {
+fn inspect_download_format_list(
+    url: String,
+    referer: String,
+) -> Result<DownloadFormatInspection, String> {
     let root = app_root()?;
     let mut command = ytdlp_command(&root, &url);
     command
@@ -1547,6 +1577,22 @@ fn inspect_download_format_list(url: String, referer: String) -> Result<Vec<Down
 
     let payload: Value = serde_json::from_str(stdout.trim())
         .map_err(|error| format!("Could not parse yt-dlp format metadata: {error}"))?;
+    let duration_seconds = payload.get("duration").and_then(Value::as_f64);
+    let is_live = payload
+        .get("is_live")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("live_status")
+            .and_then(Value::as_str)
+            .map(|status| matches!(status, "is_live" | "is_upcoming"))
+            .unwrap_or(false);
+    let video_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let preview_url = pick_progressive_preview_url(&payload);
     let mut formats = Vec::new();
     if let Some(items) = payload.get("formats").and_then(Value::as_array) {
         let mut seen = HashSet::new();
@@ -1631,9 +1677,49 @@ fn inspect_download_format_list(url: String, referer: String) -> Result<Vec<Down
     log_info(
         "download.formats.complete",
         "Download format inspection completed",
-        json!({ "url": &url, "formatCount": formats.len() }),
+        json!({
+            "url": &url,
+            "formatCount": formats.len(),
+            "durationSeconds": duration_seconds,
+            "isLive": is_live,
+        }),
     );
-    Ok(formats)
+    Ok(DownloadFormatInspection {
+        duration_seconds,
+        is_live,
+        video_id,
+        preview_url,
+        formats,
+    })
+}
+
+fn pick_progressive_preview_url(payload: &Value) -> Option<String> {
+    let items = payload.get("formats").and_then(Value::as_array)?;
+    let mut best: Option<(u64, String)> = None;
+    for format in items {
+        let vcodec = format.get("vcodec").and_then(Value::as_str).unwrap_or("");
+        let acodec = format.get("acodec").and_then(Value::as_str).unwrap_or("");
+        if vcodec.is_empty() || vcodec == "none" || acodec.is_empty() || acodec == "none" {
+            continue;
+        }
+        let protocol = format.get("protocol").and_then(Value::as_str).unwrap_or("");
+        if !protocol.starts_with("http") || protocol.contains("m3u8") || protocol.contains("dash") {
+            continue;
+        }
+        let ext = format.get("ext").and_then(Value::as_str).unwrap_or("");
+        if ext != "mp4" && ext != "webm" {
+            continue;
+        }
+        let url = format.get("url").and_then(Value::as_str).unwrap_or("");
+        if url.is_empty() {
+            continue;
+        }
+        let height = format.get("height").and_then(Value::as_u64).unwrap_or(0);
+        if best.as_ref().map_or(true, |(h, _)| height > *h) {
+            best = Some((height, url.to_string()));
+        }
+    }
+    best.map(|(_, url)| url)
 }
 
 fn stream_quality_label(format: &Value, height: Option<u64>, bitrate: Option<f64>) -> String {
@@ -1953,6 +2039,33 @@ fn run_stream_download(
     }
 }
 
+fn resolve_clip_range(
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Result<Option<(f64, f64)>, String> {
+    match (start, end) {
+        (None, None) => Ok(None),
+        (start_opt, end_opt) => {
+            let start = start_opt.unwrap_or(0.0);
+            let end = end_opt.ok_or_else(|| {
+                "Clip end timestamp is required when a clip start is set.".to_string()
+            })?;
+            if !start.is_finite() || !end.is_finite() {
+                return Err("Clip timestamps must be finite numbers.".to_string());
+            }
+            if start < 0.0 {
+                return Err("Clip start cannot be negative.".to_string());
+            }
+            if end <= start + 0.05 {
+                return Err(
+                    "Clip end must be at least 50ms after the clip start.".to_string()
+                );
+            }
+            Ok(Some((start, end)))
+        }
+    }
+}
+
 fn run_media_download(
     window: tauri::Window,
     job_id: Option<String>,
@@ -1982,8 +2095,28 @@ fn run_media_download(
         .map(|value| sanitize_path_segment(value, "selected format", 48))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "selected format".to_string());
-    let stable_id = short_stable_id(&[&url, metadata.format_id.as_deref().unwrap_or("best")]);
-    let file_stem = sanitize_path_segment(&format!("{title} - {quality} - {stable_id}"), &stable_id, 150);
+    let clip_range = resolve_clip_range(
+        metadata.clip_start_seconds,
+        metadata.clip_end_seconds,
+    )?;
+    let clip_suffix = clip_range
+        .as_ref()
+        .map(|(start, end)| format!("clip-{}-{}s", start.round() as i64, end.round() as i64));
+    let clip_section_spec = clip_range
+        .as_ref()
+        .map(|(start, end)| format!("*{:.3}-{:.3}", start, end));
+    let stable_id_clip_part = clip_suffix.clone().unwrap_or_default();
+    let stable_id = short_stable_id(&[
+        &url,
+        metadata.format_id.as_deref().unwrap_or("best"),
+        &stable_id_clip_part,
+    ]);
+    let file_stem_base = if let Some(suffix) = clip_suffix.as_deref() {
+        format!("{title} - {quality} - {suffix} - {stable_id}")
+    } else {
+        format!("{title} - {quality} - {stable_id}")
+    };
+    let file_stem = sanitize_path_segment(&file_stem_base, &stable_id, 150);
 
     let mut command = ytdlp_command(&root, &url);
     command
@@ -2005,6 +2138,12 @@ fn run_media_download(
         command.arg("-f").arg(format_id);
         if format_id.contains('+') {
             command.arg("--merge-output-format").arg("mp4");
+        }
+    }
+    if let Some(spec) = clip_section_spec.as_deref() {
+        command.arg("--download-sections").arg(spec);
+        if metadata.force_keyframes_at_cuts {
+            command.arg("--force-keyframes-at-cuts");
         }
     }
     command
@@ -2316,6 +2455,9 @@ fn handle_downloader_line(
         || line.starts_with("[Fixup]")
         || line.starts_with("[MoveFiles]")
         || line.starts_with("[ExtractAudio]")
+        || line.starts_with("[VideoConvertor]")
+        || line.starts_with("[VideoRemuxer]")
+        || line.starts_with("[ffmpeg]")
     {
         ("finalizing".to_string(), None, line.to_string())
     } else if line.contains("has already been downloaded") {
@@ -2326,6 +2468,12 @@ fn handle_downloader_line(
             regex_like_percent(line),
             line.to_string(),
         )
+    } else if line.starts_with("[youtube]") || line.starts_with("[info]") || line.starts_with("[generic]") {
+        ("preparing".to_string(), None, line.to_string())
+    } else if line.starts_with("WARNING:") {
+        ("preparing".to_string(), None, line.to_string())
+    } else if line.starts_with("ERROR:") {
+        ("error".to_string(), None, line.to_string())
     } else {
         return;
     };
@@ -4203,6 +4351,83 @@ async fn stop_clip_processes_for_dependency_setup(window: &tauri::Window) {
     }
 }
 
+fn background_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?
+        .join("backgrounds");
+    if !dir.exists() {
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("Could not create backgrounds directory: {error}"))?;
+    }
+    Ok(dir)
+}
+
+fn purge_background_files(dir: &Path) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("bg_") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn save_background_image(
+    app: tauri::AppHandle,
+    source: String,
+) -> Result<String, String> {
+    let dir = background_dir(&app)?;
+    let source_path = PathBuf::from(&source);
+    if !source_path.is_file() {
+        return Err(format!("Image not found: {source}"));
+    }
+    let extension = source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("img")
+        .to_lowercase();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let target = dir.join(format!("bg_{stamp}.{extension}"));
+
+    let target_for_blocking = target.clone();
+    let dir_for_blocking = dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        purge_background_files(&dir_for_blocking);
+        fs::copy(&source_path, &target_for_blocking)
+            .map_err(|error| format!("Could not copy background image: {error}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    log_info(
+        "background.image.saved",
+        "Background image saved",
+        json!({ "path": target.display().to_string() }),
+    );
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn clear_background_image(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = background_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        purge_background_files(&dir);
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    log_info("background.image.cleared", "Background image cleared", Value::Null);
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_config() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || run_audio_cli(&["config"]))
@@ -4757,6 +4982,8 @@ pub fn run() {
             clip_preview_generate_batch,
             get_config,
             set_config,
+            save_background_image,
+            clear_background_image,
             clip_extract,
             warmup_clip_server,
             install_media_sniffer,

@@ -71,7 +71,6 @@ export function SetupWizard({ onComplete }: Props) {
     });
 
     try {
-      await invoke("set_config", { key: "setup_type", value: selectedMode });
       await invoke("audio_setup", { mode: selectedMode });
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));

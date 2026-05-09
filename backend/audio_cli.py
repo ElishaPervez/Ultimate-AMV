@@ -55,21 +55,39 @@ def logs():
     emit({"type": "logs", "lines": get_terminal_logs()})
 
 
+BACKGROUND_DEFAULTS = {
+    "background_image": "",
+    "background_scale": 1.0,
+    "background_offset_x": 50.0,
+    "background_offset_y": 50.0,
+    "background_dim": 55,
+    "background_blur": 0,
+}
+
+
+def _config_payload(cfg):
+    return {
+        "type": "config",
+        "force_cpu": cfg.get("force_cpu", False),
+        "setup_type": cfg.get("setup_type", "cpu"),
+        "clip_extraction_mode": cfg.get("clip_extraction_mode", "gpu"),
+        "setup_complete": cfg.get("setup_complete", False),
+        "download_path": cfg.get("download_path", ""),
+        "theme": cfg.get("theme", "cyan"),
+        "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
+        "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
+        "background_image": cfg.get("background_image", BACKGROUND_DEFAULTS["background_image"]),
+        "background_scale": float(cfg.get("background_scale", BACKGROUND_DEFAULTS["background_scale"])),
+        "background_offset_x": float(cfg.get("background_offset_x", BACKGROUND_DEFAULTS["background_offset_x"])),
+        "background_offset_y": float(cfg.get("background_offset_y", BACKGROUND_DEFAULTS["background_offset_y"])),
+        "background_dim": int(cfg.get("background_dim", BACKGROUND_DEFAULTS["background_dim"])),
+        "background_blur": int(cfg.get("background_blur", BACKGROUND_DEFAULTS["background_blur"])),
+    }
+
+
 def show_config():
     cfg = load_config()
-    emit(
-        {
-            "type": "config",
-            "force_cpu": cfg.get("force_cpu", False),
-            "setup_type": cfg.get("setup_type", "cpu"),
-            "clip_extraction_mode": cfg.get("clip_extraction_mode", "gpu"),
-            "setup_complete": cfg.get("setup_complete", False),
-            "download_path": cfg.get("download_path", ""),
-            "theme": cfg.get("theme", "cyan"),
-            "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
-            "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
-        }
-    )
+    emit(_config_payload(cfg))
 
 
 def set_config(key, value):
@@ -106,20 +124,32 @@ def set_config(key, value):
             return 1
         cfg[key] = value.lower()
         cfg["theme"] = "custom"
+    elif key == "background_image":
+        cfg["background_image"] = value
+    elif key in {"background_scale", "background_offset_x", "background_offset_y"}:
+        try:
+            number = float(value)
+        except ValueError:
+            emit({"type": "error", "message": f"{key} must be a number"})
+            return 1
+        if key == "background_scale":
+            number = max(1.0, min(5.0, number))
+        else:
+            number = max(0.0, min(100.0, number))
+        cfg[key] = number
+    elif key in {"background_dim", "background_blur"}:
+        try:
+            number = int(float(value))
+        except ValueError:
+            emit({"type": "error", "message": f"{key} must be an integer"})
+            return 1
+        if key == "background_dim":
+            number = max(0, min(100, number))
+        else:
+            number = max(0, min(40, number))
+        cfg[key] = number
     save_config(cfg)
-    emit(
-        {
-            "type": "config",
-            "force_cpu": cfg["force_cpu"],
-            "setup_type": cfg["setup_type"],
-            "clip_extraction_mode": cfg.get("clip_extraction_mode", "gpu"),
-            "setup_complete": cfg.get("setup_complete", False),
-            "download_path": cfg.get("download_path", ""),
-            "theme": cfg.get("theme", "cyan"),
-            "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
-            "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
-        }
-    )
+    emit(_config_payload(cfg))
 
 
 def separate(input_file):
