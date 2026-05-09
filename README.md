@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app-logo.gif" alt="Ultimate AMV" width="100%">
+  <video src="https://github.com/ElishaPervez/Ultimate-AMV/raw/main/app-logo.mp4" autoplay loop muted playsinline width="100%"></video>
 </p>
 
 # Ultimate AMV
