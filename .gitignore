@@ -60,7 +60,6 @@ backend/audio_history.json
 backend/app_logs.json
 backend/logs/
 *.mp4
-!app-logo.mp4
 *.mkv
 *.mov
 *.avi
