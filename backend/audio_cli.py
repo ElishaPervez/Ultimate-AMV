@@ -1,0 +1,232 @@
+import argparse
+import json
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pathlib import Path
+
+# Ensure bundled tools (ffmpeg, ffprobe) are discoverable by audio-separator,
+# pydub, librosa, and any other library that shells out to ffmpeg via PATH.
+_tools_dir = str(Path(sys.executable).parent.parent / "tools")
+if _tools_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _tools_dir + os.pathsep + os.environ.get("PATH", "")
+
+from amv_audio.config import get_history, load_config, save_config
+from amv_audio.dependencies import ensure_feature_dependencies, repair_missing_module
+from amv_audio.hardware import get_dependency_info, get_hw_info
+from amv_audio.logs import add_log, get_terminal_logs
+from amv_audio.models import get_active_model, get_model_display_name
+from amv_audio.separator import run_separation
+from amv_audio.setup import collect_setup_plan, install_setup
+
+THEME_PRESETS = {
+    "cyan": ("#48d7ff", "#63e6a2"),
+    "mint": ("#63e6a2", "#48d7ff"),
+    "violet": ("#a98cff", "#48d7ff"),
+    "rose": ("#ff6d91", "#a98cff"),
+    "amber": ("#f4c267", "#ff6d91"),
+}
+
+
+def emit(payload):
+    print(json.dumps(payload), flush=True)
+
+
+def status():
+    hw = get_hw_info()
+    model = get_active_model(hw)
+    deps = get_dependency_info()
+    emit(
+        {
+            "type": "status",
+            "hardware": hw,
+            "dependencies": deps,
+            "model": model,
+            "model_name": get_model_display_name(model),
+        }
+    )
+
+
+def history():
+    emit({"type": "history", "items": get_history()})
+
+
+def logs():
+    emit({"type": "logs", "lines": get_terminal_logs()})
+
+
+def show_config():
+    cfg = load_config()
+    emit(
+        {
+            "type": "config",
+            "force_cpu": cfg.get("force_cpu", False),
+            "setup_type": cfg.get("setup_type", "cpu"),
+            "clip_extraction_mode": cfg.get("clip_extraction_mode", "gpu"),
+            "setup_complete": cfg.get("setup_complete", False),
+            "download_path": cfg.get("download_path", ""),
+            "theme": cfg.get("theme", "cyan"),
+            "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
+            "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
+        }
+    )
+
+
+def set_config(key, value):
+    cfg = load_config()
+    if key == "force_cpu":
+        cfg["force_cpu"] = value.lower() == "true"
+        if cfg["force_cpu"]:
+            cfg["setup_type"] = "cpu"
+    elif key == "setup_type":
+        cfg["setup_type"] = value
+        cfg["force_cpu"] = value == "cpu"
+    elif key == "clip_extraction_mode":
+        if value not in {"cpu", "gpu"}:
+            emit({"type": "error", "message": "clip_extraction_mode must be cpu or gpu"})
+            return 1
+        cfg["clip_extraction_mode"] = value
+    elif key == "setup_complete":
+        cfg["setup_complete"] = value.lower() == "true"
+    elif key == "download_path":
+        cfg["download_path"] = value
+    elif key == "theme":
+        if value not in {*THEME_PRESETS, "custom"}:
+            emit({"type": "error", "message": "theme must be cyan, mint, violet, rose, amber, or custom"})
+            return 1
+        cfg["theme"] = value
+    elif key in {"theme_color_a", "theme_color_b"}:
+        if not isinstance(value, str) or len(value) != 7 or value[0] != "#":
+            emit({"type": "error", "message": f"{key} must be a hex color like #48d7ff"})
+            return 1
+        try:
+            int(value[1:], 16)
+        except ValueError:
+            emit({"type": "error", "message": f"{key} must be a hex color like #48d7ff"})
+            return 1
+        cfg[key] = value.lower()
+        cfg["theme"] = "custom"
+    save_config(cfg)
+    emit(
+        {
+            "type": "config",
+            "force_cpu": cfg["force_cpu"],
+            "setup_type": cfg["setup_type"],
+            "clip_extraction_mode": cfg.get("clip_extraction_mode", "gpu"),
+            "setup_complete": cfg.get("setup_complete", False),
+            "download_path": cfg.get("download_path", ""),
+            "theme": cfg.get("theme", "cyan"),
+            "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
+            "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
+        }
+    )
+
+
+def separate(input_file):
+    def on_progress(stage, percent, message):
+        emit({"type": "progress", "stage": stage, "percent": percent, "message": message})
+
+    try:
+        add_log("audio.extract.start", f"Started vocal extraction for {Path(input_file).name}", details={"input": input_file})
+        cfg = load_config()
+        gpu = cfg.get("setup_type", "cpu") == "gpu" and not cfg.get("force_cpu", False)
+        ensure_feature_dependencies("audio", gpu=gpu, progress_callback=on_progress)
+        try:
+            result = run_separation(input_file, progress_callback=on_progress)
+        except ModuleNotFoundError as missing:
+            if not repair_missing_module(missing.name, gpu=gpu, progress_callback=on_progress):
+                raise
+            on_progress("dependency-repair", -1, "Retrying extraction after dependency repair...")
+            result = run_separation(input_file, progress_callback=on_progress)
+        add_log(
+            "audio.extract.complete",
+            f"Completed vocal extraction for {Path(input_file).name}",
+            details={"input": input_file, "outputs": result.get("outputs", [])},
+        )
+        emit({"type": "done", **result})
+    except Exception as exc:
+        add_log(
+            "audio.extract.error",
+            f"Vocal extraction failed for {Path(input_file).name}",
+            level="error",
+            details={"input": input_file, "error": str(exc)},
+        )
+        emit({"type": "error", "message": str(exc)})
+        return 1
+    return 0
+
+
+def setup(mode):
+    def on_progress(step, total, state, message):
+        emit({"type": "setup-progress", "step": step, "total": total, "state": state, "message": message})
+
+    try:
+        add_log("audio.setup.start", f"Started {mode.upper()} audio setup", details={"mode": mode})
+        result = install_setup(mode, progress_callback=on_progress)
+        add_log("audio.setup.complete", f"Completed {mode.upper()} audio setup", details={"mode": mode})
+        emit({"type": "setup-done", **result})
+    except Exception as exc:
+        add_log(
+            "audio.setup.error",
+            f"{mode.upper()} audio setup failed",
+            level="error",
+            details={"mode": mode, "error": str(exc)},
+        )
+        emit({"type": "setup-error", "message": str(exc)})
+        return 1
+    return 0
+
+
+def setup_plan(mode):
+    try:
+        plan = collect_setup_plan(mode)
+        emit({"type": "setup-plan", **plan})
+    except Exception as exc:
+        emit({"type": "error", "message": str(exc)})
+        return 1
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Ultimate AMV audio extraction bridge")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    sub.add_parser("history")
+    sub.add_parser("logs")
+    sub.add_parser("config")
+    set_config_parser = sub.add_parser("set-config")
+    set_config_parser.add_argument("key")
+    set_config_parser.add_argument("value")
+    setup_parser = sub.add_parser("setup")
+    setup_parser.add_argument("mode", choices=["cpu", "gpu"])
+    setup_plan_parser = sub.add_parser("setup-plan")
+    setup_plan_parser.add_argument("mode", choices=["cpu", "gpu"])
+    separate_parser = sub.add_parser("separate")
+    separate_parser.add_argument("input_file")
+    args = parser.parse_args()
+
+    if args.command == "status":
+        status()
+        return 0
+    if args.command == "history":
+        history()
+        return 0
+    if args.command == "logs":
+        logs()
+        return 0
+    if args.command == "config":
+        show_config()
+        return 0
+    if args.command == "set-config":
+        return set_config(args.key, args.value) or 0
+    if args.command == "setup":
+        return setup(args.mode)
+    if args.command == "setup-plan":
+        return setup_plan(args.mode)
+    if args.command == "separate":
+        return separate(str(Path(args.input_file)))
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

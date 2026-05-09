@@ -1,0 +1,20 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "http://127.0.0.1:1420/experiments/anikai-embed-test.html"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AniKai Embed Test",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "center": true
+      }
+    ]
+  }
+}

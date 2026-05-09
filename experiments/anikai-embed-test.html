@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AniKai Embed Test</title>
+    <style>
+      :root {
+        color: #eaf4f8;
+        background: #090c0e;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        background: #11171a;
+      }
+
+      strong {
+        white-space: nowrap;
+        font-size: 13px;
+      }
+
+      input {
+        min-width: 0;
+        height: 34px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 7px;
+        padding: 0 10px;
+        color: #eaf4f8;
+        background: rgba(255, 255, 255, 0.055);
+        outline: 0;
+      }
+
+      button,
+      a {
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(72, 215, 255, 0.42);
+        border-radius: 7px;
+        padding: 0 12px;
+        color: #48d7ff;
+        background: rgba(72, 215, 255, 0.08);
+        font: inherit;
+        font-size: 13px;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      label {
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: #9fb3be;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      input[type="checkbox"] {
+        width: 14px;
+        height: 14px;
+        min-width: 14px;
+        padding: 0;
+      }
+
+      iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: #050607;
+      }
+
+      .note {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        max-width: min(520px, calc(100vw - 24px));
+        padding: 9px 10px;
+        border: 1px solid rgba(244, 194, 103, 0.35);
+        border-radius: 8px;
+        color: #f4c267;
+        background: rgba(10, 12, 14, 0.86);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>AniKai iframe test</strong>
+      <input id="url" value="https://anikai.to" aria-label="Embed URL" />
+      <label title="Sandboxing is safer, but many video sites break inside sandboxed iframes.">
+        <input id="sandbox" type="checkbox" />
+        Sandbox
+      </label>
+      <button id="load" type="button">Load iframe</button>
+      <a id="external" href="https://anikai.to" target="_blank" rel="noreferrer">Open normal</a>
+    </header>
+
+    <iframe
+      id="frame"
+      src="https://anikai.to"
+      title="AniKai embed"
+      allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+      allowfullscreen
+    ></iframe>
+
+    <div class="note">
+      If the iframe goes blank or shows a browser/security error, the site is blocking embedded WebViews. If it loads,
+      try navigating to an episode page and starting playback.
+    </div>
+
+    <script>
+      const input = document.getElementById("url");
+      const frame = document.getElementById("frame");
+      const external = document.getElementById("external");
+      const sandbox = document.getElementById("sandbox");
+
+      function normalizeUrl(value) {
+        if (!value) return "https://anikai.to";
+        return /^https?:\/\//i.test(value) ? value : `https://${value}`;
+      }
+
+      document.getElementById("load").addEventListener("click", () => {
+        const nextUrl = normalizeUrl(input.value.trim());
+        if (sandbox.checked) {
+          frame.setAttribute(
+            "sandbox",
+            "allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-downloads"
+          );
+        } else {
+          frame.removeAttribute("sandbox");
+        }
+        frame.src = nextUrl;
+        external.href = nextUrl;
+      });
+
+      sandbox.addEventListener("change", () => {
+        document.getElementById("load").click();
+      });
+
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          document.getElementById("load").click();
+        }
+      });
+    </script>
+  </body>
+</html>

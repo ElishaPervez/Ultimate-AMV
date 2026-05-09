@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ultimate AMV — High-fidelity GUI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" src="components/atoms.jsx"></script>
+  <script type="text/babel" src="components/shell.jsx"></script>
+  <script type="text/babel" src="components/vocal.jsx"></script>
+  <script type="text/babel" src="components/views.jsx"></script>
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+
+  <script type="text/babel">
+    /* global React, ReactDOM, Titlebar, Sidebar, Statusbar, VocalExtraction, ClipHunting, AudioConversion, VideoConversion, Library, Downloads, Settings, LogsView, TweaksPanel, useTweaks, TweakSection, TweakRadio, TweakSlider, TweakSelect */
+    const { useState, useEffect } = React;
+
+    const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+      "demoState": "idle",
+      "aggression": 10,
+      "accentHue": 200,
+      "density": "comfy"
+    }/*EDITMODE-END*/;
+
+    function App() {
+      const [active, setActive] = useState("vocal");
+      const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+      // Apply accent hue live
+      useEffect(() => {
+        document.documentElement.style.setProperty("--accent", `oklch(0.78 0.13 ${tweaks.accentHue})`);
+        document.documentElement.style.setProperty("--accent-deep", `oklch(0.6 0.14 ${tweaks.accentHue + 5})`);
+        document.documentElement.style.setProperty("--accent-soft", `oklch(0.78 0.13 ${tweaks.accentHue} / 0.12)`);
+        document.documentElement.style.setProperty("--accent-line", `oklch(0.78 0.13 ${tweaks.accentHue} / 0.35)`);
+        document.documentElement.style.setProperty("--accent-text", `oklch(0.18 0.04 ${tweaks.accentHue + 10})`);
+      }, [tweaks.accentHue]);
+
+      const Pane =
+        active === "vocal" ? <VocalExtraction tweaks={tweaks} /> :
+        active === "clip" ? <ClipHunting /> :
+        active === "audio" ? <AudioConversion /> :
+        active === "video" ? <VideoConversion /> :
+        active === "library" ? <Library /> :
+        active === "downloads" ? <Downloads /> :
+        active === "logs" ? <LogsView /> :
+        active === "settings" ? <Settings /> :
+        <VocalExtraction tweaks={tweaks} />;
+
+      return (
+        <div className="app" data-screen-label={`Ultimate AMV · ${active}`}>
+          <Titlebar />
+          <div className="body">
+            <Sidebar active={active} onChange={setActive} />
+            {Pane}
+          </div>
+          <Statusbar active={active} />
+
+          <TweaksPanel title="Tweaks">
+            <TweakSection title="Demo">
+              <TweakRadio
+                label="Vocal extraction state"
+                value={tweaks.demoState}
+                onChange={(v) => setTweak("demoState", v)}
+                options={[
+                  { value: "idle", label: "Idle" },
+                  { value: "processing", label: "Processing" },
+                  { value: "complete", label: "Done" },
+                ]}
+              />
+            </TweakSection>
+            <TweakSection title="Theme">
+              <TweakSlider
+                label="Accent hue"
+                value={tweaks.accentHue}
+                min={0} max={360} step={5}
+                onChange={(v) => setTweak("accentHue", v)}
+              />
+            </TweakSection>
+            <TweakSection title="Vocal model">
+              <TweakSlider
+                label="Aggression"
+                value={tweaks.aggression}
+                min={0} max={20} step={1}
+                onChange={(v) => setTweak("aggression", v)}
+              />
+            </TweakSection>
+          </TweaksPanel>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

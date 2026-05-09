@@ -1,0 +1,20 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "https://anikai.to"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AniKai Top-Level WebView Test",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "center": true
+      }
+    ]
+  }
+}
