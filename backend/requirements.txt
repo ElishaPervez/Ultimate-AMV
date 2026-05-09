@@ -1,0 +1,6 @@
+audio-separator>=0.40.0
+pydub>=0.25.1
+numpy>=1.26.0
+typing_extensions>=4.0.0
+transnetv2-pytorch
+scenedetect[opencv]>=0.6.7

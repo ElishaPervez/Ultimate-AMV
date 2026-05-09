@@ -1,0 +1,34 @@
+{
+  "name": "ultimate-amv-script",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test src/**/*.test.ts",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "predesktop": "powershell -Command \"Remove-Item -Recurse -Force 'src-tauri/target/debug/build/ultimate-amv-script-*' -ErrorAction SilentlyContinue\"",
+    "desktop": "tauri dev"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@tauri-apps/plugin-opener": "^2.5.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "hls.js": "^1.6.16",
+    "lucide-react": "^0.561.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-virtuoso": "^4.14.1",
+    "vite": "^7.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3"
+  }
+}

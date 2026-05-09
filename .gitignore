@@ -1,0 +1,93 @@
+# Donor projects kept for reference only.
+reference/
+
+# Local agent/editor state.
+.claude/
+.vscode/
+.idea/
+.codex
+CLAUDE.md
+AGENTS.md
+
+# OS files.
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files.
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+temp.txt
+
+# Python.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+dist/
+build/
+*.spec
+
+# Node / frontend.
+node_modules/
+.npm/
+.pnpm-store/
+coverage/
+
+# Tauri / Rust.
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# App-generated media and model artifacts.
+downloads/
+output/
+outputs/
+exports/
+clips/
+episodes/
+models/
+backend/models/
+backend/config.json
+backend/audio_history.json
+backend/app_logs.json
+backend/logs/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.mp3
+*.wav
+*.flac
+*.onnx
+*.ckpt
+*.pth
+*.pt
+
+# Environment files.
+.env
+.env.*
+!.env.example
+
+# Binaries and local tools.
+tools/
+python/
+
+# Graphify output artifacts.
+graphify-out/
+**/graphify-out/
+.graphify_*
+
+# Experimental artifacts.
+experiments/*.png
+experiments/*.jpg
+experiments/*.jpeg
+experiments/debug_*/
