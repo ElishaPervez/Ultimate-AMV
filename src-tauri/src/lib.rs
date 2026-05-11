@@ -1274,6 +1274,7 @@ async fn download_stream(
     quality_label: Option<String>,
     source_page: Option<String>,
     download_dir: Option<String>,
+    custom_output_dir: Option<String>,
 ) -> Result<String, String> {
     log_info(
         "download.stream.start",
@@ -1288,6 +1289,7 @@ async fn download_stream(
             "qualityLabel": &quality_label,
             "sourcePage": &source_page,
             "downloadDir": &download_dir,
+            "customOutputDir": &custom_output_dir,
         }),
     );
     let metadata = DownloadMetadata {
@@ -1298,7 +1300,7 @@ async fn download_stream(
         source_page,
     };
     tauri::async_runtime::spawn_blocking(move || {
-        run_stream_download(window, job_id, url, referer, metadata, download_dir)
+        run_stream_download(window, job_id, url, referer, metadata, download_dir, custom_output_dir)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1795,6 +1797,24 @@ fn resolve_download_root(download_dir: Option<&str>) -> PathBuf {
     PathBuf::from("anime downloads")
 }
 
+#[tauri::command]
+fn list_anime_folders(download_dir: Option<String>) -> Result<Vec<String>, String> {
+    let root = resolve_download_root(download_dir.as_deref());
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(&root)
+        .map_err(|error| format!("Could not list downloads folder: {error}"))?;
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !name.starts_with('.') && !name.eq_ignore_ascii_case("pending"))
+        .collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    Ok(names)
+}
+
 fn download_history_path() -> PathBuf {
     app_state_dir().join("download-history.json")
 }
@@ -1843,10 +1863,18 @@ fn run_stream_download(
     referer: String,
     metadata: DownloadMetadata,
     download_dir: Option<String>,
+    custom_output_dir: Option<String>,
 ) -> Result<String, String> {
     let root = app_root()?;
     let identity = build_download_identity(&url, &referer, &metadata);
-    let output_dir = resolve_download_root(download_dir.as_deref()).join(&identity.anime_folder);
+    let custom_dir = custom_output_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let output_dir = match custom_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => resolve_download_root(download_dir.as_deref()).join(&identity.anime_folder),
+    };
     std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     log_info(
         "download.stream.prepared",
@@ -1855,6 +1883,7 @@ fn run_stream_download(
             "outputDir": output_dir.to_string_lossy(),
             "animeFolder": &identity.anime_folder,
             "fileStem": &identity.file_stem,
+            "customOutputDir": custom_dir,
         }),
     );
 
@@ -4990,6 +5019,7 @@ pub fn run() {
             download_stream,
             download_media,
             download_history,
+            list_anime_folders,
             inspect_stream,
             inspect_download_formats,
             cancel_audio,

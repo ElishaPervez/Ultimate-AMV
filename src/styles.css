@@ -3341,6 +3341,23 @@ button {
     color 160ms ease;
 }
 
+/* Single-row variant: when there's no <small> the second auto-row leaves the
+   underline floating below the text. Collapse to one row so the border-bottom
+   tracks the baseline. */
+.install-btn:not(:has(small)) {
+  grid-template-rows: auto;
+  align-items: center;
+  padding: 8px 0 9px;
+}
+.install-btn:not(:has(small)) svg {
+  grid-row: 1;
+  align-self: center;
+}
+.install-btn:not(:has(small)) span {
+  grid-row: 1;
+  line-height: 1.25;
+}
+
 .install-btn svg {
   grid-column: 1;
   grid-row: 1 / span 2;
@@ -5565,4 +5582,341 @@ button {
   .youtube-trim-fields {
     grid-template-columns: 1fr;
   }
+}
+
+/* Episode label modal — surfaces when the network sniffer downloads a
+   stream we couldn't auto-identify, so the user can pick an existing
+   anime folder (autocomplete) or save anywhere on disk. */
+.episode-label-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(3, 4, 6, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: episode-label-fade 140ms ease both;
+}
+@keyframes episode-label-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.episode-label-modal {
+  width: min(540px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 24px 20px;
+  background: rgba(11, 13, 15, 0.985);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.6);
+  animation: episode-label-pop 200ms cubic-bezier(0.2, 0.8, 0.2, 1.05) both;
+}
+@keyframes episode-label-pop {
+  from { transform: scale(0.965) translateY(8px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}
+.episode-label-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.episode-label-header h2 {
+  margin: 6px 0 4px;
+  font-size: 18px;
+  font-weight: 720;
+  letter-spacing: -0.01em;
+  color: #eef3f8;
+}
+.episode-label-header p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #8896a3;
+  max-width: 380px;
+}
+.episode-label-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cyan);
+}
+.episode-label-kicker svg {
+  color: var(--cyan);
+}
+.episode-label-close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #c7d0d8;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.episode-label-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.episode-label-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.episode-label-field label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #aeb8c1;
+}
+.episode-label-field label svg {
+  color: var(--cyan);
+}
+.episode-label-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  color: #eef3f8;
+  font-size: 14px;
+  font-weight: 600;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.episode-label-field input:focus {
+  outline: 0;
+  border-color: rgb(var(--theme-accent-rgb) / 0.6);
+  background: rgba(255, 255, 255, 0.045);
+}
+.episode-label-field input::placeholder {
+  color: #6b7480;
+  font-weight: 500;
+}
+.episode-label-anime-wrap {
+  position: relative;
+}
+.episode-label-suggestions {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: rgba(14, 16, 18, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+}
+.episode-label-suggestions li button {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #d6dde4;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.episode-label-suggestions li button:hover,
+.episode-label-suggestions li button:focus-visible {
+  background: rgb(var(--theme-accent-rgb) / 0.18);
+  color: #fff;
+  outline: 0;
+}
+.episode-label-tag {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.episode-label-tag.is-new {
+  color: rgb(var(--theme-accent-rgb));
+}
+.episode-label-tag.is-existing {
+  color: #6fbf78;
+}
+.episode-label-customdir {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.episode-label-customdir svg {
+  color: var(--cyan);
+}
+.episode-label-customdir small {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8896a3;
+}
+.episode-label-customdir strong {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #eef3f8;
+  word-break: break-all;
+  margin-top: 2px;
+}
+.episode-label-link {
+  border: 0;
+  background: transparent;
+  color: var(--cyan);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.episode-label-link:hover {
+  text-decoration: underline;
+}
+.episode-label-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.episode-label-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.episode-label-secondary,
+.episode-label-cancel,
+.episode-label-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, transform 140ms ease, border-color 140ms ease;
+}
+.episode-label-secondary {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: #c7d0d8;
+}
+.episode-label-secondary:hover {
+  border-color: rgb(var(--theme-accent-rgb) / 0.5);
+  color: #eef3f8;
+  background: rgb(var(--theme-accent-rgb) / 0.08);
+}
+.episode-label-cancel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: #aeb8c1;
+}
+.episode-label-cancel:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #eef3f8;
+}
+.episode-label-confirm {
+  border: 0;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--cyan) 72%, white 22%) 0%, var(--cyan) 100%);
+  color: var(--theme-accent-contrast);
+  box-shadow: 0 10px 24px rgb(var(--theme-accent-rgb) / 0.32);
+}
+.episode-label-confirm:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 30px rgb(var(--theme-accent-rgb) / 0.4);
+}
+.episode-label-confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  box-shadow: none;
+}
+
+/* Drag-and-drop zones — hover indicator while the OS is holding files
+   over a region wired up via useFileDrop. The overlay is pointer-events:
+   none so it never swallows the underlying click. */
+.drop-zone {
+  position: relative;
+}
+.drop-zone.is-drop-target {
+  outline: 1px dashed rgb(var(--theme-accent-rgb) / 0.55);
+  outline-offset: -6px;
+  border-radius: 12px;
+}
+.drop-zone-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border-radius: inherit;
+  background: rgb(var(--theme-accent-rgb) / 0.12);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1.5px dashed rgb(var(--theme-accent-rgb) / 0.75);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.985);
+  transition:
+    opacity 140ms ease,
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1.05);
+}
+.drop-zone.is-drop-target .drop-zone-overlay {
+  opacity: 1;
+  transform: scale(1);
+}
+.drop-zone-overlay svg {
+  color: var(--cyan);
+  filter: drop-shadow(0 6px 18px rgb(var(--theme-accent-rgb) / 0.45));
+}
+.drop-zone-overlay small {
+  font-size: 12px;
+  font-weight: 600;
+  color: #aeb8c1;
+}
+
+/* Cropper frame becomes interactive when empty so clicking it opens the
+   picker; the cursor hint mirrors the new affordance. */
+.bg-cropper-frame.is-empty {
+  cursor: pointer;
+}
+.bg-cropper-frame.is-empty:hover .bg-cropper-empty {
+  color: #c7d0d8;
+}
+.bg-cropper-empty {
+  transition: color 140ms ease;
 }

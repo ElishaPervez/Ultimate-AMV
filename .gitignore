@@ -14,9 +14,10 @@ AGENTS.md
 Thumbs.db
 desktop.ini
 
-# Logs and temporary files.
+# Logs and temporary files. `logs/` is anchored so it doesn't shadow
+# src/features/logs/ — the rule below already covers backend/logs/.
 *.log
-logs/
+/logs/
 tmp/
 temp/
 *.tmp
@@ -51,7 +52,9 @@ downloads/
 output/
 outputs/
 exports/
-clips/
+# Anchored — the runtime clip output dir lives at the project root, but
+# src/features/clips/ holds source code and must stay tracked.
+/clips/
 episodes/
 models/
 backend/models/

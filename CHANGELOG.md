@@ -5,6 +5,37 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-05-11
+
+### Added
+- **Drag-and-drop files anywhere they're accepted.** Drop video or
+  audio onto Vocal Extraction, Any To Audio, Clip Hunting, or Video To
+  Video and they'll load just like the picker. Drop an image onto the
+  background cropper in Settings to set or replace it. Hovering with
+  files shows a clear drop target so you know it'll catch.
+- **Custom save folder per AniKai download.** When the sniffer catches
+  a stream we couldn't auto-name, a labeling prompt asks for the anime
+  title and episode number — with autocomplete over folders you've
+  already used — and lets you optionally save into any folder on disk
+  instead of the default `<downloads>/<anime>` layout.
+
+### Changed
+- **Frontend refactored from a 6,616-line `main.tsx` to a 30-line
+  entry mount.** Every panel, card, helper, and type now lives in a
+  feature folder (`src/shell/`, `src/features/{audio,clips,downloader,
+  logs,settings,video}/`, `src/lib/`, `src/types/`). One component per
+  file, no barrel files, shared helpers consolidated into `src/lib/`.
+  Behavior is identical — this is purely a maintainability upgrade
+  that makes future features cheaper to add and easier to review.
+- **Background cropper can be opened by clicking it.** The empty frame
+  is now a click-or-Enter target in addition to the "Pick an image"
+  button — matches the new drop behavior.
+
+### Removed
+- **Dead `AnimeBrowser` panel** and the 5 unused helpers + 2 unused
+  types + 6 stale lucide imports that came with it. Nothing was
+  rendering it; confirmed dead before deleting.
+
 ## [0.3.0] — 2026-05-10
 
 ### Added
@@ -58,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Self-contained first-run setup wizard that installs PyTorch, audio-
   separator, and ONNX Runtime into a bundled Python environment.
 
+[0.4.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.1.0
