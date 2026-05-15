@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "clip_extraction_mode": "cpu",
     "setup_complete": False,
     "download_path": "",
+    "provider_url": "https://anikai.to",
     "theme": "cyan",
     "theme_color_a": "#48d7ff",
     "theme_color_b": "#63e6a2",

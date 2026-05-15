@@ -754,7 +754,7 @@ fn is_anikai_watch_document_url(url: &str) -> bool {
         && !lower.contains(".mp4")
 }
 
-fn is_allowed_anikai_navigation(url: &str) -> bool {
+fn is_navigation_allowed(url: &str, allowed_hosts: &[String]) -> bool {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("about:") || lower.starts_with("data:") || lower.starts_with("blob:") {
@@ -769,7 +769,13 @@ fn is_allowed_anikai_navigation(url: &str) -> bool {
         .split(['/', '?', '#', ':'])
         .next()
         .unwrap_or_default();
-    host == "aniwaves.ru" || host.ends_with(".aniwaves.ru") || host == "anikai.to" || host.ends_with(".anikai.to") || host == "aniwave.ru" || host.ends_with(".aniwave.ru")
+    allowed_hosts.iter().any(|allowed| {
+        let allowed = allowed.trim().to_ascii_lowercase();
+        if allowed.is_empty() {
+            return false;
+        }
+        host == allowed || host.ends_with(&format!(".{}", allowed))
+    })
 }
 
 fn parse_anikai_sync_data(source: &str, fallback_url: &str) -> Option<ProviderPageIdentity> {
@@ -882,6 +888,7 @@ fn read_stream_to_string(content: &windows::Win32::System::Com::IStream) -> Opti
 fn install_webview2_media_sniffer(
     app: tauri::AppHandle,
     webview: tauri::Webview,
+    allowed_hosts: Vec<String>,
 ) -> Result<(), String> {
     webview
         .with_webview(move |platform| unsafe {
@@ -1068,6 +1075,7 @@ fn install_webview2_media_sniffer(
             }
 
             let app_for_navigation = app.clone();
+            let allowed_hosts_for_navigation = allowed_hosts.clone();
             let navigation_handler =
                 NavigationStartingEventHandler::create(Box::new(move |_, args| {
                     let Some(args) = args else { return Ok(()) };
@@ -1075,7 +1083,9 @@ fn install_webview2_media_sniffer(
                     let mut raw_uri = PWSTR::null();
                     args.Uri(&mut raw_uri)?;
                     if let Ok(url) = raw_uri.to_string() {
-                        if !is_allowed_anikai_navigation(&url) {
+                        if !allowed_hosts_for_navigation.is_empty()
+                            && !is_navigation_allowed(&url, &allowed_hosts_for_navigation)
+                        {
                             let _ = args.SetCancel(true);
                             log_warn(
                                 "browser.navigation.blocked",
@@ -1084,7 +1094,7 @@ fn install_webview2_media_sniffer(
                             );
                             let _ = app_for_navigation.emit(
                                 "media-sniffer-error",
-                                format!("Blocked navigation outside AniKai: {url}"),
+                                format!("Blocked navigation outside allowed hosts: {url}"),
                             );
                             return Ok(());
                         }
@@ -1111,6 +1121,7 @@ fn install_webview2_media_sniffer(
 fn install_webview2_media_sniffer(
     _app: tauri::AppHandle,
     _webview: tauri::Webview,
+    _allowed_hosts: Vec<String>,
 ) -> Result<(), String> {
     Err("Media sniffing is currently Windows/WebView2-only.".to_string())
 }
@@ -1229,17 +1240,22 @@ async fn frontend_log(
 }
 
 #[tauri::command]
-async fn install_media_sniffer(app: tauri::AppHandle, label: String) -> Result<(), String> {
+async fn install_media_sniffer(
+    app: tauri::AppHandle,
+    label: String,
+    allowed_hosts: Option<Vec<String>>,
+) -> Result<(), String> {
+    let allowed_hosts = allowed_hosts.unwrap_or_default();
     log_info(
         "browser.sniffer.install.start",
         "Installing media sniffer",
-        json!({ "label": label }),
+        json!({ "label": label, "allowed_hosts": allowed_hosts }),
     );
     clear_media_sniffer_state();
     let webview = app
         .get_webview(&label)
-        .ok_or_else(|| format!("Could not find AniKai WebView '{label}'"))?;
-    let result = install_webview2_media_sniffer(app, webview);
+        .ok_or_else(|| format!("Could not find provider WebView '{label}'"))?;
+    let result = install_webview2_media_sniffer(app, webview, allowed_hosts);
     match &result {
         Ok(_) => log_info(
             "browser.sniffer.install.complete",

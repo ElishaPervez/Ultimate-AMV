@@ -5,6 +5,38 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-05-16
+
+### Added
+- **Custom URL provider for anime downloads.** The provider dropdown in
+  the Anime Download panel now has a third option, "Custom URL", that
+  unlocks the address bar so you can point the built-in browser at any
+  anime site — not just AniKai or AniWaves. Enter a URL and press Enter
+  (or click Go) to load it. Host-restricted navigation is disabled in
+  custom mode, so the page can navigate freely within whatever site
+  you pointed it at. The stream sniffer still works the same — open an
+  episode, hit play, and the captured stream lands in the queue.
+- **Provider selection persists across sessions.** The selected
+  provider (preset or custom URL) is saved to config and restored on
+  next launch, so you don't have to reselect every time you open the
+  app.
+
+### Fixed
+- **"Confirm episode" modal no longer hides behind the video player.**
+  When the sniffer couldn't auto-detect the anime title or episode
+  number (which is the default case on custom URLs and miruro-style
+  sites), clicking Download would open a labeling modal that was
+  completely invisible because the native child WebView rendered on
+  top of the HTML overlay. The WebView now temporarily moves off-screen
+  while the modal is open and snaps back in place when it closes.
+- **Browser page no longer disappears after confirming the modal.** A
+  follow-on regression where the WebView would stay parked off-screen
+  after the modal dismissed — Tauri's child WebView needs a multi-attempt
+  position/size sync plus a one-pixel resize nudge to reliably redraw
+  after being moved. The lifecycle effect now fires that exact sequence
+  on modal close, so the page restores the moment you confirm the
+  episode.
+
 ## [0.5.0] — 2026-05-14
 
 ### Added
@@ -207,6 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Self-contained first-run setup wizard that installs PyTorch, audio-
   separator, and ONNX Runtime into a bundled Python environment.
 
+[0.6.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.5.0
 [0.4.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.4.1
 [0.4.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.4.0

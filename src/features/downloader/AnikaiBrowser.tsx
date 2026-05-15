@@ -30,11 +30,43 @@ type PendingLabeledDownload = {
   initialEpisode: string;
 };
 
-function isAllowedAnikaiUrl(value: string): boolean {
+type ProviderPreset = {
+  id: "anikai" | "aniwaves";
+  label: string;
+  url: string;
+  hosts: string[];
+};
+
+const PROVIDER_PRESETS: ProviderPreset[] = [
+  { id: "anikai", label: "AniKai", url: "https://anikai.to", hosts: ["anikai.to"] },
+  { id: "aniwaves", label: "AniWaves", url: "https://aniwaves.ru", hosts: ["aniwaves.ru", "aniwave.ru"] },
+];
+
+const DEFAULT_PROVIDER_URL = PROVIDER_PRESETS[0].url;
+
+function urlHost(value: string): string | null {
+  try {
+    return new URL(normalizeUrl(value)).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function presetForUrl(value: string): ProviderPreset | null {
+  const host = urlHost(value);
+  if (!host) return null;
+  return PROVIDER_PRESETS.find((preset) =>
+    preset.hosts.some((allowed) => host === allowed || host.endsWith(`.${allowed}`)),
+  ) ?? null;
+}
+
+function isHostAllowed(value: string, hosts: string[]): boolean {
+  if (hosts.length === 0) return true;
   try {
     const url = new URL(normalizeUrl(value));
-    const allowed = ["aniwaves.ru", "aniwave.ru", "anikai.to"];
-    return (url.protocol === "https:" || url.protocol === "http:") && allowed.some(domain => url.hostname === domain || url.hostname.endsWith(`.${domain}`));
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    const host = url.hostname.toLowerCase();
+    return hosts.some((domain) => host === domain || host.endsWith(`.${domain}`));
   } catch {
     return false;
   }
@@ -169,11 +201,15 @@ export function AnikaiBrowser({
   const captureStateRef = React.useRef<CaptureState>("armed");
   const episodeLabelTouchedRef = React.useRef(false);
   const seenCandidateUrlsRef = React.useRef<Set<string>>(new Set());
-  const [providerUrl, setProviderUrl] = React.useState("https://anikai.to");
-  const [address, setAddress] = React.useState("https://anikai.to");
-  const [loadedUrl, setLoadedUrl] = React.useState("https://anikai.to");
-  const [currentPageUrl, setCurrentPageUrl] = React.useState("https://anikai.to");
+  const [providerMode, setProviderMode] = React.useState<"preset" | "custom">("preset");
+  const [providerPresetId, setProviderPresetId] = React.useState<ProviderPreset["id"]>("anikai");
+  const [address, setAddress] = React.useState(DEFAULT_PROVIDER_URL);
+  const [loadedUrl, setLoadedUrl] = React.useState<string | null>(null);
+  const [currentPageUrl, setCurrentPageUrl] = React.useState(DEFAULT_PROVIDER_URL);
   const [reloadKey, setReloadKey] = React.useState(0);
+  const configLoadedRef = React.useRef(false);
+  const lastSavedUrlRef = React.useRef<string | null>(null);
+  const allowedHostsRef = React.useRef<string[]>(PROVIDER_PRESETS[0].hosts);
   const [status, setStatus] = React.useState<"loading" | "ready" | "error">("loading");
   const [message, setMessage] = React.useState("Starting provider view...");
   const [mediaCandidates, setMediaCandidates] = React.useState<MediaCandidate[]>([]);
@@ -198,15 +234,52 @@ export function AnikaiBrowser({
     void invoke<string>("get_config")
       .then((raw) => parseBridgePayload<AppConfig>(raw))
       .then((config) => {
-        if (!cancelled) setDownloadDir(config.download_path || null);
+        if (cancelled) return;
+        setDownloadDir(config.download_path || null);
+        const savedUrl = (config.provider_url || "").trim() || DEFAULT_PROVIDER_URL;
+        const preset = presetForUrl(savedUrl);
+        if (preset) {
+          setProviderMode("preset");
+          setProviderPresetId(preset.id);
+          allowedHostsRef.current = preset.hosts;
+        } else {
+          setProviderMode("custom");
+          allowedHostsRef.current = [];
+        }
+        setAddress(savedUrl);
+        setCurrentPageUrl(savedUrl);
+        setLoadedUrl(savedUrl);
+        lastSavedUrlRef.current = savedUrl;
+        configLoadedRef.current = true;
       })
       .catch(() => {
-        if (!cancelled) setDownloadDir(null);
+        if (cancelled) return;
+        setDownloadDir(null);
+        const fallback = DEFAULT_PROVIDER_URL;
+        allowedHostsRef.current = PROVIDER_PRESETS[0].hosts;
+        setLoadedUrl(fallback);
+        lastSavedUrlRef.current = fallback;
+        configLoadedRef.current = true;
       });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!configLoadedRef.current) return;
+    if (!currentPageUrl) return;
+    if (currentPageUrl === lastSavedUrlRef.current) return;
+    const handle = window.setTimeout(() => {
+      lastSavedUrlRef.current = currentPageUrl;
+      void invoke("set_config", { key: "provider_url", value: currentPageUrl }).catch((error) => {
+        logFrontend("warn", "frontend.provider.url.save.failed", "Could not persist provider URL", {
+          error: safeLogValue(error),
+        });
+      });
+    }, 1500);
+    return () => window.clearTimeout(handle);
+  }, [currentPageUrl]);
 
   React.useEffect(() => {
     captureStateRef.current = captureState;
@@ -273,19 +346,28 @@ export function AnikaiBrowser({
     try { await webview.setSize(new LogicalSize(1, 1)); } catch { }
   }, []);
 
+  const stashWebviewOffscreen = React.useCallback(async () => {
+    const webview = webviewRef.current;
+    if (!webview) return;
+    try { await webview.setSize(new LogicalSize(1, 1)); } catch { }
+    try { await webview.setPosition(new LogicalPosition(-32000, -32000)); } catch { }
+  }, []);
+
   React.useEffect(() => {
     const webview = webviewRef.current;
     if (!webview) return;
 
-    if (active) {
-      void webview.show().then(() => syncWebviewBounds()).catch(() => undefined);
-    } else {
+    if (!active) {
       void parkWebview().catch(() => undefined);
+    } else if (labelModalState) {
+      void stashWebviewOffscreen().catch(() => undefined);
+    } else {
+      void webview.show().then(() => syncWebviewBounds()).catch(() => undefined);
     }
-  }, [active, parkWebview, syncWebviewBounds]);
+  }, [active, labelModalState, parkWebview, stashWebviewOffscreen, syncWebviewBounds]);
 
   React.useEffect(() => {
-    if (!active) return;
+    if (!active || labelModalState) return;
 
     const timers = [0, 80, 180, 320, 420].map((delay) =>
       window.setTimeout(() => {
@@ -300,7 +382,7 @@ export function AnikaiBrowser({
       timers.forEach(window.clearTimeout);
       window.clearTimeout(nudgeTimer);
     };
-  }, [active, sidebarExpanded, nudgeWebviewViewport, syncWebviewBounds]);
+  }, [active, sidebarExpanded, labelModalState, nudgeWebviewViewport, syncWebviewBounds]);
 
   function resetCaptureState(nextMessage = "Stream detector armed. Start playback to catch the media URL.") {
     inspectRunRef.current += 1;
@@ -365,8 +447,8 @@ export function AnikaiBrowser({
 
     void listen<ProviderNavigation>("provider-navigation", (event) => {
       if (captureStateRef.current === "downloading") return;
-      if (!isAllowedAnikaiUrl(event.payload.url)) {
-        setSnifferMessage("Blocked navigation outside AniKai.");
+      if (!isHostAllowed(event.payload.url, allowedHostsRef.current)) {
+        setSnifferMessage("Blocked navigation outside the active provider.");
         return;
       }
       setAddress(event.payload.url);
@@ -392,15 +474,18 @@ export function AnikaiBrowser({
   }, []);
 
   React.useEffect(() => {
+    if (loadedUrl == null) return;
+    const targetUrl = loadedUrl;
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
     const createRun = createRunRef.current + 1;
     createRunRef.current = createRun;
     const label = `anikai-provider-${createRun}`;
+    const allowedHostsForRun = [...allowedHostsRef.current];
 
     async function createProviderView() {
       setStatus("loading");
-      setMessage("Loading AniKai inside the app...");
+      setMessage("Loading provider page inside the app...");
       resetCaptureState("Loading page. Start playback after it opens.");
       try {
         const frame = frameRef.current;
@@ -418,7 +503,7 @@ export function AnikaiBrowser({
 
         const rect = frame.getBoundingClientRect();
         const webview = new Webview(getCurrentWindow(), label, {
-          url: normalizeUrl(loadedUrl),
+          url: normalizeUrl(targetUrl),
           x: Math.round(rect.left),
           y: Math.round(rect.top),
           width: Math.max(1, Math.round(rect.width)),
@@ -433,7 +518,7 @@ export function AnikaiBrowser({
         webview.once("tauri://created", () => {
           if (cancelled || createRunRef.current !== createRun || webviewRef.current !== webview) return;
           setStatus("ready");
-          setMessage("AniKai is running in a native WebView.");
+          setMessage("Provider page is running in a native WebView.");
           if (activeRef.current) {
             void syncWebviewBounds();
             window.setTimeout(() => {
@@ -447,14 +532,14 @@ export function AnikaiBrowser({
           } else {
             void parkWebview().catch(() => undefined);
           }
-          void invoke("install_media_sniffer", { label }).catch((error) => {
+          void invoke("install_media_sniffer", { label, allowedHosts: allowedHostsForRun }).catch((error) => {
             setSnifferMessage(`Stream detector error: ${String(error)}`);
           });
         });
         webview.once("tauri://error", (event) => {
           if (cancelled || createRunRef.current !== createRun || webviewRef.current !== webview) return;
           setStatus("ready");
-          setMessage(String(event.payload ?? "AniKai is visible; WebView reported non-blocking setup noise."));
+          setMessage(String(event.payload ?? "Provider page is visible; WebView reported non-blocking setup noise."));
         });
 
         resizeObserver = new ResizeObserver(() => {
@@ -671,26 +756,76 @@ export function AnikaiBrowser({
           {status === "ready" ? "Live" : status === "loading" ? "Loading" : "Error"}
         </div>
         <select
-          value={providerUrl}
+          value={providerMode === "custom" ? "__custom__" : providerPresetId}
           onChange={(e) => {
-            const url = e.target.value;
-            setProviderUrl(url);
-            setAddress(url);
-            setLoadedUrl(url);
+            const next = e.target.value;
+            if (next === "__custom__") {
+              setProviderMode("custom");
+              allowedHostsRef.current = [];
+              setLoadedUrl(currentPageUrl);
+              setReloadKey((k) => k + 1);
+              return;
+            }
+            const preset = PROVIDER_PRESETS.find((entry) => entry.id === next);
+            if (!preset) return;
+            setProviderMode("preset");
+            setProviderPresetId(preset.id);
+            allowedHostsRef.current = preset.hosts;
+            setAddress(preset.url);
+            setCurrentPageUrl(preset.url);
+            setLoadedUrl(preset.url);
             setReloadKey((k) => k + 1);
           }}
           className="provider-select"
         >
-          <option value="https://anikai.to">AniKai</option>
-          <option value="https://aniwaves.ru">AniWaves</option>
+          {PROVIDER_PRESETS.map((preset) => (
+            <option key={preset.id} value={preset.id}>
+              {preset.label}
+            </option>
+          ))}
+          <option value="__custom__">Custom URL</option>
         </select>
         <input
           value={address}
           aria-label="Provider address"
-          className="locked-provider-address"
-          readOnly
+          className={providerMode === "custom" ? "provider-address" : "locked-provider-address"}
+          readOnly={providerMode !== "custom"}
           spellCheck={false}
+          placeholder={providerMode === "custom" ? "https://your-anime-site.example/watch/..." : undefined}
+          onChange={providerMode === "custom" ? (event) => setAddress(event.target.value) : undefined}
+          onKeyDown={
+            providerMode === "custom"
+              ? (event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const next = normalizeUrl(address.trim());
+                    if (!next) return;
+                    allowedHostsRef.current = [];
+                    resetCaptureState("Loading page. Start playback after it opens.");
+                    setCurrentPageUrl(next);
+                    setLoadedUrl(next);
+                    setReloadKey((value) => value + 1);
+                  }
+                }
+              : undefined
+          }
         />
+        {providerMode === "custom" && (
+          <button
+            type="button"
+            onClick={() => {
+              const next = normalizeUrl(address.trim());
+              if (!next) return;
+              allowedHostsRef.current = [];
+              resetCaptureState("Loading page. Start playback after it opens.");
+              setCurrentPageUrl(next);
+              setLoadedUrl(next);
+              setReloadKey((value) => value + 1);
+            }}
+          >
+            Go
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {

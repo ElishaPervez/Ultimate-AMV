@@ -25,6 +25,7 @@ export type AppConfig = {
   clip_extraction_mode: "cpu" | "gpu";
   setup_complete: boolean;
   download_path: string;
+  provider_url: string;
   theme: AppThemeId;
   theme_color_a: string;
   theme_color_b: string;

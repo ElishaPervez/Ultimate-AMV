@@ -1124,8 +1124,8 @@ button {
 
 .provider-toolbar {
   min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
@@ -1133,6 +1133,10 @@ button {
   background:
     linear-gradient(90deg, rgb(var(--theme-accent-rgb) / 0.08), transparent 36%),
     rgba(12, 15, 17, 0.96);
+}
+
+.provider-toolbar input {
+  flex: 1 1 200px;
 }
 
 .provider-status {
@@ -1194,12 +1198,17 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
   padding: 0 10px;
-  color: rgba(198, 208, 216, 0.68);
+  color: #eef3f8;
   background: rgba(255, 255, 255, 0.028);
   outline: none;
 }
 
+.provider-toolbar input:focus {
+  border-color: var(--accent-border);
+}
+
 .provider-toolbar input.locked-provider-address {
+  color: rgba(198, 208, 216, 0.68);
   cursor: default;
   user-select: none;
 }

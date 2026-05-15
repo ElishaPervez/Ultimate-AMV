@@ -69,6 +69,7 @@ def _config_payload(cfg):
         "clip_extraction_mode": cfg.get("clip_extraction_mode", "gpu"),
         "setup_complete": cfg.get("setup_complete", False),
         "download_path": cfg.get("download_path", ""),
+        "provider_url": cfg.get("provider_url", "https://anikai.to"),
         "theme": cfg.get("theme", "cyan"),
         "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
         "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
@@ -104,6 +105,8 @@ def set_config(key, value):
         cfg["setup_complete"] = value.lower() == "true"
     elif key == "download_path":
         cfg["download_path"] = value
+    elif key == "provider_url":
+        cfg["provider_url"] = value
     elif key == "theme":
         if value not in {*THEME_PRESETS, "custom"}:
             emit({"type": "error", "message": "theme must be cyan, mint, violet, rose, amber, or custom"})
