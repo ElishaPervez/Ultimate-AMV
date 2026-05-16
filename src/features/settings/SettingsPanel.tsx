@@ -470,10 +470,6 @@ export function SettingsPanel() {
             </div>
           )}
         </div>
-
-        <div style={{ textAlign: "center", opacity: 0.4, fontSize: 12, padding: "12px 0" }}>
-          monkey
-        </div>
       </div>
     </div>
   );

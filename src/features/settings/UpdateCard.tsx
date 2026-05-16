@@ -1,7 +1,7 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { AlertTriangle, CheckCircle2, Download, Loader2, RefreshCw, RotateCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, Loader2, RefreshCw } from "lucide-react";
 import { formatBytes } from "../../lib/format";
 import { logFrontend, safeLogValue } from "../../lib/log";
 
@@ -85,7 +85,7 @@ export function UpdateCard() {
     }
   }
 
-  async function downloadUpdate() {
+  async function downloadAndInstall() {
     const handle = updateRef.current;
     if (!handle) return;
     const version = handle.version || "";
@@ -105,22 +105,10 @@ export function UpdateCard() {
         }
         setState({ kind: "downloading", version, received, total });
       });
-      setState({ kind: "ready", version });
       logFrontend("info", "updater.download.complete", "Update download complete", { version });
-    } catch (error) {
-      const message = readableUpdaterError(error);
-      setState({ kind: "error", message });
-      logFrontend("error", "updater.download.error", "Update download failed", {
-        error: safeLogValue(error),
-      });
-    }
-  }
+      setState({ kind: "ready", version });
 
-  async function applyUpdate() {
-    const handle = updateRef.current;
-    if (!handle) return;
-    logFrontend("info", "updater.install.start", "Applying update; app will exit");
-    try {
+      logFrontend("info", "updater.install.start", "Applying update; app will exit");
       // Drop KILL_ON_JOB_CLOSE on the Windows Job Object and kill Python
       // sidecars BEFORE the installer spawns. Without this, install()'s
       // child installer inherits our job and dies the instant we exit —
@@ -136,7 +124,7 @@ export function UpdateCard() {
     } catch (error) {
       const message = readableUpdaterError(error);
       setState({ kind: "error", message });
-      logFrontend("error", "updater.install.error", "Update install failed", {
+      logFrontend("error", "updater.download.error", "Update download or install failed", {
         error: safeLogValue(error),
       });
     }
@@ -235,12 +223,12 @@ export function UpdateCard() {
           <button
             type="button"
             className="install-btn is-primary"
-            onClick={() => void downloadUpdate()}
-            title={`Download Ultimate AMV v${state.version}`}
+            onClick={() => void downloadAndInstall()}
+            title={`Download and install Ultimate AMV v${state.version}, then restart`}
           >
             <Download size={16} strokeWidth={2.3} />
-            <span>Download v{state.version}</span>
-            <small>Updates from {versionLabel}</small>
+            <span>Download and install update</span>
+            <small>Updates {versionLabel} → v{state.version}</small>
           </button>
         )}
 
@@ -248,20 +236,15 @@ export function UpdateCard() {
           <button type="button" className="install-btn is-primary" disabled>
             <Loader2 size={16} className="audio-spin" />
             <span>Downloading {progressPercent(state.received, state.total)}%</span>
-            <small>Please keep the app open</small>
+            <small>App will restart automatically</small>
           </button>
         )}
 
         {state.kind === "ready" && (
-          <button
-            type="button"
-            className="install-btn is-primary"
-            onClick={() => void applyUpdate()}
-            title="Quit, install the new version, and relaunch"
-          >
-            <RotateCw size={16} strokeWidth={2.3} />
-            <span>Restart to apply update</span>
-            <small>Installs v{state.version}</small>
+          <button type="button" className="install-btn is-primary" disabled>
+            <Loader2 size={16} className="audio-spin" />
+            <span>Installing v{state.version}...</span>
+            <small>App will restart in a moment</small>
           </button>
         )}
       </div>
@@ -269,12 +252,6 @@ export function UpdateCard() {
       {state.kind === "up-to-date" && (
         <div className="settings-notice is-success">
           <CheckCircle2 size={16} /> You're on the latest version ({versionLabel}).
-        </div>
-      )}
-
-      {state.kind === "ready" && (
-        <div className="settings-notice is-success">
-          <CheckCircle2 size={16} /> Update v{state.version} ready. Click Restart to install.
         </div>
       )}
 

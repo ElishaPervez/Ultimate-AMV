@@ -1,6 +1,6 @@
 [package]
 name = "ultimate-amv-script"
-version = "0.7.1"
+version = "0.7.2"
 description = "Ultimate AMV desktop workspace"
 authors = ["ElishaPervez"]
 edition = "2021"
