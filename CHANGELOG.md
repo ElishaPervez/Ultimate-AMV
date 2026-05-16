@@ -5,7 +5,15 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.2] — 2026-05-16
+## [0.7.3] — 2026-05-16
+
+### Added
+- **Startup update check + top-right toast.** The app now silently pings
+  the release feed on every launch. If a newer version is available, a
+  small toast appears in the top-right corner with the new version and
+  a single "Download and install" button. Dismiss the toast or click
+  the button to download, install, and auto-restart in one go. Nothing
+  appears if the app is already on the latest version.
 
 ### Changed
 - **Update card collapses to a single button.** "Download" and "Restart
@@ -13,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   action. Click it once and the app downloads the new installer,
   silently applies it, and restarts on its own — no second prompt.
 
+[0.7.3]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.7.3
 [0.7.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.7.2
 
 ## [0.7.0] — 2026-05-16

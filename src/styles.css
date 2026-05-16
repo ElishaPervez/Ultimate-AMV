@@ -341,6 +341,107 @@ button {
   background: #d63f4d;
 }
 
+.update-toast {
+  position: fixed;
+  top: 48px;
+  right: 16px;
+  z-index: 19;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  min-width: 280px;
+  max-width: 360px;
+  background: rgba(14, 16, 20, 0.96);
+  border: 1px solid rgba(var(--theme-accent-rgb), 0.35);
+  border-radius: 10px;
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(var(--theme-accent-rgb), 0.08);
+  color: #e7edf3;
+  animation: update-toast-in 220ms ease-out;
+}
+
+@keyframes update-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.update-toast-dismiss {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: rgba(199, 208, 216, 0.6);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.update-toast-dismiss:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.update-toast-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.update-toast-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgb(var(--theme-accent-rgb));
+  letter-spacing: 0.02em;
+}
+
+.update-toast-version {
+  font-size: 13px;
+  color: #c7d0d8;
+}
+
+.update-toast-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid rgba(var(--theme-accent-rgb), 0.55);
+  background: rgba(var(--theme-accent-rgb), 0.14);
+  color: rgb(var(--theme-accent-rgb));
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.update-toast-action:hover {
+  background: rgba(var(--theme-accent-rgb), 0.22);
+  color: #ffffff;
+}
+
+.update-toast-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #c7d0d8;
+  white-space: nowrap;
+}
+
 .app-shell {
   width: 100vw;
   height: 100vh;

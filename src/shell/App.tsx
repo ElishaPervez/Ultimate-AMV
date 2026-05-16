@@ -27,6 +27,7 @@ import { LogsPanel } from "../features/logs/LogsPanel";
 import { BackgroundCustomizer } from "../features/settings/BackgroundCustomizer";
 import { BackgroundLayer } from "../features/settings/BackgroundLayer";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
+import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { SidebarButton } from "./SidebarButton";
 import { WindowChrome } from "./WindowChrome";
@@ -152,6 +153,7 @@ export function App() {
     <main className="desktop">
       <BackgroundLayer state={liveBg} />
       <WindowChrome />
+      <UpdateToast />
       {bgModalOpen && (
         <BackgroundCustomizer
           initial={bgState}
