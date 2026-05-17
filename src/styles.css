@@ -3548,6 +3548,249 @@ button {
   border: 0;
 }
 
+/* ── Stem mixer (post-extraction preview) ── */
+.stem-mixer {
+  width: min(880px, 94%);
+  display: grid;
+  gap: 14px;
+  padding: 18px 22px;
+  border-radius: 14px;
+  background: rgba(20, 22, 28, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+}
+
+.stem-mixer.is-fallback {
+  gap: 12px;
+}
+
+.stem-mixer-fallback-msg {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stem-mixer-transport {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.stem-mixer-play {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.stem-mixer-play:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.stem-mixer-play:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.stem-mixer-play:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.stem-mixer-time {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.stem-mixer-time-sep {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.stem-mixer-spacer {
+  flex: 1;
+}
+
+.stem-mixer-hint {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stem-mixer-tracks {
+  display: grid;
+  gap: 10px;
+}
+
+.stem-mixer-track {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+}
+
+.stem-mixer-label {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+}
+
+.stem-mixer-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.stem-mixer-name.is-music {
+  color: #63e6a2;
+}
+
+.stem-mixer-name.is-vocal {
+  color: #a98cff;
+}
+
+.stem-mixer-volume {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+  cursor: pointer;
+}
+
+.stem-mixer-volume::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 0;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.stem-mixer-volume.is-music::-webkit-slider-thumb {
+  background: #63e6a2;
+}
+
+.stem-mixer-volume.is-vocal::-webkit-slider-thumb {
+  background: #a98cff;
+}
+
+.stem-mixer-volume::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.stem-mixer-volume::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 0;
+  cursor: pointer;
+}
+
+.stem-mixer-volume.is-music::-moz-range-thumb {
+  background: #63e6a2;
+}
+
+.stem-mixer-volume.is-vocal::-moz-range-thumb {
+  background: #a98cff;
+}
+
+.stem-mixer-volume:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.stem-mixer-vol-num {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.stem-mixer-waveform {
+  width: 100%;
+  min-height: 56px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+
+.stem-mixer-waveform > div {
+  cursor: pointer;
+}
+
+.stem-mixer-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.stem-mixer-filename {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stem-mixer-buttons {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stem-mixer-buttons .install-btn {
+  grid-template-columns: 16px auto;
+  grid-template-rows: auto;
+  padding: 8px 0;
+  align-items: center;
+}
+
+.stem-mixer-buttons .install-btn svg {
+  grid-row: 1;
+  grid-column: 1;
+}
+
+.stem-mixer-buttons .install-btn span {
+  grid-row: 1;
+  grid-column: 2;
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .stem-mixer-track {
+    grid-template-columns: 120px minmax(0, 1fr);
+  }
+  .stem-mixer-label {
+    grid-template-columns: 40px minmax(0, 1fr) 24px;
+  }
+}
+
 .audio-message {
   grid-row: 3;
   display: inline-flex;
@@ -4734,6 +4977,41 @@ button {
 .settings-path-browse-btn:hover {
   background: var(--accent-soft);
   border-color: var(--accent-border);
+}
+
+.settings-format-select {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 28px 6px 10px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='none' stroke='%23ffffffaa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1l4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.settings-format-select:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: var(--accent-border);
+}
+
+.settings-format-select:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.settings-format-select option {
+  background: #1a1a1a;
+  color: var(--ink);
 }
 
 /* ── Settings action pill (Choose background, Clear cache) ── */

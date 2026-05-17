@@ -23,6 +23,7 @@ import { ExtractionProgressCard } from "./ExtractionProgressCard";
 import { ResultCard } from "./ResultCard";
 import { SelectFileButton } from "./SelectFileButton";
 import { SetupRunningCard } from "./SetupRunningCard";
+import { StemMixerCard } from "./StemMixerCard";
 
 let cachedAudioStatus: AudioStatus | null = null;
 let pendingAudioStatus: Promise<AudioStatus> | null = null;
@@ -237,12 +238,15 @@ export function AudioExtractionPanel() {
       />
     );
   } else if (selectedFiles.length > 0 && resultMessage) {
-    const outputDir = outputPaths[0]?.replace(/[/\\][^/\\]+$/, "") ?? undefined;
+    const lastDone = [...batchItems].reverse().find((item) => item.status === "done");
+    const previewOutputs = lastDone?.outputs ?? outputPaths;
+    const previewInput = lastDone?.input ?? selectedFiles[selectedFiles.length - 1] ?? selectedFiles[0];
+    const outputDir = previewOutputs[0]?.replace(/[/\\][^/\\]+$/, "") ?? undefined;
+    const previewLabel = previewInput ? fileName(previewInput) : selectedLabel;
     stage = (
-      <ResultCard
-        kind="success"
-        fileName={selectedLabel}
-        message={resultMessage}
+      <StemMixerCard
+        outputs={previewOutputs}
+        fileLabel={previewLabel}
         outputDir={outputDir}
         onAgain={reset}
       />

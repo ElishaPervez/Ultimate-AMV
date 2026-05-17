@@ -70,7 +70,7 @@ def _pad_audio_if_needed(input_path, output_dir):
     return processing_input, temp_input_path, is_padded, original_duration_ms, pydub_ok
 
 
-def _run_audio_separator(processing_input, output_dir, model_name, model_settings, hw, progress_callback):
+def _run_audio_separator(processing_input, output_dir, model_name, model_settings, hw, progress_callback, output_format):
     from audio_separator.separator import Separator
 
     if progress_callback:
@@ -88,6 +88,7 @@ def _run_audio_separator(processing_input, output_dir, model_name, model_setting
         "log_level": logging.ERROR,
         "model_file_dir": str(MODELS_DIR),
         "output_dir": str(output_dir),
+        "output_format": output_format.upper(),
     }
     if mdx_params:
         sep_config["mdx_params"] = mdx_params
@@ -127,7 +128,7 @@ def _run_audio_separator(processing_input, output_dir, model_name, model_setting
     return output_files
 
 
-def _process_output_files(output_files, input_path, output_dir, is_padded, pydub_ok, original_duration_ms):
+def _process_output_files(output_files, input_path, output_dir, is_padded, pydub_ok, original_duration_ms, output_format):
     clean_stem = input_path.stem.replace(" (original)", "")
     outputs = []
     original_backup = None
@@ -151,13 +152,12 @@ def _process_output_files(output_files, input_path, output_dir, is_padded, pydub
         if is_padded and pydub_ok:
             try:
                 from pydub import AudioSegment
-                AudioSegment.from_file(str(src))[:original_duration_ms].export(str(src), format="wav")
+                AudioSegment.from_file(str(src))[:original_duration_ms].export(str(src), format=output_format)
             except Exception as exc:
                 logging.warning("Could not trim padded audio: %s", exc)
 
         suffix = "[vocals]" if "vocal" in src.name.lower() else "[instrumental]"
-        ext = input_path.suffix
-        dst = output_dir / f"{clean_stem} {suffix}{ext}"
+        dst = output_dir / f"{clean_stem} {suffix}{src.suffix}"
         if dst.exists():
             os.remove(str(dst))
         os.rename(str(src), str(dst))
@@ -182,11 +182,15 @@ def _cleanup_resources(temp_input_path):
         pass
 
 
-def run_separation(input_file, model_name=None, progress_callback=None):
+def run_separation(input_file, model_name=None, progress_callback=None, output_format="wav"):
     ensure_dirs()
     input_path = Path(input_file)
     if not input_path.is_file():
         raise FileNotFoundError(f"Input file not found: {input_file}")
+
+    output_format = (output_format or "wav").lower()
+    if output_format not in {"wav", "mp3"}:
+        output_format = "wav"
 
     hw = get_hw_info()
     if model_name is None:
@@ -202,14 +206,14 @@ def run_separation(input_file, model_name=None, progress_callback=None):
         )
 
         output_files = _run_audio_separator(
-            processing_input, output_dir, model_name, model_settings, hw, progress_callback
+            processing_input, output_dir, model_name, model_settings, hw, progress_callback, output_format
         )
 
         if progress_callback:
             progress_callback("finalizing", 96, "Saving stems...")
 
         outputs, original_backup = _process_output_files(
-            output_files, input_path, output_dir, is_padded, pydub_ok, original_duration_ms
+            output_files, input_path, output_dir, is_padded, pydub_ok, original_duration_ms, output_format
         )
 
         add_recent_file(str(input_path))

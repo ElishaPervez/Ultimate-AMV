@@ -84,6 +84,7 @@ def _config_payload(cfg):
         "background_offset_y": float(cfg.get("background_offset_y", BACKGROUND_DEFAULTS["background_offset_y"])),
         "background_dim": int(cfg.get("background_dim", BACKGROUND_DEFAULTS["background_dim"])),
         "background_blur": int(cfg.get("background_blur", BACKGROUND_DEFAULTS["background_blur"])),
+        "audio_output_format": cfg.get("audio_output_format", "wav"),
     }
 
 
@@ -189,6 +190,12 @@ def set_config(key, value):
         else:
             number = max(0, min(40, number))
         cfg[key] = number
+    elif key == "audio_output_format":
+        normalized = (value or "").strip().lower()
+        if normalized not in {"wav", "mp3"}:
+            emit({"type": "error", "message": "audio_output_format must be wav or mp3"})
+            return 1
+        cfg["audio_output_format"] = normalized
     save_config(cfg)
     emit(_config_payload(cfg))
 
@@ -201,14 +208,15 @@ def separate(input_file):
         add_log("audio.extract.start", f"Started vocal extraction for {Path(input_file).name}", details={"input": input_file})
         cfg = load_config()
         gpu = cfg.get("setup_type", "cpu") == "gpu" and not cfg.get("force_cpu", False)
+        output_format = cfg.get("audio_output_format", "wav")
         ensure_feature_dependencies("audio", gpu=gpu, progress_callback=on_progress)
         try:
-            result = run_separation(input_file, progress_callback=on_progress)
+            result = run_separation(input_file, progress_callback=on_progress, output_format=output_format)
         except ModuleNotFoundError as missing:
             if not repair_missing_module(missing.name, gpu=gpu, progress_callback=on_progress):
                 raise
             on_progress("dependency-repair", -1, "Retrying extraction after dependency repair...")
-            result = run_separation(input_file, progress_callback=on_progress)
+            result = run_separation(input_file, progress_callback=on_progress, output_format=output_format)
         add_log(
             "audio.extract.complete",
             f"Completed vocal extraction for {Path(input_file).name}",

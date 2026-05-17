@@ -1,7 +1,7 @@
 {
   "name": "ultimate-amv-script",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "scripts": {
     "test": "node --experimental-strip-types --test src/**/*.test.ts",
@@ -24,7 +24,8 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-virtuoso": "^4.14.1",
-    "vite": "^7.2.7"
+    "vite": "^7.2.7",
+    "wavesurfer.js": "^7.12.7"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

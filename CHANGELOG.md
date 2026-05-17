@@ -5,6 +5,37 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] : 2026-05-18
+
+### Added
+- **Stem mixer preview.** After vocal extraction, the giant
+  "Extraction complete" placeholder is replaced with a live stem
+  player. Two stacked waveforms (Music in green, Vocal in purple)
+  share a single transport with play/pause, click-to-seek, and
+  drag-to-scrub. Two horizontal volume sliders let you blend the
+  stems in real time : both at 100 recreates the original mix,
+  Vocal at 0 gives the pure instrumental, Music at 0 gives the
+  pure vocals. Spacebar toggles play/pause anywhere on the panel.
+  The per-file success line still lives at the bottom as the
+  status indicator.
+- **Selectable WAV / MP3 output for vocal extraction.** Settings
+  → Vocal Extraction has a new "Stem output format" selector.
+  WAV (the default) is lossless; MP3 is roughly one-tenth the
+  size for casual previews.
+
+### Fixed
+- **Vocal stems use the correct audio extension.** Extracting
+  from a video file (e.g. `.mp4`, `.mkv`) used to write stems
+  with the input's container extension even though the bytes
+  inside were WAV : `song [vocals].mp4` containing WAV data,
+  which broke some players and confused anything that trusted
+  the extension. Stems now carry the actual audio format
+  (`.wav` or `.mp3` depending on the new output-format setting).
+  The "(original)" backup of the source file keeps the source's
+  own extension as before.
+
+[0.9.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.9.0
+
 ## [0.8.0] : 2026-05-16
 
 ### Added

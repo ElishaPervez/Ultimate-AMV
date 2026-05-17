@@ -331,6 +331,29 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
         </div>
 
         <div className="settings-group">
+          <div className="settings-group-header">Vocal Extraction</div>
+          <div className="setting-row">
+            <div className="setting-info">
+              <span className="setting-label">Stem output format</span>
+              <span className="setting-desc">
+                Format used for the vocal and instrumental stems. WAV is lossless; MP3 is roughly 1/10th the size.
+              </span>
+            </div>
+            <select
+              className="settings-format-select"
+              value={backendConfig?.audio_output_format ?? "wav"}
+              onChange={(event) => {
+                void persistConfigField("audio_output_format", event.currentTarget.value);
+              }}
+              aria-label="Vocal extraction output format"
+            >
+              <option value="wav">WAV (lossless)</option>
+              <option value="mp3">MP3</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="settings-group">
           <div className="settings-group-header">Downloads</div>
           <div className="setting-row">
             <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>

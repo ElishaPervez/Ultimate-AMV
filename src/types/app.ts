@@ -35,6 +35,7 @@ export type AppConfig = {
   background_offset_y: number;
   background_dim: number;
   background_blur: number;
+  audio_output_format: "wav" | "mp3";
 };
 
 export type BackgroundState = {
