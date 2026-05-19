@@ -5,6 +5,53 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] : 2026-05-19
+
+### Added
+- **Scene preview viewer.** Click any clip tile in Clip Hunting to
+  open a full-size player for that scene with audio. The viewer
+  uses a custom playback bar that matches the app theme : play /
+  pause from the on-screen button or with the spacebar, draggable
+  scrub bar with a hover-grow effect, mute toggle, and fullscreen.
+  Playback loops automatically so you can watch a clip on repeat
+  while deciding to keep it. Mute preference persists across clips
+  and across app restarts : if you mute one scene the next opens
+  muted, and unmuting one opens the next unmuted.
+
+### Changed
+- **Scene viewer renders previews at 720p with the fastest available
+  encoder.** First-view latency on CPU mode dropped from ~3 s to
+  ~1-1.5 s for a 3-second clip. NVENC users get the same speed boost
+  via `h264_nvenc -preset p1`; libx264 `-preset ultrafast` is the
+  software fallback. Subsequent views of the same scene are instant
+  (cached).
+- **Universal hardware-accelerated decode for the scene viewer.**
+  Uses `-hwaccel auto` so any GPU vendor (NVIDIA, Intel, AMD) gets
+  hardware decode without being explicitly selected, with a clean
+  software fallback on machines without a usable decoder. Cuts
+  500-1000 ms off HEVC source render times without being
+  NVIDIA-gated.
+
+### Fixed
+- **Scene viewer no longer shows the previous scene's last frames
+  at the start of a clip.** Two stacked causes : the scene
+  detector's boundary timestamp lands on the *last* frame of the
+  previous scene rather than the first frame of the new one (the
+  viewer now uses the same inward-padded range the WebP grid
+  already uses), and ffmpeg's input-side seek was including
+  B-frames between the nearest keyframe and the cut point (the
+  slice render now uses output-side `-ss` plus
+  `-avoid_negative_ts make_zero` to drop them at both the decoder
+  and the muxer).
+- **WebP grid previews and progress bars no longer drift apart
+  after you close the scene viewer.** They used to run
+  independently in the background the whole time the modal was
+  open and would show desynced on close. Now they pause while the
+  modal is up and re-key together on close, matching the existing
+  tab-switch reset behavior.
+
+[0.10.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.10.0
+
 ## [0.9.0] : 2026-05-18
 
 ### Added

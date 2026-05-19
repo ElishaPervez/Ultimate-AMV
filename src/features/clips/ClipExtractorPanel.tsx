@@ -36,6 +36,7 @@ import type { ConversionDone, VideoGpuStatus } from "../../types/conversion";
 import { ClipCompatConvertModal } from "./ClipCompatConvertModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
 import { ClipPreviewTile } from "./ClipPreviewTile";
+import { SceneViewerModal } from "./SceneViewerModal";
 
 // Currently dead code : see FINDINGS.md. Moved here unchanged during the
 // main.tsx split to keep that work move-only.
@@ -71,6 +72,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [convertedSources, setConvertedSources] = React.useState<Record<string, string>>({});
   const [clipModeLoaded, setClipModeLoaded] = React.useState(false);
   const [activationEpoch, setActivationEpoch] = React.useState(0);
+  const [viewerClip, setViewerClip] = React.useState<ClipPreviewItem | null>(null);
+
+  // Bump activationEpoch when the viewer closes so the grid's WebPs and CSS
+  // progress bars re-key together and resync. Otherwise both keep running in
+  // the background while the modal is up and drift relative to each other -
+  // same root cause as the tab-switch desync the activation epoch already
+  // fixes, just from a different entry point.
+  function closeViewer() {
+    setViewerClip(null);
+    setActivationEpoch((value) => value + 1);
+  }
   const wasActiveRef = React.useRef(active);
   React.useEffect(() => {
     if (active && !wasActiveRef.current) {
@@ -663,7 +675,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (mergeMode) {
       toggleMergeOrder(clip.id);
     } else {
-      toggleClipSelection(clip.id);
+      // Tile click opens the scene viewer with audio. Selection lives on the
+      // corner button (clip-corner-select) so the two actions don't collide.
+      setViewerClip(clip);
     }
   }
 
@@ -1044,7 +1058,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     clip={clip}
                     mergeMode={mergeMode}
                     mergePosition={mergePositions.get(clip.id) ?? null}
-                    paused={!gridPreview}
+                    paused={!gridPreview || Boolean(viewerClip)}
                     playable={activeGridClipIds.has(clip.id)}
                     selected={mergeMode ? mergePositions.has(clip.id) : selectedClipIds.has(clip.id)}
                     activationEpoch={activationEpoch}
@@ -1096,6 +1110,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           onConvert={() => void handleConvertCompat()}
           onCancel={dismissCompatModal}
         />
+
+        <SceneViewerModal clip={viewerClip} onClose={closeViewer} />
 
         {mergeMode && (
           <div className={`merge-strip ${mergeOrderedClips.length > 0 ? "is-active" : "is-empty"}`} aria-live="polite">

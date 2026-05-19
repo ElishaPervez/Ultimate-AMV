@@ -3267,6 +3267,227 @@ async fn clip_preview_generate_batch(
     result
 }
 
+#[tauri::command]
+async fn scene_clip_render(
+    window: tauri::Window,
+    scene_id: String,
+    source_path: String,
+    start: f64,
+    end: f64,
+) -> Result<String, String> {
+    log_info(
+        "scene.clip.start",
+        "Starting scene clip render",
+        json!({ "sceneId": &scene_id, "source": &source_path, "start": start, "end": end }),
+    );
+    let app_data_dir = window
+        .app_handle()
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not get app data directory: {error}"))?;
+
+    let log_scene_id = scene_id.clone();
+    let log_source = source_path.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        generate_scene_clip(app_data_dir, scene_id, source_path, start, end)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    match &result {
+        Ok(payload) => log_info(
+            "scene.clip.complete",
+            "Scene clip render completed",
+            json!({ "sceneId": log_scene_id, "source": log_source, "result": payload }),
+        ),
+        Err(error) => log_error(
+            "scene.clip.error",
+            "Scene clip render failed",
+            json!({ "sceneId": log_scene_id, "source": log_source, "error": error }),
+        ),
+    }
+    result
+}
+
+fn generate_scene_clip(
+    app_data_dir: PathBuf,
+    scene_id: String,
+    source_path: String,
+    start: f64,
+    end: f64,
+) -> Result<String, String> {
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return Err("Scene range must have a valid start and end time.".to_string());
+    }
+
+    let root = app_root()?;
+    let ffmpeg = find_tool(&root, "ffmpeg");
+    ensure_tool(&ffmpeg)?;
+
+    let input = canonical_input_path(&source_path)?;
+    let metadata = input
+        .metadata()
+        .map_err(|error| format!("Could not read source metadata: {error}"))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let input_key = input.to_string_lossy().to_string();
+    let size_key = metadata.len().to_string();
+    let source_key = short_stable_id(&[&input_key, &size_key, &modified]);
+    let source_name = sanitize_path_segment(
+        input
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("episode"),
+        "episode",
+        56,
+    );
+    let cache_dir = app_data_dir
+        .join("scene_clips")
+        .join(format!("{source_name}-{source_key}"));
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("Could not create scene clip cache folder: {error}"))?;
+
+    let start_key = format!("{:.3}", start);
+    let end_key = format!("{:.3}", end);
+    // v4: -hwaccel auto for universal hardware decode acceleration.
+    let range_key = short_stable_id(&[&scene_id, &start_key, &end_key, "scene-clip-v4"]);
+    let safe_scene_id = sanitize_path_segment(&scene_id, "scene", 48).replace(' ', "_");
+    let output = cache_dir.join(format!("{safe_scene_id}-{range_key}.mp4"));
+    let duration = (end - start).max(0.05);
+
+    if output
+        .metadata()
+        .map(|metadata| metadata.len() > 1024)
+        .unwrap_or(false)
+    {
+        return serialize_clip_preview_done(scene_id, output, duration, true);
+    }
+
+    let use_nvenc = *H264_NVENC_AVAILABLE
+        .get_or_init(|| ffmpeg_listing(&ffmpeg, "-encoders").contains("h264_nvenc"));
+
+    if let Err(error) = render_scene_clip_job(&ffmpeg, &input, &output, start, duration, use_nvenc)
+    {
+        // Software fallback: NVENC can refuse some sources (10-bit HEVC, exotic
+        // pixel formats) where libx264 still happily encodes.
+        if use_nvenc {
+            render_scene_clip_job(&ffmpeg, &input, &output, start, duration, false)?;
+        } else {
+            return Err(error);
+        }
+    }
+
+    serialize_clip_preview_done(scene_id, output, duration, false)
+}
+
+fn render_scene_clip_job(
+    ffmpeg: &Path,
+    input: &Path,
+    output: &Path,
+    start: f64,
+    duration: f64,
+    use_nvenc: bool,
+) -> Result<(), String> {
+    // Output-side -ss (after -i): with input-side seek, ffmpeg lands on the
+    // nearest keyframe before <start> and the decoded frames in between keep
+    // their original PTS - the encoder emits them as 1-N "bleed" frames before
+    // the real cut. Output seek decodes-and-discards up to <start> before the
+    // encoder sees anything. -avoid_negative_ts make_zero is the muxer-level
+    // safety net for any residual negative PTS.
+    let mut args: Vec<String> = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        // Universal HW decode: NVDEC on NVIDIA, QSV on Intel, D3D11VA on AMD,
+        // software fallback otherwise. NOT NVIDIA-gated - works on any GPU and
+        // degrades to software cleanly per the CPU/GPU parity rule.
+        "-hwaccel".to_string(),
+        "auto".to_string(),
+        "-i".to_string(),
+        input.to_string_lossy().to_string(),
+        "-ss".to_string(),
+        format!("{:.3}", start.max(0.0)),
+        "-t".to_string(),
+        format!("{duration:.3}"),
+        // Optional audio mapping: silent sources skip the audio stream without
+        // failing the encode.
+        "-map".to_string(),
+        "0:v:0".to_string(),
+        "-map".to_string(),
+        "0:a:0?".to_string(),
+        // Downscale to 720p max (preserve aspect, round width to even). The
+        // min() guard keeps sub-720p sources at native size instead of
+        // upscaling, which would just slow the encode for no quality gain.
+        // Single quotes are intentional - they tell ffmpeg's expression
+        // parser to treat the inner comma as a function arg, not a filter
+        // chain separator.
+        "-vf".to_string(),
+        "scale=-2:'min(720,ih)'".to_string(),
+    ];
+
+    if use_nvenc {
+        args.extend([
+            "-c:v".to_string(),
+            "h264_nvenc".to_string(),
+            "-preset".to_string(),
+            "p1".to_string(),
+            "-cq".to_string(),
+            "23".to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "ultrafast".to_string(),
+            "-crf".to_string(),
+            "23".to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
+        ]);
+    }
+
+    args.extend([
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        "128k".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+        "-avoid_negative_ts".to_string(),
+        "make_zero".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        output.to_string_lossy().to_string(),
+    ]);
+
+    let result = cmd(ffmpeg)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Could not start ffmpeg scene clip renderer: {error}"))?;
+    if result.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!(
+            "Scene clip renderer exited with code {}",
+            result.status.code().unwrap_or(-1)
+        ))
+    } else {
+        Err(stderr)
+    }
+}
+
 fn run_media_to_audio(
     window: tauri::Window,
     input_path: String,
@@ -5592,6 +5813,7 @@ pub fn run() {
             video_source_codec,
             clip_preview_generate,
             clip_preview_generate_batch,
+            scene_clip_render,
             get_config,
             set_config,
             save_background_image,

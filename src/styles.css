@@ -6697,3 +6697,121 @@ button {
 .bg-cropper-empty {
   transition: color 140ms ease;
 }
+
+/* Scene viewer modal : reuses .episode-label-* shell, widens it for video,
+   and gives the <video> a black letterboxing stage. No autoplay loop -
+   sourceEnd is a hard pause to dodge the seek-loop bug fixed in beb9067. */
+.scene-viewer-backdrop {
+  z-index: 75;
+}
+.scene-viewer-modal {
+  width: min(960px, 94vw);
+  gap: 14px;
+}
+.scene-viewer-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.scene-viewer-stage video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+}
+.scene-viewer-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #aeb8c1;
+  font-size: 13px;
+  font-weight: 600;
+}
+.scene-viewer-loading svg {
+  color: var(--cyan);
+}
+.scene-viewer-error {
+  position: absolute;
+  inset: auto 12px 12px;
+}
+
+/* Custom playback controls overlay - replaces native <video controls> so the
+   bar matches the app aesthetic. Floats over the bottom of the video stage
+   with a soft gradient backdrop. */
+.scene-viewer-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 12px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0) 100%);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  user-select: none;
+  pointer-events: auto;
+}
+.scene-viewer-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 0;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.88);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, transform 140ms ease;
+}
+.scene-viewer-button:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+.scene-viewer-button:active {
+  transform: scale(0.96);
+}
+.scene-viewer-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.85);
+  min-width: 78px;
+  text-align: center;
+}
+.scene-viewer-scrub {
+  flex: 1;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.scene-viewer-scrub-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+  overflow: hidden;
+  transition: height 140ms ease;
+}
+.scene-viewer-scrub:hover .scene-viewer-scrub-track,
+.scene-viewer-scrub.is-scrubbing .scene-viewer-scrub-track {
+  height: 6px;
+}
+.scene-viewer-scrub-fill {
+  height: 100%;
+  background: var(--cyan);
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgb(var(--theme-accent-rgb) / 0.5);
+}
