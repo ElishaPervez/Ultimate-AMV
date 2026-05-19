@@ -85,6 +85,7 @@ def _config_payload(cfg):
         "background_dim": int(cfg.get("background_dim", BACKGROUND_DEFAULTS["background_dim"])),
         "background_blur": int(cfg.get("background_blur", BACKGROUND_DEFAULTS["background_blur"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
+        "clip_hover_preview": bool(cfg.get("clip_hover_preview", True)),
     }
 
 
@@ -196,6 +197,8 @@ def set_config(key, value):
             emit({"type": "error", "message": "audio_output_format must be wav or mp3"})
             return 1
         cfg["audio_output_format"] = normalized
+    elif key == "clip_hover_preview":
+        cfg["clip_hover_preview"] = value.lower() == "true"
     save_config(cfg)
     emit(_config_payload(cfg))
 

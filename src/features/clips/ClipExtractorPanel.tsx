@@ -71,6 +71,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   // Maps a converted cache path -> the original filename it replaced (for the badge).
   const [convertedSources, setConvertedSources] = React.useState<Record<string, string>>({});
   const [clipModeLoaded, setClipModeLoaded] = React.useState(false);
+  const [clipHoverPreview, setClipHoverPreview] = React.useState(true);
   const [activationEpoch, setActivationEpoch] = React.useState(0);
   const [viewerClip, setViewerClip] = React.useState<ClipPreviewItem | null>(null);
 
@@ -129,11 +130,20 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return () => window.removeEventListener("clipmode-changed", handler);
   }, []);
 
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      setClipHoverPreview((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
+    };
+    window.addEventListener("clip-hover-preview-changed", handler);
+    return () => window.removeEventListener("clip-hover-preview-changed", handler);
+  }, []);
+
   async function refreshClipMode() {
     try {
       const raw = await invoke<string>("get_config");
       const payload = parseBridgePayload<AppConfig>(raw);
       setClipMode(payload.clip_extraction_mode ?? "gpu");
+      setClipHoverPreview(payload.clip_hover_preview ?? true);
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
@@ -1062,6 +1072,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     playable={activeGridClipIds.has(clip.id)}
                     selected={mergeMode ? mergePositions.has(clip.id) : selectedClipIds.has(clip.id)}
                     activationEpoch={activationEpoch}
+                    clipHoverPreview={clipHoverPreview}
                     onClick={() => handleClipClick(clip)}
                     onToggleSelect={() =>
                       mergeMode ? toggleMergeOrder(clip.id) : toggleClipSelection(clip.id)

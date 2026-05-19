@@ -1,7 +1,7 @@
 import React from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AlertTriangle, CheckCircle2, Cpu, Image as ImageIcon, Loader2, MessageCircle, Trash2, Zap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Cpu, Film, Image as ImageIcon, Loader2, MessageCircle, Trash2, Zap } from "lucide-react";
 import { isDiscordEnabled, setDiscordEnabled } from "../../lib/discord";
 import { formatBytes } from "../../lib/format";
 import { logFrontend, safeLogValue } from "../../lib/log";
@@ -40,6 +40,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
   const [cacheNotice, setCacheNotice] = React.useState<string | null>(null);
   const [cacheError, setCacheError] = React.useState<string | null>(null);
   const [discordEnabled, setDiscordEnabledLocal] = React.useState(isDiscordEnabled);
+  const [clipHoverPreview, setClipHoverPreview] = React.useState(true);
 
   function toggleDiscordPresence() {
     const next = !discordEnabled;
@@ -84,6 +85,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
       setBackendConfig(payload);
       setLocalClipMode(payload.clip_extraction_mode ?? "gpu");
       setLocalDownloadPath(payload.download_path ?? "");
+      setClipHoverPreview(payload.clip_hover_preview ?? true);
       setError(null);
     } catch (e) {
       setError(readBridgeError(e));
@@ -325,6 +327,44 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
               <span className="deps-badge-ready" style={{ color: "var(--fg-muted)", border: "1px solid var(--border)", background: "transparent" }}>
                 {currentMode.toUpperCase()}
               </span>
+            </div>
+          </div>
+
+          <div className="setting-row">
+            <div className="setting-info">
+              <span className="setting-label">Hover preview</span>
+              <span className="setting-desc">
+                Play clip previews on hover instead of autoplaying all visible clips. Checked by default.
+              </span>
+            </div>
+            <div className="settings-toggle-wrap">
+              <span className="settings-toggle-icon" aria-hidden="true">
+                <Film size={16} strokeWidth={2.3} />
+              </span>
+              <span className={`settings-toggle-label ${clipHoverPreview ? "is-on" : "is-off"}`}>
+                {clipHoverPreview ? "Enabled" : "Disabled"}
+              </span>
+              <button
+                type="button"
+                className="settings-toggle-switch"
+                role="switch"
+                aria-checked={clipHoverPreview}
+                aria-label="Hover preview"
+                data-on={clipHoverPreview ? "true" : "false"}
+                onClick={() => {
+                  const next = !clipHoverPreview;
+                  setClipHoverPreview(next);
+                  void persistConfigField("clip_hover_preview", next ? "true" : "false");
+                  window.dispatchEvent(new CustomEvent("clip-hover-preview-changed", { detail: { enabled: next } }));
+                }}
+                title={clipHoverPreview ? "Disable hover preview" : "Enable hover preview"}
+              >
+                <span className="settings-toggle-track" aria-hidden="true">
+                  <span className="settings-toggle-track-on">ON</span>
+                  <span className="settings-toggle-track-off">OFF</span>
+                  <span className="settings-toggle-knob" />
+                </span>
+              </button>
             </div>
           </div>
 

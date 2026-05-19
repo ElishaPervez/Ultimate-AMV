@@ -27,6 +27,52 @@ function previewClipPlaybackRange(clip: ClipPreviewItem): ClipVideoRange | null 
   };
 }
 
+const THUMBNAIL_CACHE = new Map<string, string>();
+
+function useWebpThumbnail(src: string | undefined) {
+  const [thumbnail, setThumbnail] = React.useState<string | null>(() => {
+    return src ? (THUMBNAIL_CACHE.get(src) ?? null) : null;
+  });
+
+  React.useEffect(() => {
+    if (!src) {
+      setThumbnail(null);
+      return;
+    }
+
+    if (THUMBNAIL_CACHE.has(src)) {
+      setThumbnail(THUMBNAIL_CACHE.get(src)!);
+      return;
+    }
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || 426;
+        canvas.height = img.naturalHeight || 240;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+          THUMBNAIL_CACHE.set(src, dataUrl);
+          setThumbnail(dataUrl);
+        }
+      } catch (e) {
+        console.error("Failed to generate WebP thumbnail:", e);
+      }
+    };
+    img.src = src;
+
+    return () => {
+      img.onload = null;
+    };
+  }, [src]);
+
+  return thumbnail;
+}
+
 export function ClipPreviewTile({
   clip,
   selected,
@@ -35,6 +81,7 @@ export function ClipPreviewTile({
   paused,
   playable,
   activationEpoch,
+  clipHoverPreview,
   onClick,
   onToggleSelect,
 }: {
@@ -45,11 +92,14 @@ export function ClipPreviewTile({
   paused: boolean;
   playable: boolean;
   activationEpoch: number;
+  clipHoverPreview: boolean;
   onClick: () => void;
   onToggleSelect: () => void;
 }) {
+  const [isHovered, setIsHovered] = React.useState(false);
   const previewRange = previewClipPlaybackRange(clip);
-  const shouldPlay = Boolean(previewRange) && playable && !paused;
+  const shouldPlay = Boolean(previewRange) && playable && !paused && (!clipHoverPreview || isHovered);
+  const thumbnail = useWebpThumbnail(previewRange?.src);
   const placeholderLoading = playable && clip.previewState?.status !== "error";
   const loopDuration = previewRange
     ? Math.max(0.45, previewRange.end - previewRange.start)
@@ -66,6 +116,8 @@ export function ClipPreviewTile({
         type="button"
         className={`clip-preview-tile ${selected ? "is-selected" : ""} ${mergeMode ? "is-selectable" : ""}`}
         onClick={onClick}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
       >
         {shouldPlay && previewRange ? (
           <>
@@ -81,7 +133,15 @@ export function ClipPreviewTile({
             {!isReady && <span className="clip-video-placeholder is-loading" aria-hidden="true" />}
           </>
         ) : (
-          <span className={`clip-video-placeholder ${placeholderLoading ? "is-loading" : ""}`} />
+          thumbnail ? (
+            <img
+              src={thumbnail}
+              alt=""
+              className="is-ready static-thumbnail"
+            />
+          ) : (
+            <span className={`clip-video-placeholder ${placeholderLoading ? "is-loading" : ""}`} />
+          )
         )}
         {shouldPlay && previewRange && isReady && (
           <span
