@@ -1,7 +1,6 @@
 import React from "react";
 import { CheckCircle2, Circle } from "lucide-react";
 import type { ClipPreviewItem, ClipVideoRange } from "../../types/clip";
-import { CLIP_HOVER_PREVIEW_KEY } from "../../lib/constants";
 
 // Currently dead code : see FINDINGS.md. Moved here unchanged during the
 // main.tsx split to keep that work move-only.
@@ -28,6 +27,54 @@ function previewClipPlaybackRange(clip: ClipPreviewItem): ClipVideoRange | null 
   };
 }
 
+const THUMBNAIL_CACHE = new Map<string, string>();
+
+function useWebpThumbnail(src: string | undefined) {
+  const [thumbnail, setThumbnail] = React.useState<string | null>(() =>
+    src ? (THUMBNAIL_CACHE.get(src) ?? null) : null,
+  );
+
+  React.useEffect(() => {
+    if (!src) {
+      setThumbnail(null);
+      return;
+    }
+    const cached = THUMBNAIL_CACHE.get(src);
+    if (cached) {
+      setThumbnail(cached);
+      return;
+    }
+
+    let cancelled = false;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      if (cancelled) return;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || 426;
+        canvas.height = img.naturalHeight || 240;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+        THUMBNAIL_CACHE.set(src, dataUrl);
+        setThumbnail(dataUrl);
+      } catch (e) {
+        console.error("Failed to generate clip thumbnail:", e);
+      }
+    };
+    img.src = src;
+
+    return () => {
+      cancelled = true;
+      img.onload = null;
+    };
+  }, [src]);
+
+  return thumbnail;
+}
+
 export function ClipPreviewTile({
   clip,
   selected,
@@ -36,6 +83,7 @@ export function ClipPreviewTile({
   paused,
   playable,
   activationEpoch,
+  clipHoverPreview,
   onClick,
   onToggleSelect,
 }: {
@@ -46,35 +94,16 @@ export function ClipPreviewTile({
   paused: boolean;
   playable: boolean;
   activationEpoch: number;
+  clipHoverPreview: boolean;
   onClick: () => void;
   onToggleSelect: () => void;
 }) {
-  const [hoverPlayOnly, setHoverPlayOnly] = React.useState<boolean>(() => {
-    try {
-      return localStorage.getItem(CLIP_HOVER_PREVIEW_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
   const [isHovered, setIsHovered] = React.useState(false);
 
-  React.useEffect(() => {
-    const handlePrefChanged = () => {
-      try {
-        setHoverPlayOnly(localStorage.getItem(CLIP_HOVER_PREVIEW_KEY) === "true");
-      } catch {
-        // Safe fallback
-      }
-    };
-    window.addEventListener("clip-hover-preview-changed", handlePrefChanged);
-    return () => {
-      window.removeEventListener("clip-hover-preview-changed", handlePrefChanged);
-    };
-  }, []);
-
   const previewRange = previewClipPlaybackRange(clip);
-  const isPlayActive = !hoverPlayOnly || isHovered;
+  const isPlayActive = !clipHoverPreview || isHovered;
   const shouldPlay = Boolean(previewRange) && playable && !paused && isPlayActive;
+  const thumbnail = useWebpThumbnail(previewRange?.src);
   const placeholderLoading = playable && clip.previewState?.status !== "error";
   const loopDuration = previewRange
     ? Math.max(0.45, previewRange.end - previewRange.start)
@@ -109,6 +138,8 @@ export function ClipPreviewTile({
             />
             {!isReady && <span className="clip-video-placeholder is-loading" aria-hidden="true" />}
           </>
+        ) : thumbnail ? (
+          <img src={thumbnail} alt="" className="is-ready clip-static-thumbnail" />
         ) : (
           <span className={`clip-video-placeholder ${placeholderLoading ? "is-loading" : ""}`} />
         )}

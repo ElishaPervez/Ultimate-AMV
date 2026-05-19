@@ -11,7 +11,6 @@ import {
   CLIP_PREVIEW_CPU_BATCH_CONCURRENCY,
   CLIP_PREVIEW_GPU_BATCH_CONCURRENCY,
   MAX_GRID_AUTOPLAYERS,
-  CLIP_HOVER_PREVIEW_KEY,
 } from "../../lib/constants";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
@@ -51,26 +50,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [selectedVideos, setSelectedVideos] = React.useState<string[]>([]);
   const [clipMode, setClipMode] = React.useState<"cpu" | "gpu">("gpu");
   const [gridPreview, setGridPreview] = React.useState(true);
-  const [hoverPlayOnly, setHoverPlayOnly] = React.useState<boolean>(() => {
-    try {
-      return localStorage.getItem(CLIP_HOVER_PREVIEW_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
+  const [hoverPlayOnly, setHoverPlayOnly] = React.useState<boolean>(true);
 
   React.useEffect(() => {
-    const handlePrefChanged = () => {
-      try {
-        setHoverPlayOnly(localStorage.getItem(CLIP_HOVER_PREVIEW_KEY) === "true");
-      } catch {
-        // Safe fallback
-      }
+    const handler = (e: Event) => {
+      setHoverPlayOnly((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
     };
-    window.addEventListener("clip-hover-preview-changed", handlePrefChanged);
-    return () => {
-      window.removeEventListener("clip-hover-preview-changed", handlePrefChanged);
-    };
+    window.addEventListener("clip-hover-preview-changed", handler);
+    return () => window.removeEventListener("clip-hover-preview-changed", handler);
   }, []);
   const [gridCols, setGridCols] = React.useState(4);
   const [mergeMode, setMergeMode] = React.useState(false);
@@ -163,6 +150,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const raw = await invoke<string>("get_config");
       const payload = parseBridgePayload<AppConfig>(raw);
       setClipMode(payload.clip_extraction_mode ?? "gpu");
+      setHoverPlayOnly(payload.clip_hover_preview ?? true);
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
@@ -1114,12 +1102,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             onClick={() => {
               const next = !hoverPlayOnly;
               setHoverPlayOnly(next);
-              try {
-                localStorage.setItem(CLIP_HOVER_PREVIEW_KEY, next ? "true" : "false");
-                window.dispatchEvent(new CustomEvent("clip-hover-preview-changed"));
-              } catch {
-                // Safe fallback
-              }
+              void invoke("set_config", { key: "clip_hover_preview", value: next ? "true" : "false" });
+              window.dispatchEvent(
+                new CustomEvent("clip-hover-preview-changed", { detail: { enabled: next } }),
+              );
             }}
             title={hoverPlayOnly ? "Only plays previews on hover (Lighter on system)" : "Plays all visible previews simultaneously"}
           >
@@ -1301,6 +1287,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     playable={activeGridClipIds.has(clip.id)}
                     selected={mergeMode ? mergePositions.has(clip.id) : selectedClipIds.has(clip.id)}
                     activationEpoch={activationEpoch}
+                    clipHoverPreview={hoverPlayOnly}
                     onClick={() => handleClipClick(clip)}
                     onToggleSelect={() =>
                       mergeMode ? toggleMergeOrder(clip.id) : toggleClipSelection(clip.id)

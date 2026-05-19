@@ -10,7 +10,6 @@ export const APP_THEMES: Array<{ id: Exclude<AppThemeId, "custom">; colors: [str
 ];
 
 export const CLIP_AUDIO_SETTINGS_KEY = "ultimate-amv.clip-audio-settings";
-export const CLIP_HOVER_PREVIEW_KEY = "ultimate-amv.clip-hover-preview";
 export const CLIP_COLUMN_OPTIONS = [1, 2, 3, 4] as const;
 export const MAX_GRID_AUTOPLAYERS = 100;
 export const CLIP_PREVIEW_BATCH_SIZE = 8;

@@ -36,6 +36,7 @@ export type AppConfig = {
   background_dim: number;
   background_blur: number;
   audio_output_format: "wav" | "mp3";
+  clip_hover_preview: boolean;
 };
 
 export type BackgroundState = {
