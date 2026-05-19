@@ -50,7 +50,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [selectedVideos, setSelectedVideos] = React.useState<string[]>([]);
   const [clipMode, setClipMode] = React.useState<"cpu" | "gpu">("gpu");
   const [gridPreview, setGridPreview] = React.useState(true);
-  const [hoverPlayOnly, setHoverPlayOnly] = React.useState<boolean>(true);
+  const [hoverPlayOnly, setHoverPlayOnly] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     const handler = (e: Event) => {
@@ -150,7 +150,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const raw = await invoke<string>("get_config");
       const payload = parseBridgePayload<AppConfig>(raw);
       setClipMode(payload.clip_extraction_mode ?? "gpu");
-      setHoverPlayOnly(payload.clip_hover_preview ?? true);
+      setHoverPlayOnly(payload.clip_hover_preview ?? false);
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
@@ -1321,9 +1321,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
         {!hasClips && gridPreview && (
           <div className="clip-empty-state">
-            <div className="surface-mark accent-glow" style={{ marginBottom: '20px' }}>
-              {isExtracting ? <Loader2 className="is-spinning" size={36} strokeWidth={1.8} /> : <Clapperboard size={36} strokeWidth={1.7} />}
-            </div>
+            {isExtracting ? <Loader2 className="is-spinning" size={36} strokeWidth={1.8} /> : <Clapperboard size={36} strokeWidth={1.7} />}
             <h2>{isExtracting ? "Extracting clips" : "Clip extractor"}</h2>
             <p>{progress?.message ?? error ?? (selectedVideos.length > 0 ? "Ready for RTX TransNetV2." : "No clips yet.")}</p>
           </div>

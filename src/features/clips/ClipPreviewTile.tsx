@@ -125,23 +125,26 @@ export function ClipPreviewTile({
         className={`clip-preview-tile spring-motion ${selected ? "is-selected" : ""} ${mergeMode ? "is-selectable" : ""}`}
         onClick={onClick}
       >
-        {shouldPlay && previewRange ? (
-          <>
-            <img
-              key={`${previewRange.id}-${activationEpoch}`}
-              // Cache-bust on activation: Chromium otherwise serves the WebP from its decoded image cache and the animation stays mid-cycle, desynced from the bar.
-              src={`${previewRange.src}?v=${activationEpoch}`}
-              alt=""
-              className={isReady ? "is-ready" : "is-loading"}
-              onLoad={() => setIsReady(true)}
-              onError={() => setIsReady(false)}
-            />
-            {!isReady && <span className="clip-video-placeholder is-loading" aria-hidden="true" />}
-          </>
-        ) : thumbnail ? (
+        {/* Base layer: the static thumbnail when we have one, placeholder otherwise. */}
+        {/* Stays mounted while shouldPlay flips so the animated WebP fades in over */}
+        {/* a matching frame instead of an empty/stale slot — fixes hover ghost-morph. */}
+        {thumbnail ? (
           <img src={thumbnail} alt="" className="is-ready clip-static-thumbnail" />
         ) : (
-          <span className={`clip-video-placeholder ${placeholderLoading ? "is-loading" : ""}`} />
+          <span
+            className={`clip-video-placeholder ${(shouldPlay && !isReady) || placeholderLoading ? "is-loading" : ""}`}
+          />
+        )}
+        {shouldPlay && previewRange && (
+          <img
+            key={`${previewRange.id}-${activationEpoch}`}
+            // Cache-bust on activation: Chromium otherwise serves the WebP from its decoded image cache and the animation stays mid-cycle, desynced from the bar.
+            src={`${previewRange.src}?v=${activationEpoch}`}
+            alt=""
+            className={`clip-animated-overlay ${isReady ? "is-ready" : "is-loading"}`}
+            onLoad={() => setIsReady(true)}
+            onError={() => setIsReady(false)}
+          />
         )}
         {shouldPlay && previewRange && isReady && (
           <span

@@ -4772,6 +4772,12 @@ button {
   filter: saturate(1.02);
 }
 
+.clip-animated-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
 .settings-toolbar {
   min-height: 34px;
   display: flex;

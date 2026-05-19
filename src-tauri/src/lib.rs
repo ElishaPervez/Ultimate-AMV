@@ -1252,26 +1252,55 @@ async fn clear_app_cache(window: tauri::Window) -> Result<ClearCacheReport, Stri
 
     log_info(
         "cache.clear.start",
-        "Clearing preview cache",
+        "Clearing app caches",
         json!({ "app_data_dir": app_data_dir.display().to_string() }),
     );
 
     let report = tauri::async_runtime::spawn_blocking(move || -> Result<ClearCacheReport, String> {
-        let cache_dir = app_data_dir.join("clip_previews");
-        if !cache_dir.exists() {
-            return Ok(ClearCacheReport { files_removed: 0, bytes_freed: 0 });
+        // All three are regenerated on demand, so wiping them is safe.
+        // Don't touch `backgrounds/`, `logs/`, `*.json`, or the WebView2
+        // browser data — those are user data, not cache.
+        const CACHE_DIRS: &[&str] = &["clip_previews", "scene_clips", "clip_compat_cache"];
+
+        let mut total_files = 0u64;
+        let mut total_bytes = 0u64;
+        let mut first_error: Option<String> = None;
+
+        for name in CACHE_DIRS {
+            let dir = app_data_dir.join(name);
+            if !dir.exists() {
+                continue;
+            }
+            let (files, bytes) = dir_file_stats(&dir);
+            match fs::remove_dir_all(&dir) {
+                Ok(()) => {
+                    total_files += files;
+                    total_bytes += bytes;
+                }
+                Err(error) => {
+                    let msg = format!("Could not remove {name}: {error}");
+                    log_error("cache.clear.dir_error", &msg, json!({ "dir": name }));
+                    if first_error.is_none() {
+                        first_error = Some(msg);
+                    }
+                }
+            }
         }
-        let (files_removed, bytes_freed) = dir_file_stats(&cache_dir);
-        fs::remove_dir_all(&cache_dir)
-            .map_err(|error| format!("Could not remove preview cache: {error}"))?;
-        Ok(ClearCacheReport { files_removed, bytes_freed })
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(ClearCacheReport {
+            files_removed: total_files,
+            bytes_freed: total_bytes,
+        })
     })
     .await
     .map_err(|error| error.to_string())??;
 
     log_info(
         "cache.clear.complete",
-        "Preview cache cleared",
+        "App caches cleared",
         json!({
             "files_removed": report.files_removed,
             "bytes_freed": report.bytes_freed,

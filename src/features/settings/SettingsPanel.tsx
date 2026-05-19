@@ -61,7 +61,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
   const [cacheNotice, setCacheNotice] = React.useState<string | null>(null);
   const [cacheError, setCacheError] = React.useState<string | null>(null);
   const [discordEnabled, setDiscordEnabledLocal] = React.useState(isDiscordEnabled);
-  const [clipHoverPreview, setClipHoverPreview] = React.useState(true);
+  const [clipHoverPreview, setClipHoverPreview] = React.useState(false);
   const [confirmModal, setConfirmModal] = React.useState<ConfirmState>(CONFIRM_CLOSED);
 
   function closeConfirm() {
@@ -118,7 +118,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
       const payload = parseBridgePayload<AppConfig>(raw);
       setBackendConfig(payload);
       setLocalDownloadPath(payload.download_path ?? "");
-      setClipHoverPreview(payload.clip_hover_preview ?? true);
+      setClipHoverPreview(payload.clip_hover_preview ?? false);
       setError(null);
     } catch (e) {
       setError(readBridgeError(e));

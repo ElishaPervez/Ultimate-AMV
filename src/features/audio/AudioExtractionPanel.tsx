@@ -155,9 +155,20 @@ export function AudioExtractionPanel() {
         }
         setBatchItems([...completed]);
       }
-      setOutputPaths(allOutputs);
-      const failures = completed.filter((item) => item.status === "error").length;
-      setResultMessage(`${completed.length - failures}/${filePaths.length} files extracted. ${allOutputs.length} stems saved.`);
+      if (audioCancellingRef.current && allOutputs.length === 0) {
+        // Cancelled before anything saved: revert to the picker so we don't
+        // render a StemMixerCard with no stems to classify.
+        setSelectedFiles([]);
+        setBatchItems([]);
+      } else if (audioCancellingRef.current) {
+        setOutputPaths(allOutputs);
+        const done = completed.filter((item) => item.status === "done").length;
+        setResultMessage(`Extraction cancelled. ${done} file${done === 1 ? "" : "s"} saved before cancel.`);
+      } else {
+        setOutputPaths(allOutputs);
+        const failures = completed.filter((item) => item.status === "error").length;
+        setResultMessage(`${completed.length - failures}/${filePaths.length} files extracted. ${allOutputs.length} stems saved.`);
+      }
       await refreshStatus(true);
     } catch (error) {
       if (!audioCancellingRef.current) {
@@ -275,7 +286,7 @@ export function AudioExtractionPanel() {
         <span>Drop audio or video to extract vocals</span>
         <small>WAV · MP3 · FLAC · M4A · MP4 · MKV · MOV · WEBM · AVI</small>
       </div>
-      <div className={`audio-status-line glass spring-motion ${status ? "" : "is-pending"}`} aria-hidden={status ? undefined : true}>
+      <div className={`audio-status-line ${status ? "" : "is-pending"}`} aria-hidden={status ? undefined : true}>
         {status && (
           <>
             <span>
