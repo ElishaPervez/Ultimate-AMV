@@ -94,7 +94,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [convertedSources, setConvertedSources] = React.useState<Record<string, string>>({});
   const [clipModeLoaded, setClipModeLoaded] = React.useState(false);
   const [activationEpoch, setActivationEpoch] = React.useState(0);
-  const [viewerClip, setViewerClip] = React.useState<ClipPreviewItem | null>(null);
+  // Store the viewer's selection by id (not by value): the `clips` array
+  // gets re-derived on every render with fresh `previewState` updates as
+  // WebPs finish rendering, and the modal needs to see those updates so it
+  // can swap a stale "previewState: rendering" snapshot for the live
+  // "previewState: ready" with the WebP src. Stashing the full object
+  // froze the snapshot at click time and meant the modal's poster image
+  // never appeared for clips clicked before their WebP was ready - the
+  // very case the poster was meant to help with.
+  const [viewerClipId, setViewerClipId] = React.useState<string | null>(null);
   const [exportSession, setExportSession] = React.useState<ClipExportSession | null>(null);
   const exportSessionRef = React.useRef<ClipExportSession | null>(null);
   React.useEffect(() => {
@@ -107,7 +115,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   // same root cause as the tab-switch desync the activation epoch already
   // fixes, just from a different entry point.
   function closeViewer() {
-    setViewerClip(null);
+    setViewerClipId(null);
     setActivationEpoch((value) => value + 1);
   }
   const wasActiveRef = React.useRef(active);
@@ -358,6 +366,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, [result, previewStates]);
 
   const hasClips = clips.length > 0;
+  const viewerClip = React.useMemo(
+    () => (viewerClipId ? clips.find((c) => c.id === viewerClipId) ?? null : null),
+    [viewerClipId, clips],
+  );
   const selectedCount = selectedClipIds.size;
   const canExtract = selectedVideos.length > 0 && !isExtracting;
   const clipCancellingRef = React.useRef(false);
@@ -762,7 +774,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     } else {
       // Tile click opens the scene viewer with audio. Selection lives on the
       // corner button (clip-corner-select) so the two actions don't collide.
-      setViewerClip(clip);
+      setViewerClipId(clip.id);
     }
   }
 

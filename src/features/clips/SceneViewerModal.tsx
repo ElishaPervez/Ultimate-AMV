@@ -244,6 +244,22 @@ export function SceneViewerModal({
         </div>
 
         <div className="scene-viewer-stage">
+          {/* The WebP preview this clip already used in the grid is in
+              WebView2's renderer cache (preview.rs generates it before the
+              user can click). Rendering it whenever we don't yet have the
+              mp4 - both during scene_clip_render AND on error - keeps the
+              user oriented on the right clip instead of staring at black.
+              The WebP is animated (looping ~12 fps mini-preview), not a
+              still frame, so the poster is a quiet loop behind the spinner
+              rather than a freeze frame; that's intentional. */}
+          {render.status !== "ready" && clip.previewState?.src && (
+            <img
+              className="scene-viewer-poster"
+              src={clip.previewState.src}
+              alt=""
+              aria-hidden="true"
+            />
+          )}
           {render.status === "ready" ? (
             <>
               <video
@@ -312,7 +328,7 @@ export function SceneViewerModal({
               </div>
             </>
           ) : render.status === "rendering" ? (
-            <div className="scene-viewer-loading">
+            <div className="scene-viewer-loading" role="status">
               <Loader2 className="is-spinning" size={24} strokeWidth={2.1} />
               <span>Rendering scene preview...</span>
             </div>

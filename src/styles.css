@@ -1855,12 +1855,31 @@ button {
 
 .clip-extractor-rail {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
   border-right: 1px solid var(--line);
   background: transparent;
+  /* Without overflow-y the rail's content (Source card + tool stack + run
+     card during export + primary action button) can grow taller than the
+     parent grid row, and .panel-body's overflow:hidden then clips the
+     bottom buttons (Select clips to export / Select all / Merge clip) off
+     the viewport. Scrolling the rail itself keeps everything reachable. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.clip-extractor-rail::-webkit-scrollbar {
+  width: 9px;
+}
+.clip-extractor-rail::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+.clip-extractor-rail::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .clip-import-button {
@@ -7393,6 +7412,15 @@ button {
   display: block;
   background: #000;
 }
+.scene-viewer-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: brightness(0.45);
+  pointer-events: none;
+}
 .scene-viewer-loading {
   position: absolute;
   inset: 0;
@@ -7401,9 +7429,10 @@ button {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  color: #aeb8c1;
+  color: #e7edf2;
   font-size: 13px;
   font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .scene-viewer-loading svg {
   color: var(--cyan);

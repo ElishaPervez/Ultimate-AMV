@@ -761,18 +761,28 @@ fn render_scene_clip_job(
     duration: f64,
     use_nvenc: bool,
 ) -> Result<(), String> {
-    // Output-side -ss (after -i): with input-side seek, ffmpeg lands on the
-    // nearest keyframe before <start> and the decoded frames in between keep
-    // their original PTS - the encoder emits them as 1-N "bleed" frames before
-    // the real cut. Output seek decodes-and-discards up to <start> before the
-    // encoder sees anything. -avoid_negative_ts make_zero is the muxer-level
-    // safety net for any residual negative PTS.
+    // Dual -ss for fast accurate seek:
+    //   - Coarse -ss BEFORE -i: ffmpeg keyframe-seeks straight to ~2s before
+    //     the cut. Without this, the demuxer walks every packet from t=0,
+    //     which for a scene 18 minutes into an episode is the dominant cost
+    //     of the whole render (~3-5s of wasted decode work).
+    //   - Precise -ss AFTER -i: decodes-and-discards the remaining frames up
+    //     to the exact cut point. This preserves the original scene-boundary
+    //     semantics (no encoder "bleed" frames at the head) - see
+    //     CLAUDE.md "Clip extractor : scene boundary semantics".
+    // -avoid_negative_ts make_zero is the muxer-level safety net for any
+    // residual negative PTS.
+    let coarse_back: f64 = 2.0;
+    let coarse_start = (start - coarse_back).max(0.0);
+    let fine_offset = (start - coarse_start).max(0.0);
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
+        "-ss".to_string(),
+        format!("{coarse_start:.3}"),
         // Universal HW decode: NVDEC on NVIDIA, QSV on Intel, D3D11VA on AMD,
         // software fallback otherwise. NOT NVIDIA-gated - works on any GPU and
         // degrades to software cleanly per the CPU/GPU parity rule.
@@ -781,7 +791,7 @@ fn render_scene_clip_job(
         "-i".to_string(),
         input.to_string_lossy().to_string(),
         "-ss".to_string(),
-        format!("{:.3}", start.max(0.0)),
+        format!("{fine_offset:.3}"),
         "-t".to_string(),
         format!("{duration:.3}"),
         // Optional audio mapping: silent sources skip the audio stream without
@@ -857,9 +867,61 @@ fn render_scene_clip_job(
     }
 }
 
+// Pay ffmpeg's cold-start tax (process spawn + DLL loads + NVENC capability
+// probe) once at app warmup, not on the user's first scene-preview click.
+// On Windows the first ffmpeg invocation per session is ~400-900ms slower
+// than subsequent ones because tools/ffmpeg-shared/avcodec-62.dll and ~6
+// other DLLs cold-load from disk; the NVENC probe doubles that by spawning
+// a second ffmpeg just to ask `-encoders`. Done as a fire-and-forget
+// background task so it doesn't block the rest of the warmup.
+//
+// Idempotent: if H264_NVENC_AVAILABLE is already set, the work has already
+// been done in this process, so subsequent calls are no-ops. Both clip
+// modes (CPU + GPU) hit scene_clip_render, so the warmup is registered as
+// its own Tauri command and called unconditionally from app startup -
+// gating it on clipMode would leave CPU users with the cold-start tax on
+// their first preview click, violating the CPU/GPU parity rule.
+fn warm_ffmpeg_background() {
+    if H264_NVENC_AVAILABLE.get().is_some() {
+        return;
+    }
+    std::thread::spawn(|| {
+        let Ok(root) = app_root() else { return };
+        let ffmpeg = find_tool(&root, "ffmpeg");
+        if ensure_tool(&ffmpeg).is_err() {
+            log_warn(
+                "clip.warmup.ffmpeg.missing",
+                "Could not warm ffmpeg: binary not found",
+                Value::Null,
+            );
+            return;
+        }
+        // Touch the DLLs by running a no-op. We don't care about the output.
+        let _ = cmd(&ffmpeg)
+            .args(["-hide_banner", "-version"])
+            .output();
+        // Cache the NVENC capability so the first scene_clip_render doesn't
+        // spawn a second ffmpeg to discover it.
+        H264_NVENC_AVAILABLE
+            .get_or_init(|| ffmpeg_listing(&ffmpeg, "-encoders").contains("h264_nvenc"));
+        log_info(
+            "clip.warmup.ffmpeg.done",
+            "Warmed ffmpeg DLL cache + NVENC probe",
+            Value::Null,
+        );
+    });
+}
+
+#[tauri::command]
+pub(crate) async fn warmup_ffmpeg() -> Result<(), String> {
+    warm_ffmpeg_background();
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn warmup_clip_server(app: tauri::AppHandle) -> Result<(), String> {
     log_info("clip.server.warmup.start", "Starting clip server warmup", Value::Null);
+    warm_ffmpeg_background();
     let mutex: &AsyncMutex<Option<AsyncChild>> = CLIP_SERVER.get_or_init(|| AsyncMutex::new(None));
     let mut guard = mutex.lock().await;
 

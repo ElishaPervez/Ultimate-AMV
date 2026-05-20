@@ -339,6 +339,7 @@ pub fn run() {
             clips::clip_extract,
             clips::clip_compat_convert,
             clips::warmup_clip_server,
+            clips::warmup_ffmpeg,
             sniffer::install_media_sniffer,
             downloads::download_stream,
             downloads::download_media,

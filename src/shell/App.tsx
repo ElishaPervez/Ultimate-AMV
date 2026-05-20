@@ -117,6 +117,11 @@ export function App() {
   }, [active, activeMeta]);
 
   React.useEffect(() => {
+    // Fire-and-forget ffmpeg warmup so the first scene preview click in the
+    // session doesn't pay a ~1-2s cold-start tax (DLL loads + NVENC probe).
+    // Runs in both clip modes - CPU users hit scene_clip_render too.
+    void invoke("warmup_ffmpeg").catch(() => {});
+
     invoke<string>("get_config")
       .then((raw) => {
         const payload = parseBridgePayload<AppConfig>(raw);
