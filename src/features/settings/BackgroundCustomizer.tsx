@@ -649,7 +649,7 @@ export function BackgroundCustomizer({
             <span>Dim <em>{Math.round(draft.dim)}%</em></span>
             <input
               type="range"
-              min={10}
+              min={0}
               max={100}
               step={1}
               value={draft.dim}
@@ -660,7 +660,7 @@ export function BackgroundCustomizer({
             <span>Blur <em>{Math.round(draft.blur)}px</em></span>
             <input
               type="range"
-              min={5}
+              min={0}
               max={40}
               step={1}
               value={draft.blur}

@@ -90,17 +90,15 @@ describe('readBackgroundState', () => {
     expect(readBackgroundState({ background_offset_x: 110 }).offsetX).toBe(100)
   })
 
-  it('reads and clamps dim within [10, 100]', () => {
+  it('reads and clamps dim within [0, 100]', () => {
     expect(readBackgroundState({ background_dim: 55 }).dim).toBe(55)
-    expect(readBackgroundState({ background_dim: -1 }).dim).toBe(10)
-    expect(readBackgroundState({ background_dim: 5 }).dim).toBe(10)
+    expect(readBackgroundState({ background_dim: -1 }).dim).toBe(0)
     expect(readBackgroundState({ background_dim: 200 }).dim).toBe(100)
   })
 
-  it('reads and clamps blur within [5, 40]', () => {
+  it('reads and clamps blur within [0, 40]', () => {
     expect(readBackgroundState({ background_blur: 20 }).blur).toBe(20)
-    expect(readBackgroundState({ background_blur: -5 }).blur).toBe(5)
-    expect(readBackgroundState({ background_blur: 0 }).blur).toBe(5)
+    expect(readBackgroundState({ background_blur: -5 }).blur).toBe(0)
     expect(readBackgroundState({ background_blur: 50 }).blur).toBe(40)
   })
 })
