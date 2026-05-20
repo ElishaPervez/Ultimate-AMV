@@ -253,35 +253,37 @@ export function App() {
           <div className="canvas">
             <div className="canvas-grid" aria-hidden="true" />
             <div className="focus-panel glass">
-              <div className="mode-switcher" aria-label="Workspace mode">
-                {modeTabs.map((tab) => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    className={`mode-tab spring-motion ${isAudioExtraction
-                        ? "is-active"
-                        : isDownloader
-                          ? downloaderTab === tab.id
-                            ? "is-active"
-                            : ""
-                          : isClipHunting
-                            ? "is-active"
-                            : isAudioConversion || isVideoConversion
-                            ? "is-active"
-                            : tab.id === "media" || tab.id === "logs" || tab.id === "general"
+              {modeTabs.length > 1 && (
+                <div className="mode-switcher" aria-label="Workspace mode">
+                  {modeTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      className={`mode-tab spring-motion ${isAudioExtraction
+                          ? "is-active"
+                          : isDownloader
+                            ? downloaderTab === tab.id
                               ? "is-active"
                               : ""
-                      }`}
-                    onClick={() => {
-                      if (isDownloader && (tab.id === "anime" || tab.id === "youtube")) {
-                        setDownloaderTab(tab.id);
-                      }
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+                            : isClipHunting
+                              ? "is-active"
+                              : isAudioConversion || isVideoConversion
+                              ? "is-active"
+                              : tab.id === "media" || tab.id === "logs" || tab.id === "general"
+                                ? "is-active"
+                                : ""
+                        }`}
+                      onClick={() => {
+                        if (isDownloader && (tab.id === "anime" || tab.id === "youtube")) {
+                          setDownloaderTab(tab.id);
+                        }
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="panel-body">
                 <div className={`panel-view spring-motion ${isClipHunting ? "is-active" : "is-hidden"}`} aria-hidden={!isClipHunting}>
                   <ClipExtractorPanel active={isClipHunting} />

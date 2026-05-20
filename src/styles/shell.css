@@ -688,6 +688,13 @@
   border: 1px solid var(--glass-border);
 }
 
+/* Single-tab panels skip the mode-switcher entirely; without this override
+   the leftover `auto` row would size to the panel's max-content and the
+   `1fr` row would render as wasted space at the bottom of the workspace. */
+.focus-panel:not(:has(.mode-switcher)) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .mode-switcher {
   display: flex;
   align-items: center;
