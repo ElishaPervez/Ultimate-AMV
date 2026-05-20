@@ -210,6 +210,23 @@ button {
   background:
     linear-gradient(135deg, rgb(var(--theme-accent-rgb) / 0.08), transparent 38%);
 }
+/* Muted/low-contrast text (section kickers, breadcrumbs, helper copy) is
+   designed to read well on the app's default dark surface but disappears
+   against a bright wallpaper. A subtle dark halo behind the text — the
+   Windows-desktop-icon trick — keeps the visual weight unchanged on dark
+   wallpapers (the halo is invisible) but rescues legibility on bright
+   ones without forcing a global panel scrim. */
+:root.has-app-bg .settings-toolbar,
+:root.has-app-bg .settings-group-header,
+:root.has-app-bg .settings-section-label,
+:root.has-app-bg .setting-row-description,
+:root.has-app-bg .setting-row-label,
+:root.has-app-bg .extract-hint,
+:root.has-app-bg .conversion-kicker,
+:root.has-app-bg .audio-status-line,
+:root.has-app-bg .bg-customizer-hint {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
 /* When a background image is set, every panel/glass surface on the path
    to the image inherits the user's blur slider via --app-bg-blur. At
    slider=0 the bg image stays sharp (no residual backdrop-filter blur
