@@ -38,7 +38,7 @@ export const DEFAULT_BG_STATE: BackgroundState = {
   offsetX: 50,
   offsetY: 50,
   dim: 55,
-  blur: 0,
+  blur: 5,
   videoPath: "",
   videoSource: "",
   videoFps: 30,

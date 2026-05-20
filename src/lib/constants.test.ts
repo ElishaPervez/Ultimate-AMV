@@ -104,7 +104,7 @@ describe('constants', () => {
     expect(DEFAULT_BG_STATE.dim).toBe(55)
   })
 
-  it('DEFAULT_BG_STATE.blur is 0', () => {
-    expect(DEFAULT_BG_STATE.blur).toBe(0)
+  it('DEFAULT_BG_STATE.blur is 5', () => {
+    expect(DEFAULT_BG_STATE.blur).toBe(5)
   })
 })
