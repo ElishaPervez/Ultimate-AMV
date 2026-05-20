@@ -31,12 +31,21 @@ pub(crate) struct ExportClip {
     pub fps: Option<f64>,
 }
 
+fn preset_extension(preset: &str) -> &'static str {
+    match preset {
+        "prores-lt" | "prores-hq" | "gpu-intra" => "mov",
+        "h264-cpu" | "hevc-cpu" | "h264-nvenc" | "av1-nvenc" => "mp4",
+        _ => "mov",
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn clip_export(
     window: tauri::Window,
     clips: Vec<ExportClip>,
     output_dir: String,
     preset: String,
+    quality_value: Option<i32>,
 ) -> Result<String, String> {
     if !matches!(preset.as_str(), "gpu-intra" | "prores-lt" | "prores-hq" | "h264-nvenc" | "av1-nvenc" | "h264-cpu" | "hevc-cpu") {
         return Err("Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, av1-nvenc, h264-cpu, or hevc-cpu".to_string());
@@ -44,13 +53,13 @@ pub(crate) async fn clip_export(
     log_info(
         "clip.export.start",
         "Starting clip export",
-        json!({ "clipCount": clips.len(), "outputDir": &output_dir, "preset": &preset }),
+        json!({ "clipCount": clips.len(), "outputDir": &output_dir, "preset": &preset, "qualityValue": quality_value }),
     );
     let log_clip_count = clips.len();
     let log_output_dir = output_dir.clone();
     let log_preset = preset.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        run_clip_export(window, clips, output_dir, preset)
+        run_clip_export(window, clips, output_dir, preset, quality_value)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -58,15 +67,22 @@ pub(crate) async fn clip_export(
         Ok(payload) => log_info(
             "clip.export.complete",
             "Clip export completed",
-            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "result": payload }),
+            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "qualityValue": quality_value, "result": payload }),
         ),
         Err(error) => log_error(
             "clip.export.error",
             "Clip export failed",
-            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "error": error }),
+            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "qualityValue": quality_value, "error": error }),
         ),
     }
     result
+}
+
+fn clamp_quality(quality: Option<i32>, min: i32, max: i32, default: i32) -> i32 {
+    match quality {
+        Some(value) => value.clamp(min, max),
+        None => default,
+    }
 }
 
 fn run_clip_export(
@@ -74,6 +90,7 @@ fn run_clip_export(
     clips: Vec<ExportClip>,
     output_dir: String,
     preset: String,
+    quality_value: Option<i32>,
 ) -> Result<String, String> {
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
@@ -89,8 +106,9 @@ fn run_clip_export(
     for (i, clip) in clips.iter().enumerate() {
         let input = canonical_input_path(&clip.source)?;
 
+        let ext = preset_extension(&preset);
         let output = loop {
-            let candidate = out_dir.join(format!("{file_index}.mov"));
+            let candidate = out_dir.join(format!("{file_index}.{ext}"));
             if !candidate.exists() {
                 break candidate;
             }
@@ -116,15 +134,20 @@ fn run_clip_export(
             raw_duration
         };
 
+        let input_args = vec![
+            "-ss".to_string(),
+            format!("{export_start:.3}"),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-t".to_string(),
+            format!("{export_duration:.3}"),
+        ];
+
         let message = match preset.as_str() {
             "gpu-intra" => {
+                let qp = clamp_quality(quality_value, 10, 28, 16);
+                args.extend(input_args.iter().cloned());
                 args.extend([
-                    "-ss".to_string(),
-                    format!("{export_start:.3}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{export_duration:.3}"),
                     "-c:v".to_string(),
                     "hevc_nvenc".to_string(),
                     "-preset".to_string(),
@@ -132,7 +155,7 @@ fn run_clip_export(
                     "-rc".to_string(),
                     "constqp".to_string(),
                     "-qp".to_string(),
-                    "16".to_string(),
+                    qp.to_string(),
                     "-g".to_string(),
                     "1".to_string(),
                     "-bf".to_string(),
@@ -167,86 +190,92 @@ fn run_clip_export(
                 format!("Encoding ProRes clip {}/{}", i + 1, clips.len())
             }
             "h264-nvenc" => {
+                let cq = clamp_quality(quality_value, 14, 28, 18);
+                args.extend(input_args.iter().cloned());
                 args.extend([
-                    "-ss".to_string(),
-                    format!("{export_start:.3}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{export_duration:.3}"),
                     "-c:v".to_string(),
                     "h264_nvenc".to_string(),
                     "-preset".to_string(),
                     "p4".to_string(),
+                    "-rc".to_string(),
+                    "constqp".to_string(),
                     "-cq".to_string(),
-                    "18".to_string(),
+                    cq.to_string(),
+                    "-spatial-aq".to_string(),
+                    "1".to_string(),
+                    "-temporal-aq".to_string(),
+                    "1".to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
+                    "-movflags".to_string(),
+                    "+faststart".to_string(),
                 ]);
                 format!("Encoding H.264 (NVENC) clip {}/{}", i + 1, clips.len())
             }
             "av1-nvenc" => {
+                let cq = clamp_quality(quality_value, 18, 34, 24);
+                args.extend(input_args.iter().cloned());
                 args.extend([
-                    "-ss".to_string(),
-                    format!("{export_start:.3}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{export_duration:.3}"),
                     "-c:v".to_string(),
                     "av1_nvenc".to_string(),
                     "-preset".to_string(),
                     "p4".to_string(),
+                    "-rc".to_string(),
+                    "constqp".to_string(),
                     "-cq".to_string(),
-                    "24".to_string(),
+                    cq.to_string(),
+                    "-spatial-aq".to_string(),
+                    "1".to_string(),
+                    "-temporal-aq".to_string(),
+                    "1".to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
+                    "-movflags".to_string(),
+                    "+faststart".to_string(),
                 ]);
                 format!("Encoding AV1 (NVENC) clip {}/{}", i + 1, clips.len())
             }
             "h264-cpu" => {
+                let crf = clamp_quality(quality_value, 14, 28, 18);
+                args.extend(input_args.iter().cloned());
                 args.extend([
-                    "-ss".to_string(),
-                    format!("{export_start:.3}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{export_duration:.3}"),
                     "-c:v".to_string(),
                     "libx264".to_string(),
                     "-preset".to_string(),
-                    "fast".to_string(),
+                    "slow".to_string(),
                     "-crf".to_string(),
-                    "18".to_string(),
+                    crf.to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
+                    "-movflags".to_string(),
+                    "+faststart".to_string(),
                 ]);
                 format!("Encoding H.264 (CPU) clip {}/{}", i + 1, clips.len())
             }
             "hevc-cpu" => {
+                let crf = clamp_quality(quality_value, 14, 28, 18);
+                args.extend(input_args.iter().cloned());
                 args.extend([
-                    "-ss".to_string(),
-                    format!("{export_start:.3}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{export_duration:.3}"),
                     "-c:v".to_string(),
                     "libx265".to_string(),
+                    "-tag:v".to_string(),
+                    "hvc1".to_string(),
                     "-preset".to_string(),
-                    "fast".to_string(),
+                    "slow".to_string(),
                     "-crf".to_string(),
-                    "18".to_string(),
+                    crf.to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
+                    "-movflags".to_string(),
+                    "+faststart".to_string(),
                 ]);
                 format!("Encoding HEVC (CPU) clip {}/{}", i + 1, clips.len())
             }
@@ -263,7 +292,61 @@ fn run_clip_export(
 
         let duration = export_duration;
         emit_conversion_progress(&window, "starting", Some(0.0), message, None, None);
-        run_ffmpeg_with_progress(&window, &ffmpeg, args, duration, "Exporting clip", Some(&CLIP_CHILD_PID))?;
+        let primary_result = run_ffmpeg_with_progress(
+            &window,
+            &ffmpeg,
+            args,
+            duration,
+            "Exporting clip",
+            Some(&CLIP_CHILD_PID),
+        );
+
+        if let Err(primary_error) = primary_result {
+            if preset == "gpu-intra" {
+                let qp = clamp_quality(quality_value, 10, 28, 16);
+                log_warn(
+                    "clip.export.fallback",
+                    "GPU Intra NVENC failed; retrying with libx264 software encoder",
+                    json!({ "clip": i + 1, "error": &primary_error }),
+                );
+                let _ = fs::remove_file(&output);
+                let mut fallback_args: Vec<String> = vec![
+                    "-y".to_string(),
+                    "-hide_banner".to_string(),
+                    "-nostdin".to_string(),
+                ];
+                fallback_args.extend(input_args.iter().cloned());
+                fallback_args.extend([
+                    "-c:v".to_string(),
+                    "libx264".to_string(),
+                    "-preset".to_string(),
+                    "slow".to_string(),
+                    "-crf".to_string(),
+                    qp.to_string(),
+                    "-pix_fmt".to_string(),
+                    "yuv420p".to_string(),
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                    "-b:a".to_string(),
+                    "320k".to_string(),
+                    "-progress".to_string(),
+                    "pipe:1".to_string(),
+                    "-stats_period".to_string(),
+                    "0.5".to_string(),
+                    output.to_string_lossy().to_string(),
+                ]);
+                run_ffmpeg_with_progress(
+                    &window,
+                    &ffmpeg,
+                    fallback_args,
+                    duration,
+                    "Exporting clip (libx264 fallback)",
+                    Some(&CLIP_CHILD_PID),
+                )?;
+            } else {
+                return Err(primary_error);
+            }
+        }
     }
 
     let done = ConversionDone {
@@ -282,6 +365,7 @@ pub(crate) async fn clip_export_merged(
     clips: Vec<ExportClip>,
     output_dir: String,
     preset: String,
+    quality_value: Option<i32>,
 ) -> Result<String, String> {
     if clips.len() < 2 {
         return Err("Merge requires at least 2 clips".to_string());
@@ -292,13 +376,13 @@ pub(crate) async fn clip_export_merged(
     log_info(
         "clip.export_merged.start",
         "Starting merged clip export",
-        json!({ "clipCount": clips.len(), "outputDir": &output_dir, "preset": &preset }),
+        json!({ "clipCount": clips.len(), "outputDir": &output_dir, "preset": &preset, "qualityValue": quality_value }),
     );
     let log_clip_count = clips.len();
     let log_output_dir = output_dir.clone();
     let log_preset = preset.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        run_clip_export_merged(window, clips, output_dir, preset)
+        run_clip_export_merged(window, clips, output_dir, preset, quality_value)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -306,12 +390,12 @@ pub(crate) async fn clip_export_merged(
         Ok(payload) => log_info(
             "clip.export_merged.complete",
             "Merged clip export completed",
-            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "result": payload }),
+            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "qualityValue": quality_value, "result": payload }),
         ),
         Err(error) => log_error(
             "clip.export_merged.error",
             "Merged clip export failed",
-            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "error": error }),
+            json!({ "clipCount": log_clip_count, "outputDir": log_output_dir, "preset": log_preset, "qualityValue": quality_value, "error": error }),
         ),
     }
     result
@@ -322,6 +406,7 @@ fn run_clip_export_merged(
     clips: Vec<ExportClip>,
     output_dir: String,
     preset: String,
+    quality_value: Option<i32>,
 ) -> Result<String, String> {
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
@@ -335,10 +420,11 @@ fn run_clip_export_merged(
         .map(|c| (c.index + 1).to_string())
         .collect::<Vec<_>>()
         .join("+");
-    let mut output = out_dir.join(format!("{base_name}.mov"));
+    let ext = preset_extension(&preset);
+    let mut output = out_dir.join(format!("{base_name}.{ext}"));
     let mut suffix = 1;
     while output.exists() {
-        output = out_dir.join(format!("{base_name} ({suffix}).mov"));
+        output = out_dir.join(format!("{base_name} ({suffix}).{ext}"));
         suffix += 1;
     }
 
@@ -396,58 +482,87 @@ fn run_clip_export_merged(
     args.push("-map".to_string());
     args.push("[outa]".to_string());
 
-    match preset.as_str() {
-        "gpu-intra" => args.extend([
-            "-c:v".to_string(), "hevc_nvenc".to_string(),
-            "-preset".to_string(), "p1".to_string(),
-            "-rc".to_string(), "constqp".to_string(),
-            "-qp".to_string(), "16".to_string(),
-            "-g".to_string(), "1".to_string(),
-            "-bf".to_string(), "0".to_string(),
-            "-profile:v".to_string(), "main10".to_string(),
-            "-highbitdepth".to_string(), "1".to_string(),
-            "-c:a".to_string(), "aac".to_string(),
-            "-b:a".to_string(), "320k".to_string(),
-        ]),
+    let encode_args: Vec<String> = match preset.as_str() {
+        "gpu-intra" => {
+            let qp = clamp_quality(quality_value, 10, 28, 16);
+            vec![
+                "-c:v".to_string(), "hevc_nvenc".to_string(),
+                "-preset".to_string(), "p1".to_string(),
+                "-rc".to_string(), "constqp".to_string(),
+                "-qp".to_string(), qp.to_string(),
+                "-g".to_string(), "1".to_string(),
+                "-bf".to_string(), "0".to_string(),
+                "-profile:v".to_string(), "main10".to_string(),
+                "-highbitdepth".to_string(), "1".to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "320k".to_string(),
+            ]
+        }
         "prores-lt" | "prores-hq" => {
             let profile = if preset == "prores-lt" { "1" } else { "3" };
-            args.extend([
+            vec![
                 "-c:v".to_string(), "prores_ks".to_string(),
                 "-profile:v".to_string(), profile.to_string(),
                 "-pix_fmt".to_string(), "yuv422p10le".to_string(),
                 "-c:a".to_string(), "pcm_s16le".to_string(),
-            ]);
+            ]
         }
-        "h264-nvenc" => args.extend([
-            "-c:v".to_string(), "h264_nvenc".to_string(),
-            "-preset".to_string(), "p4".to_string(),
-            "-cq".to_string(), "18".to_string(),
-            "-c:a".to_string(), "aac".to_string(),
-            "-b:a".to_string(), "320k".to_string(),
-        ]),
-        "av1-nvenc" => args.extend([
-            "-c:v".to_string(), "av1_nvenc".to_string(),
-            "-preset".to_string(), "p4".to_string(),
-            "-cq".to_string(), "24".to_string(),
-            "-c:a".to_string(), "aac".to_string(),
-            "-b:a".to_string(), "320k".to_string(),
-        ]),
-        "h264-cpu" => args.extend([
-            "-c:v".to_string(), "libx264".to_string(),
-            "-preset".to_string(), "fast".to_string(),
-            "-crf".to_string(), "18".to_string(),
-            "-c:a".to_string(), "aac".to_string(),
-            "-b:a".to_string(), "320k".to_string(),
-        ]),
-        "hevc-cpu" => args.extend([
-            "-c:v".to_string(), "libx265".to_string(),
-            "-preset".to_string(), "fast".to_string(),
-            "-crf".to_string(), "18".to_string(),
-            "-c:a".to_string(), "aac".to_string(),
-            "-b:a".to_string(), "320k".to_string(),
-        ]),
+        "h264-nvenc" => {
+            let cq = clamp_quality(quality_value, 14, 28, 18);
+            vec![
+                "-c:v".to_string(), "h264_nvenc".to_string(),
+                "-preset".to_string(), "p4".to_string(),
+                "-rc".to_string(), "constqp".to_string(),
+                "-cq".to_string(), cq.to_string(),
+                "-spatial-aq".to_string(), "1".to_string(),
+                "-temporal-aq".to_string(), "1".to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "320k".to_string(),
+                "-movflags".to_string(), "+faststart".to_string(),
+            ]
+        }
+        "av1-nvenc" => {
+            let cq = clamp_quality(quality_value, 18, 34, 24);
+            vec![
+                "-c:v".to_string(), "av1_nvenc".to_string(),
+                "-preset".to_string(), "p4".to_string(),
+                "-rc".to_string(), "constqp".to_string(),
+                "-cq".to_string(), cq.to_string(),
+                "-spatial-aq".to_string(), "1".to_string(),
+                "-temporal-aq".to_string(), "1".to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "320k".to_string(),
+                "-movflags".to_string(), "+faststart".to_string(),
+            ]
+        }
+        "h264-cpu" => {
+            let crf = clamp_quality(quality_value, 14, 28, 18);
+            vec![
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), "slow".to_string(),
+                "-crf".to_string(), crf.to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "320k".to_string(),
+                "-movflags".to_string(), "+faststart".to_string(),
+            ]
+        }
+        "hevc-cpu" => {
+            let crf = clamp_quality(quality_value, 14, 28, 18);
+            vec![
+                "-c:v".to_string(), "libx265".to_string(),
+                "-tag:v".to_string(), "hvc1".to_string(),
+                "-preset".to_string(), "slow".to_string(),
+                "-crf".to_string(), crf.to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "320k".to_string(),
+                "-movflags".to_string(), "+faststart".to_string(),
+            ]
+        }
         _ => unreachable!(),
-    }
+    };
+
+    let pre_encode_args = args.clone();
+    args.extend(encode_args);
 
     args.extend([
         "-progress".to_string(),
@@ -469,7 +584,47 @@ fn run_clip_export_merged(
         None,
         None,
     );
-    run_ffmpeg_with_progress(&window, &ffmpeg, args, total_duration, "Merging clips", Some(&CLIP_CHILD_PID))?;
+    let primary_result = run_ffmpeg_with_progress(
+        &window,
+        &ffmpeg,
+        args,
+        total_duration,
+        "Merging clips",
+        Some(&CLIP_CHILD_PID),
+    );
+    if let Err(primary_error) = primary_result {
+        if preset == "gpu-intra" {
+            let crf = clamp_quality(quality_value, 10, 28, 16);
+            log_warn(
+                "clip.export_merged.fallback",
+                "GPU Intra NVENC failed during merge; retrying with libx264 software encoder",
+                json!({ "error": &primary_error }),
+            );
+            let _ = fs::remove_file(&output);
+            let mut fallback_args = pre_encode_args;
+            fallback_args.extend([
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), "slow".to_string(),
+                "-crf".to_string(), crf.to_string(),
+                "-pix_fmt".to_string(), "yuv420p".to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "320k".to_string(),
+                "-progress".to_string(), "pipe:1".to_string(),
+                "-stats_period".to_string(), "0.5".to_string(),
+                output.to_string_lossy().to_string(),
+            ]);
+            run_ffmpeg_with_progress(
+                &window,
+                &ffmpeg,
+                fallback_args,
+                total_duration,
+                "Merging clips (libx264 fallback)",
+                Some(&CLIP_CHILD_PID),
+            )?;
+        } else {
+            return Err(primary_error);
+        }
+    }
 
     let done = ConversionDone {
         r#type: "done".to_string(),

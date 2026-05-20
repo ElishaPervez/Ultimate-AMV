@@ -103,28 +103,26 @@ export function App() {
   const liveBg = bgPreview ?? bgState;
   React.useEffect(() => {
     const root = document.documentElement;
-    const hasImage = Boolean(liveBg.imagePath);
-    root.classList.toggle("has-app-bg", hasImage);
-    if (hasImage) {
+    const hasBg = Boolean(liveBg.videoPath) || Boolean(liveBg.imagePath);
+    root.classList.toggle("has-app-bg", hasBg);
+    if (hasBg) {
       root.style.setProperty("--app-bg-blur", `${Math.max(0, liveBg.blur)}px`);
     } else {
       root.style.removeProperty("--app-bg-blur");
     }
-  }, [liveBg.imagePath, liveBg.blur]);
+  }, [liveBg.imagePath, liveBg.videoPath, liveBg.blur]);
 
   React.useEffect(() => {
     setDiscordPanel(activeMeta?.title ?? "Idle");
   }, [active, activeMeta]);
 
   React.useEffect(() => {
-    applyAppTheme(themeColors);
-  }, [themeColors]);
-
-  React.useEffect(() => {
     invoke<string>("get_config")
       .then((raw) => {
         const payload = parseBridgePayload<AppConfig>(raw);
-        setThemeColors(readThemeColors(payload));
+        const colors = readThemeColors(payload);
+        setThemeColors(colors);
+        applyAppTheme(colors);
         setBgState(readBackgroundState(payload));
       })
       .catch((error) => {
@@ -135,10 +133,12 @@ export function App() {
 
     const onThemeChanged = (event: Event) => {
       const colors = (event as CustomEvent<{ primary?: unknown; secondary?: unknown }>).detail;
-      setThemeColors({
+      const next = {
         primary: isHexColor(colors?.primary) ? colors.primary : APP_THEMES[0].colors[0],
         secondary: isHexColor(colors?.secondary) ? colors.secondary : APP_THEMES[0].colors[1],
-      });
+      };
+      setThemeColors(next);
+      applyAppTheme(next);
     };
     const onBgOpen = () => setBgModalOpen(true);
     window.addEventListener("theme-changed", onThemeChanged);

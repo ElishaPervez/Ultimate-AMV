@@ -241,6 +241,42 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
     logFrontend("warn", "tools.gate.cancel", "User cancelled tools install", {});
   }, []);
 
+  if (phase === "error" && !status) {
+    return (
+      <div className="startup-gate">
+        <div className="startup-gate-card startup-gate-card-wide">
+          <AlertTriangle size={30} className="startup-gate-icon is-error" />
+          <h2>Tools install failed</h2>
+          <p>
+            Could not check media tools. Check your network connection and try again.
+          </p>
+          {error && (
+            <div className="startup-gate-error">
+              <AlertTriangle size={16} />
+              <span>{error}</span>
+            </div>
+          )}
+          <div className="startup-gate-actions">
+            <button
+              type="button"
+              className="install-btn"
+              onClick={() => {
+                setPhase("checking");
+                void refreshStatus().then((next) => {
+                  if (next?.ok) onReady();
+                  else if (next) setPhase("missing");
+                });
+              }}
+            >
+              <RefreshCw size={16} />
+              <span>Retry</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (phase === "checking" || !status) {
     return (
       <div className="startup-gate">

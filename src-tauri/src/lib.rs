@@ -17,6 +17,7 @@ mod python_env;
 mod sniffer;
 mod tools;
 mod video_cmds;
+mod wallpaper;
 
 // Re-export internal helpers so sibling modules and discord.rs/tools.rs can
 // keep using `crate::xxx` paths.
@@ -195,6 +196,7 @@ fn prepare_for_update() -> Result<(), String> {
     kill_child_pid(&CLIP_CHILD_PID);
     kill_child_pid(&DOWNLOAD_CHILD_PID);
     kill_child_pid(&VIDEO_CHILD_PID);
+    kill_child_pid(&wallpaper::WALLPAPER_CHILD_PID);
     if let Some(mutex) = CLIP_SERVER.get() {
         let mut guard = mutex.blocking_lock();
         if let Some(child) = guard.as_mut() {
@@ -294,6 +296,7 @@ pub fn run() {
                 kill_child_pid(&CLIP_CHILD_PID);
                 kill_child_pid(&DOWNLOAD_CHILD_PID);
                 kill_child_pid(&VIDEO_CHILD_PID);
+                kill_child_pid(&wallpaper::WALLPAPER_CHILD_PID);
 
                 // Kill persistent server
                 if let Some(mutex) = CLIP_SERVER.get() {
@@ -328,6 +331,11 @@ pub fn run() {
             config::set_config,
             background_img::save_background_image,
             background_img::clear_background_image,
+            wallpaper::wallpaper_transcode,
+            wallpaper::wallpaper_cancel,
+            wallpaper::wallpaper_clear,
+            wallpaper::wallpaper_probe,
+            wallpaper::wallpaper_commit,
             clips::clip_extract,
             clips::clip_compat_convert,
             clips::warmup_clip_server,

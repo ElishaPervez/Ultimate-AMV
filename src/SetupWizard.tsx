@@ -226,7 +226,7 @@ export function SetupWizard({ onComplete }: Props) {
                 type="text"
                 className="setup-folder-input"
                 value={downloadPath}
-                placeholder="Default: Videos\Ultimate AMV\anime downloads"
+                placeholder="Default: Videos\Ultimate AMV"
                 readOnly
                 aria-label="Download folder path"
               />

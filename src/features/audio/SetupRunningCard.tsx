@@ -22,7 +22,8 @@ export function SetupRunningCard({
   const heading = `Installing ${mode === "gpu" ? "GPU" : "CPU"} engine`;
   const subheading =
     total > 0 ? `Step ${Math.min(step, total)} of ${total}` : "Preparing install...";
-  const detail = progress?.message ? friendlySetupMessage(progress.message) : "Starting...";
+  const detail =
+    progress?.message !== undefined ? friendlySetupMessage(progress.message) : "Starting...";
 
   return (
     <section className="audio-card install-card is-running" aria-live="polite">

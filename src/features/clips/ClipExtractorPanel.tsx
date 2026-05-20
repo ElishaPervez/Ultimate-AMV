@@ -15,8 +15,10 @@ import {
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, fileStem, normalizeSelectedPaths } from "../../lib/paths";
+import { clampNumber } from "../../lib/numbers";
 import { extensionAccept, useFileDrop } from "../../lib/useFileDrop";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
+import { VideoOutputControl } from "../video/VideoOutputControl";
 
 const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi"];
 const clipInputAccept = extensionAccept(CLIP_INPUT_EXTENSIONS);
@@ -32,7 +34,7 @@ import type {
   ClipProgress,
   ClipScene,
 } from "../../types/clip";
-import type { ConversionProgress, VideoGpuStatus } from "../../types/conversion";
+import type { ConversionProgress, VideoControlSpec, VideoGpuStatus } from "../../types/conversion";
 import { ClipCompatConvertModal } from "./ClipCompatConvertModal";
 import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
@@ -64,6 +66,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([]);
   const [selectedClipIds, setSelectedClipIds] = React.useState<Set<string>>(() => new Set());
   const [exportFormat, setExportFormat] = React.useState<ClipExportFormat>("prores-lt");
+  const [exportQuality, setExportQuality] = React.useState<Record<ClipExportFormat, number>>({
+    "gpu-intra": 16,
+    "h264-nvenc": 18,
+    "av1-nvenc": 24,
+    "h264-cpu": 18,
+    "hevc-cpu": 18,
+    "prores-lt": 0,
+    "prores-hq": 0,
+  });
   const [visibleRowRange, setVisibleRowRange] = React.useState<{ startIndex: number; endIndex: number } | null>(null);
   const [progress, setProgress] = React.useState<ClipProgress | null>(null);
   const [result, setResult] = React.useState<ClipExtractionResult | null>(null);
@@ -360,6 +371,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     [clipMode, gpuStatus],
   );
   const selectedExportOption = exportOptions.find((option) => option.value === exportFormat);
+  const qualitySpec = React.useMemo(() => clipQualitySpec(exportFormat), [exportFormat]);
+
+  React.useEffect(() => {
+    if (!qualitySpec) return;
+    setExportQuality((current) => {
+      const existing = current[exportFormat];
+      if (existing && existing >= qualitySpec.min && existing <= qualitySpec.max) {
+        return current;
+      }
+      return { ...current, [exportFormat]: qualitySpec.defaultValue };
+    });
+  }, [exportFormat, qualitySpec]);
 
   React.useEffect(() => {
     const current = clipExportOptions(clipMode, gpuStatus);
@@ -831,6 +854,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         clips: exportClips,
         outputDir: selected,
         preset: exportFormat,
+        qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
       });
       setExportSession((current) =>
         current
@@ -963,6 +987,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             ],
             outputDir: outDir,
             preset: exportFormat,
+            qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
           });
           setExportSession((current) =>
             current
@@ -1158,6 +1183,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               ))}
             </select>
             {selectedExportOption?.reason && <small className="stream-warning">{selectedExportOption.reason}</small>}
+            {qualitySpec && (
+              <VideoOutputControl
+                spec={qualitySpec}
+                value={exportQuality[exportFormat] || qualitySpec.defaultValue}
+                disabled={isExtracting}
+                onChange={(value) => {
+                  const clamped = clampNumber(value, qualitySpec.min, qualitySpec.max);
+                  setExportQuality((current) => ({ ...current, [exportFormat]: clamped }));
+                }}
+              />
+            )}
           </div>
 
           {!mergeMode && (
@@ -1534,6 +1570,70 @@ type ClipExportOption = {
   reason?: string;
 };
 
+function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
+  switch (format) {
+    case "gpu-intra":
+      return {
+        label: "Constant quality",
+        valueLabel: "QP",
+        help: "Lower values keep more detail and create larger files.",
+        min: 10,
+        max: 28,
+        step: 1,
+        defaultValue: 16,
+        suffix: "",
+      };
+    case "h264-nvenc":
+      return {
+        label: "Constant quality",
+        valueLabel: "CQ",
+        help: "Lower values keep more detail and create larger files.",
+        min: 14,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
+    case "av1-nvenc":
+      return {
+        label: "Constant quality",
+        valueLabel: "CQ",
+        help: "Lower values keep more detail and create larger files.",
+        min: 18,
+        max: 34,
+        step: 1,
+        defaultValue: 24,
+        suffix: "",
+      };
+    case "h264-cpu":
+      return {
+        label: "Constant rate factor",
+        valueLabel: "CRF",
+        help: "Lower values keep more detail and create larger files.",
+        min: 14,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
+    case "hevc-cpu":
+      return {
+        label: "Constant rate factor",
+        valueLabel: "CRF",
+        help: "Lower values keep more detail and create larger files.",
+        min: 14,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
+    case "prores-lt":
+    case "prores-hq":
+    default:
+      return null;
+  }
+}
+
 function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null): ClipExportOption[] {
   const cpuModeReason = "GPU export presets are hidden in CPU clip mode. Switch clip extraction to GPU mode to use NVENC presets.";
   const gpuIntraReady = Boolean(gpuStatus?.hasHevcNvenc);
@@ -1555,12 +1655,12 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
     },
     {
       value: "h264-cpu",
-      label: "H.264 CPU MOV",
+      label: "H.264 CPU MP4",
       disabled: false,
     },
     {
       value: "hevc-cpu",
-      label: "HEVC CPU MOV",
+      label: "HEVC CPU MP4",
       disabled: false,
     },
     {
@@ -1571,13 +1671,13 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
     },
     {
       value: "h264-nvenc",
-      label: "H.264 NVENC MOV",
+      label: "H.264 NVENC MP4",
       disabled: !gpuMode || !h264NvencReady,
       reason: !gpuMode ? cpuModeReason : h264NvencReady ? undefined : "Bundled FFmpeg does not expose h264_nvenc on this machine.",
     },
     {
       value: "av1-nvenc",
-      label: "AV1 NVENC MOV",
+      label: "AV1 NVENC MP4",
       disabled: !gpuMode || !av1NvencReady,
       reason: !gpuMode ? cpuModeReason : av1NvencReady ? undefined : "Bundled FFmpeg does not expose av1_nvenc on this machine.",
     },

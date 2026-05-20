@@ -20,6 +20,10 @@ export function VideoOutputControl({
   }, [value, spec.label]);
 
   function commitDraft() {
+    if (draftValue.trim() === "") {
+      onChange(spec.defaultValue);
+      return;
+    }
     const next = Number(draftValue);
     onChange(Number.isFinite(next) ? next : spec.defaultValue);
   }

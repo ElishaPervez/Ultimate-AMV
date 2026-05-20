@@ -19,6 +19,52 @@ export function AppearanceSettings({
   discordEnabled,
   toggleDiscordPresence,
 }: AppearanceSettingsProps) {
+  const [draftColors, setDraftColors] = React.useState(themeColors);
+  const draftRef = React.useRef(draftColors);
+  const pendingKeysRef = React.useRef<Set<"theme_color_a" | "theme_color_b">>(new Set());
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    setDraftColors(themeColors);
+    draftRef.current = themeColors;
+  }, [themeColors]);
+
+  React.useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
+
+  const flushPending = React.useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    const keys = pendingKeysRef.current;
+    if (keys.size === 0) return;
+    const colors = draftRef.current;
+    window.dispatchEvent(new CustomEvent("theme-changed", { detail: colors }));
+    if (keys.has("theme_color_a")) {
+      void persistConfigField("theme_color_a", colors.primary);
+    }
+    if (keys.has("theme_color_b")) {
+      void persistConfigField("theme_color_b", colors.secondary);
+    }
+    keys.clear();
+  }, [persistConfigField]);
+
+  const scheduleFlush = React.useCallback(
+    (key: "theme_color_a" | "theme_color_b") => {
+      pendingKeysRef.current.add(key);
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(flushPending, 200);
+    },
+    [flushPending],
+  );
+
   return (
     <div className="settings-category-wrapper">
       <div className="settings-group glass">
@@ -36,13 +82,15 @@ export function AppearanceSettings({
               <span>Color 1</span>
               <input
                 type="color"
-                value={themeColors.primary}
+                value={draftColors.primary}
                 onChange={(event) => {
-                  const next = { ...themeColors, primary: event.currentTarget.value };
+                  const next = { ...draftRef.current, primary: event.currentTarget.value };
+                  draftRef.current = next;
+                  setDraftColors(next);
                   applyAppTheme(next);
-                  window.dispatchEvent(new CustomEvent("theme-changed", { detail: next }));
-                  void persistConfigField("theme_color_a", next.primary);
+                  scheduleFlush("theme_color_a");
                 }}
+                onBlur={flushPending}
                 aria-label="Gradient theme color 1"
               />
             </label>
@@ -50,20 +98,22 @@ export function AppearanceSettings({
               <span>Color 2</span>
               <input
                 type="color"
-                value={themeColors.secondary}
+                value={draftColors.secondary}
                 onChange={(event) => {
-                  const next = { ...themeColors, secondary: event.currentTarget.value };
+                  const next = { ...draftRef.current, secondary: event.currentTarget.value };
+                  draftRef.current = next;
+                  setDraftColors(next);
                   applyAppTheme(next);
-                  window.dispatchEvent(new CustomEvent("theme-changed", { detail: next }));
-                  void persistConfigField("theme_color_b", next.secondary);
+                  scheduleFlush("theme_color_b");
                 }}
+                onBlur={flushPending}
                 aria-label="Gradient theme color 2"
               />
             </label>
             <div
               className="theme-gradient-preview"
               style={{
-                background: `linear-gradient(120deg, ${themeColors.primary}, ${themeColors.secondary})`,
+                background: `linear-gradient(120deg, ${draftColors.primary}, ${draftColors.secondary})`,
               }}
               aria-hidden="true"
             />

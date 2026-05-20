@@ -312,6 +312,11 @@ export function AudioExtractionPanel() {
           <CheckCircle2 size={17} /> {setupNotice}
         </div>
       )}
+      {selectedFiles.length > 0 && !extracting && resultMessage && (
+        <div className="audio-message is-success">
+          <CheckCircle2 size={17} /> {resultMessage}
+        </div>
+      )}
       {batchItems.length > 0 && <BatchStatusList items={batchItems} />}
     </div>
   );

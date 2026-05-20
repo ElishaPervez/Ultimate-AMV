@@ -1,14 +1,38 @@
 import React from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { AlertTriangle, CheckCircle2, Image as ImageIcon, Loader2, Trash2, Upload, X } from "lucide-react";
-import { DEFAULT_BG_STATE } from "../../lib/constants";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Film,
+  Image as ImageIcon,
+  Loader2,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
+import {
+  DEFAULT_BG_STATE,
+  WALLPAPER_FPS_OPTIONS,
+  WALLPAPER_VIDEO_EXTENSIONS,
+} from "../../lib/constants";
 import { clampNumber } from "../../lib/numbers";
+import { fileName } from "../../lib/paths";
 import { extensionAccept, useFileDrop } from "../../lib/useFileDrop";
 import type { BackgroundState } from "../../types/app";
 import { readBridgeError } from "../../utils/bridge";
 
 const BG_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 const bgImageAccept = extensionAccept(BG_IMAGE_EXTENSIONS);
+const bgVideoAccept = extensionAccept(WALLPAPER_VIDEO_EXTENSIONS);
+
+type TabId = "image" | "video";
+
+type WallpaperProgress = {
+  stage: string;
+  percent: number | null;
+  message: string;
+};
 
 export function BackgroundCustomizer({
   initial,
@@ -21,13 +45,38 @@ export function BackgroundCustomizer({
   onCommit: (state: BackgroundState) => void;
   onCancel: () => void;
 }) {
+  const [tab, setTab] = React.useState<TabId>(initial.videoPath ? "video" : "image");
   const [draft, setDraft] = React.useState<BackgroundState>(initial);
   const [busy, setBusy] = React.useState(false);
+  const [encoding, setEncoding] = React.useState(false);
+  const [sourceFps, setSourceFps] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [transcodeProgress, setTranscodeProgress] = React.useState<WallpaperProgress | null>(null);
   const frameRef = React.useRef<HTMLDivElement | null>(null);
   const dragRef = React.useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
   const draftRef = React.useRef(draft);
   React.useEffect(() => { draftRef.current = draft; }, [draft]);
+  // Bumped per transcode trigger so a slow encode can't overwrite the preview
+  // when the user has since picked a different fps or source.
+  const transcodeGenRef = React.useRef(0);
+  // Synchronous mirror of `encoding` so startTranscode can decide whether to
+  // cancel a prior ffmpeg without waiting for React state to commit.
+  const encodingRef = React.useRef(false);
+
+  // FPS dropdown choices clamped to the source's native rate. Encoding above
+  // the source rate would just duplicate frames - bad UX, no quality gain.
+  // The 15 fps floor stays available even for sub-15-fps sources. When
+  // sourceFps is unknown (still probing, or probe couldn't read it), the
+  // cap defaults to 30 rather than offering 60 - 60fps for a 24fps source
+  // is exactly the bad UX the cap exists to prevent.
+  const availableFpsOptions = React.useMemo(() => {
+    const cap =
+      sourceFps && Number.isFinite(sourceFps) && sourceFps > 0
+        ? Math.max(15, Math.round(sourceFps))
+        : 30;
+    const filtered = WALLPAPER_FPS_OPTIONS.filter((fps) => fps <= cap);
+    return filtered.length > 0 ? filtered : [15];
+  }, [sourceFps]);
 
   const update = React.useCallback((patch: Partial<BackgroundState>) => {
     setDraft((current) => {
@@ -38,6 +87,7 @@ export function BackgroundCustomizer({
   }, [onPreview]);
 
   const previewUrl = draft.imagePath ? convertFileSrc(draft.imagePath) : "";
+  const videoPreviewUrl = draft.videoPath ? convertFileSrc(draft.videoPath) : "";
 
   async function ingestImagePath(source: string) {
     setError(null);
@@ -71,12 +121,154 @@ export function BackgroundCustomizer({
     }
   }
 
-  const dropZone = useFileDrop({
+  async function startTranscode(source: string, fps: number) {
+    // Generation token lets a faster (cache-hit) result overtake a slower
+    // running encode without one clobbering the other in setState. We also
+    // explicitly cancel any prior in-flight ffmpeg so rapid replace-video
+    // or FPS-flip clicks don't pile up parallel encodes burning CPU.
+    if (encodingRef.current) {
+      try {
+        await invoke("wallpaper_cancel");
+      } catch {
+        // best-effort - even if cancel fails the gen token will discard the
+        // stale result and the new encode will overwrite WALLPAPER_CHILD_PID
+        // when its own ffmpeg starts.
+      }
+    }
+    const gen = ++transcodeGenRef.current;
+    setError(null);
+    setEncoding(true);
+    encodingRef.current = true;
+    setTranscodeProgress({ stage: "starting", percent: 0, message: "Starting compression..." });
+    try {
+      const result = await invoke<{ path: string; source: string; cached: boolean; fps: number }>(
+        "wallpaper_transcode",
+        { source, fps },
+      );
+      if (gen !== transcodeGenRef.current) return;
+      // Pair videoSource with the path the backend actually produced - the
+      // backend echoes the source it transcoded, so we can never end up
+      // with background_video pointing at one file while
+      // background_video_source claims another.
+      update({ videoPath: result.path, videoSource: result.source, videoFps: result.fps });
+      setTranscodeProgress(null);
+    } catch (e) {
+      if (gen !== transcodeGenRef.current) return;
+      setError(readBridgeError(e));
+      setTranscodeProgress(null);
+    } finally {
+      if (gen === transcodeGenRef.current) {
+        setEncoding(false);
+        encodingRef.current = false;
+      }
+    }
+  }
+
+  async function ingestVideoPath(selected: string) {
+    setError(null);
+    // Probe the source rate first so the fps dropdown reflects the real
+    // ceiling before we pick a default. The probe is cheap (~50ms) and
+    // surfaces "unsupported codec" errors right away instead of after a
+    // multi-second encode.
+    let probeFps = 0;
+    try {
+      const probe = await invoke<{ sourceFps: number; durationSeconds: number }>(
+        "wallpaper_probe",
+        { source: selected },
+      );
+      probeFps = probe.sourceFps;
+    } catch (e) {
+      setError(readBridgeError(e));
+      return;
+    }
+    // probeFps=0 means ffmpeg couldn't surface a frame rate (VFR, no fps tag,
+    // exotic container). Falling back to "allow 60fps" defeats the whole
+    // cap; 30 is the safe middle ground that won't bloat the file for what
+    // is usually a 24/25/30fps source in disguise.
+    const cap = probeFps > 0 ? Math.max(15, Math.round(probeFps)) : 30;
+    const optionsForSource = WALLPAPER_FPS_OPTIONS.filter((fps) => fps <= cap);
+    const pickFromOptions = optionsForSource.length > 0 ? optionsForSource : [15];
+    const defaultFps = pickFromOptions.includes(30)
+      ? 30
+      : pickFromOptions[pickFromOptions.length - 1];
+    setSourceFps(probeFps);
+    update({ videoSource: selected, videoPath: "", videoFps: defaultFps });
+    await startTranscode(selected, defaultFps);
+  }
+
+  async function chooseVideo() {
+    setError(null);
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "Video", extensions: [...WALLPAPER_VIDEO_EXTENSIONS] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      await ingestVideoPath(selected);
+    } catch (e) {
+      setError(readBridgeError(e));
+    }
+  }
+
+  async function changeFps(nextFps: number) {
+    // Clear videoPath synchronously: until the new fps's encode lands, there
+    // is no valid wallpaper to commit, and Apply's `!draft.videoPath` guard
+    // depends on this to reject the previous fps's file under the new fps
+    // number.
+    update({ videoFps: nextFps, videoPath: "" });
+    if (draftRef.current.videoSource) {
+      await startTranscode(draftRef.current.videoSource, nextFps);
+    }
+  }
+
+  // Probe the existing source on first mount so the dropdown opens with the
+  // correct cap when the user is editing an already-configured wallpaper.
+  // If the stored videoFps is now above the source's cap (config from an
+  // older session, or source file replaced with a lower-fps version), snap
+  // it down so the <select> doesn't render with a value not in its options.
+  React.useEffect(() => {
+    if (!initial.videoSource) return;
+    let cancelled = false;
+    void invoke<{ sourceFps: number; durationSeconds: number }>("wallpaper_probe", {
+      source: initial.videoSource,
+    })
+      .then((probe) => {
+        if (cancelled) return;
+        setSourceFps(probe.sourceFps);
+        const cap =
+          probe.sourceFps > 0 ? Math.max(15, Math.round(probe.sourceFps)) : 30;
+        const valid = WALLPAPER_FPS_OPTIONS.filter((fps) => fps <= cap);
+        const pool = valid.length > 0 ? valid : [15];
+        if (!pool.includes(draftRef.current.videoFps)) {
+          const snapped = pool[pool.length - 1];
+          update({ videoFps: snapped });
+        }
+      })
+      .catch(() => {
+        // Stale source path (file moved/deleted). Leave sourceFps null - the
+        // dropdown will fall back to the conservative 30fps cap above.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initial.videoSource, update]);
+
+  const imageDropZone = useFileDrop({
     accept: bgImageAccept,
-    enabled: !busy,
+    enabled: !busy && tab === "image",
     onDrop: (paths) => {
       const first = paths[0];
       if (first) void ingestImagePath(first);
+    },
+  });
+
+  const videoDropZone = useFileDrop({
+    accept: bgVideoAccept,
+    enabled: !busy && !encoding && tab === "video",
+    onDrop: (paths) => {
+      const first = paths[0];
+      if (first) void ingestVideoPath(first);
     },
   });
 
@@ -93,8 +285,25 @@ export function BackgroundCustomizer({
     }
   }
 
+  async function clearVideo() {
+    setError(null);
+    try {
+      setBusy(true);
+      // Invalidate any in-flight transcode so its result can't repopulate
+      // videoPath after the user explicitly removed the wallpaper.
+      transcodeGenRef.current += 1;
+      await invoke("wallpaper_clear");
+      setSourceFps(null);
+      update({ videoPath: "", videoSource: "", videoFps: DEFAULT_BG_STATE.videoFps });
+    } catch (e) {
+      setError(readBridgeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (!draft.imagePath) return;
+    if (tab !== "image" || !draft.imagePath) return;
     const frame = frameRef.current;
     if (!frame) return;
     frame.setPointerCapture(event.pointerId);
@@ -122,7 +331,7 @@ export function BackgroundCustomizer({
     frameRef.current?.releasePointerCapture(event.pointerId);
   }
   function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
-    if (!draft.imagePath) return;
+    if (tab !== "image" || !draft.imagePath) return;
     event.preventDefault();
     const delta = -event.deltaY * 0.0015;
     const next = clampNumber(draftRef.current.scale + delta, 1, 5);
@@ -130,31 +339,128 @@ export function BackgroundCustomizer({
   }
 
   function reset() {
-    update({ ...DEFAULT_BG_STATE, imagePath: draft.imagePath });
+    update({ ...DEFAULT_BG_STATE, imagePath: draft.imagePath, videoPath: draft.videoPath, videoSource: draft.videoSource, videoFps: draft.videoFps });
+  }
+
+  async function applyImage() {
+    const fields: Array<[string, string]> = [
+      ["background_image", draft.imagePath],
+      ["background_scale", String(draft.scale)],
+      ["background_offset_x", String(draft.offsetX)],
+      ["background_offset_y", String(draft.offsetY)],
+      ["background_dim", String(Math.round(draft.dim))],
+      ["background_blur", String(Math.round(draft.blur))],
+    ];
+    // Picking image clears any active video so the two stay mutually
+    // exclusive at render time (image won't ever shadow the video field).
+    if (draft.imagePath) {
+      fields.push(["background_video", ""]);
+      fields.push(["background_video_source", ""]);
+    }
+    for (const [key, value] of fields) {
+      await invoke<string>("set_config", { key, value });
+    }
+    const next: BackgroundState = draft.imagePath
+      ? { ...draft, videoPath: "", videoSource: "" }
+      : draft;
+    onCommit(next);
+  }
+
+  async function applyVideo() {
+    if (!draft.videoPath) {
+      // The transcode for this source + fps never produced a file - either
+      // it's still running or it errored out earlier. Apply has nothing to
+      // commit yet.
+      setError("Wallpaper is still being prepared. Wait for the preview, then Apply.");
+      return;
+    }
+    const fields: Array<[string, string]> = [
+      ["background_video", draft.videoPath],
+      ["background_video_source", draft.videoSource],
+      ["background_video_fps", String(draft.videoFps)],
+      ["background_dim", String(Math.round(draft.dim))],
+      ["background_blur", String(Math.round(draft.blur))],
+      // Setting a wallpaper hides the image background.
+      ["background_image", ""],
+    ];
+    for (const [key, value] of fields) {
+      await invoke<string>("set_config", { key, value });
+    }
+    // Prune sibling cache files now that the user has settled on a final
+    // source + fps. Earlier transcodes from this session (other fps values
+    // the user previewed) are no longer needed.
+    try {
+      await invoke("wallpaper_commit", { keep: draft.videoPath });
+    } catch {
+      // Pruning is best-effort - failing here just leaves an orphan file
+      // that the next commit will sweep, so don't surface it to the user.
+    }
+    const next: BackgroundState = {
+      ...draft,
+      imagePath: "",
+    };
+    onCommit(next);
   }
 
   async function apply() {
     setError(null);
     setBusy(true);
     try {
-      const fields: Array<[string, string]> = [
-        ["background_image", draft.imagePath],
-        ["background_scale", String(draft.scale)],
-        ["background_offset_x", String(draft.offsetX)],
-        ["background_offset_y", String(draft.offsetY)],
-        ["background_dim", String(Math.round(draft.dim))],
-        ["background_blur", String(Math.round(draft.blur))],
-      ];
-      for (const [key, value] of fields) {
-        await invoke<string>("set_config", { key, value });
+      if (tab === "video") {
+        await applyVideo();
+      } else {
+        await applyImage();
       }
-      onCommit(draft);
     } catch (e) {
       setError(readBridgeError(e));
     } finally {
       setBusy(false);
+      setTranscodeProgress(null);
     }
   }
+
+  async function cancelTranscode() {
+    // Bump the generation token BEFORE killing ffmpeg, so the catch branch
+    // in startTranscode sees gen mismatch and silently bails instead of
+    // surfacing the resulting "ffmpeg exited with code 1" as a red error.
+    transcodeGenRef.current += 1;
+    setEncoding(false);
+    encodingRef.current = false;
+    setTranscodeProgress(null);
+    try {
+      await invoke("wallpaper_cancel");
+    } catch (e) {
+      setError(readBridgeError(e));
+    }
+  }
+
+  // Subscribe to transcode progress only while a transcode is running, so we
+  // don't keep a Tauri listener alive for the whole modal lifetime.
+  React.useEffect(() => {
+    if (!encoding) return;
+    let unlisten: UnlistenFn | null = null;
+    let cancelled = false;
+    void listen<WallpaperProgress>("wallpaper-transcode-progress", (event) => {
+      if (!cancelled) setTranscodeProgress(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [encoding]);
+
+  const sharedFrameProps = {
+    onPointerDown: handlePointerDown,
+    onPointerMove: handlePointerMove,
+    onPointerUp: handlePointerUp,
+    onPointerCancel: handlePointerUp,
+    onWheel: handleWheel,
+  };
+
+  const videoSourceName = draft.videoSource ? fileName(draft.videoSource) : "";
 
   return (
     <div className="bg-customizer-backdrop" role="dialog" aria-label="Background customizer">
@@ -166,77 +472,179 @@ export function BackgroundCustomizer({
           </button>
         </div>
 
-        <div
-          ref={(node) => {
-            frameRef.current = node;
-            dropZone.ref.current = node;
-          }}
-          className={`bg-cropper-frame drop-zone ${draft.imagePath ? "is-active" : "is-empty"}${dropZone.hover ? " is-drop-target" : ""}`}
-          role={draft.imagePath ? undefined : "button"}
-          tabIndex={draft.imagePath ? undefined : 0}
-          onClick={draft.imagePath || busy ? undefined : () => void chooseImage()}
-          onKeyDown={
-            draft.imagePath
-              ? undefined
-              : (event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    if (!busy) void chooseImage();
-                  }
-                }
-          }
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          onWheel={handleWheel}
-        >
-          {draft.imagePath ? (
-            <div
-              className="bg-cropper-image"
-              style={{
-                backgroundImage: `url("${previewUrl}")`,
-                backgroundPosition: `${draft.offsetX}% ${draft.offsetY}%`,
-                transform: `scale(${draft.scale})`,
-                filter: draft.blur > 0 ? `blur(${draft.blur * 0.4}px)` : undefined,
-              }}
-            />
-          ) : (
-            <div className="bg-cropper-empty">
-              <ImageIcon size={28} strokeWidth={1.6} />
-              <span>Click to pick an image · or drop one here</span>
-            </div>
-          )}
-          {draft.imagePath && (
-            <div
-              className="bg-cropper-overlay"
-              style={{ background: `rgba(5, 5, 7, ${draft.dim / 100})` }}
-            />
-          )}
-          <div className="drop-zone-overlay">
-            <Upload size={28} strokeWidth={1.8} />
-            <span>Drop image to {draft.imagePath ? "replace" : "use"}</span>
-            <small>PNG · JPG · WEBP · BMP · GIF</small>
-          </div>
+        <div className="bg-customizer-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "image"}
+            className={`bg-customizer-tab spring-motion ${tab === "image" ? "is-active" : ""}`}
+            onClick={() => setTab("image")}
+          >
+            <ImageIcon size={14} strokeWidth={2.2} />
+            <span>Image</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "video"}
+            className={`bg-customizer-tab spring-motion ${tab === "video" ? "is-active" : ""}`}
+            onClick={() => setTab("video")}
+          >
+            <Film size={14} strokeWidth={2.2} />
+            <span>Live wallpaper</span>
+          </button>
         </div>
 
+        {tab === "image" ? (
+          <div
+            ref={(node) => {
+              frameRef.current = node;
+              imageDropZone.ref.current = node;
+            }}
+            className={`bg-cropper-frame drop-zone ${draft.imagePath ? "is-active" : "is-empty"}${imageDropZone.hover ? " is-drop-target" : ""}`}
+            role={draft.imagePath ? undefined : "button"}
+            tabIndex={draft.imagePath ? undefined : 0}
+            onClick={draft.imagePath || busy ? undefined : () => void chooseImage()}
+            onKeyDown={
+              draft.imagePath
+                ? undefined
+                : (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      if (!busy) void chooseImage();
+                    }
+                  }
+            }
+            {...sharedFrameProps}
+          >
+            {draft.imagePath ? (
+              <div
+                className="bg-cropper-image"
+                style={{
+                  backgroundImage: `url("${previewUrl}")`,
+                  backgroundPosition: `${draft.offsetX}% ${draft.offsetY}%`,
+                  transform: `scale(${draft.scale})`,
+                  filter: draft.blur > 0 ? `blur(${draft.blur * 0.4}px)` : undefined,
+                }}
+              />
+            ) : (
+              <div className="bg-cropper-empty">
+                <ImageIcon size={28} strokeWidth={1.6} />
+                <span>Click to pick an image · or drop one here</span>
+              </div>
+            )}
+            {draft.imagePath && (
+              <div
+                className="bg-cropper-overlay"
+                style={{ background: `rgba(5, 5, 7, ${draft.dim / 100})` }}
+              />
+            )}
+            <div className="drop-zone-overlay">
+              <Upload size={28} strokeWidth={1.8} />
+              <span>Drop image to {draft.imagePath ? "replace" : "use"}</span>
+              <small>PNG · JPG · WEBP · BMP · GIF</small>
+            </div>
+          </div>
+        ) : (
+          <div
+            ref={(node) => {
+              videoDropZone.ref.current = node;
+            }}
+            className={`bg-cropper-frame drop-zone ${draft.videoSource ? "is-active" : "is-empty"}${videoDropZone.hover ? " is-drop-target" : ""}`}
+            role={draft.videoSource ? undefined : "button"}
+            tabIndex={draft.videoSource ? undefined : 0}
+            onClick={draft.videoSource || busy ? undefined : () => void chooseVideo()}
+            onKeyDown={
+              draft.videoSource
+                ? undefined
+                : (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      if (!busy) void chooseVideo();
+                    }
+                  }
+            }
+          >
+            {draft.videoPath ? (
+              <video
+                className="bg-cropper-video"
+                src={videoPreviewUrl}
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="auto"
+                style={{ filter: draft.blur > 0 ? `blur(${draft.blur * 0.4}px)` : undefined }}
+              />
+            ) : draft.videoSource ? (
+              <div className="bg-cropper-empty">
+                <Film size={28} strokeWidth={1.6} />
+                <span>{encoding ? "Compressing" : "Preparing"} {videoSourceName}</span>
+                <small>Preview will start as soon as the encode finishes.</small>
+              </div>
+            ) : (
+              <div className="bg-cropper-empty">
+                <Film size={28} strokeWidth={1.6} />
+                <span>Click to pick a video · or drop one here</span>
+                <small>MP4 · MKV · WEBM · MOV · M4V</small>
+              </div>
+            )}
+            {draft.videoPath && (
+              <div
+                className="bg-cropper-overlay"
+                style={{ background: `rgba(5, 5, 7, ${draft.dim / 100})` }}
+              />
+            )}
+            <div className="drop-zone-overlay">
+              <Upload size={28} strokeWidth={1.8} />
+              <span>Drop video to {draft.videoSource ? "replace" : "use"}</span>
+              <small>MP4 · MKV · WEBM · MOV · M4V</small>
+            </div>
+          </div>
+        )}
+
         <div className="bg-customizer-hint">
-          {draft.imagePath ? "Drag inside the frame to pan · scroll to zoom" : ""}
+          {tab === "image"
+            ? draft.imagePath
+              ? "Drag inside the frame to pan · scroll to zoom"
+              : ""
+            : draft.videoSource
+              ? sourceFps && sourceFps > 0
+                ? `Source is ${sourceFps.toFixed(2)} fps · changing FPS re-encodes (cached after the first pass).`
+                : "Changing FPS re-encodes (cached after the first pass)."
+              : ""}
         </div>
 
         <div className="bg-customizer-controls">
-          <label className="bg-control">
-            <span>Zoom <em>{draft.scale.toFixed(2)}×</em></span>
-            <input
-              type="range"
-              min={1}
-              max={5}
-              step={0.01}
-              value={draft.scale}
-              onChange={(e) => update({ scale: Number(e.currentTarget.value) })}
-              disabled={!draft.imagePath}
-            />
-          </label>
+          {tab === "image" && (
+            <label className="bg-control">
+              <span>Zoom <em>{draft.scale.toFixed(2)}×</em></span>
+              <input
+                type="range"
+                min={1}
+                max={5}
+                step={0.01}
+                value={draft.scale}
+                onChange={(e) => update({ scale: Number(e.currentTarget.value) })}
+                disabled={!draft.imagePath}
+              />
+            </label>
+          )}
+          {tab === "video" && (
+            <label className="bg-control">
+              <span>FPS <em>{draft.videoFps}</em></span>
+              <select
+                className="bg-control-select"
+                value={draft.videoFps}
+                onChange={(e) => void changeFps(Number(e.currentTarget.value))}
+                disabled={!draft.videoSource || busy || encoding}
+              >
+                {availableFpsOptions.map((fps) => (
+                  <option key={fps} value={fps}>{fps} fps</option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="bg-control">
             <span>Dim <em>{Math.round(draft.dim)}%</em></span>
             <input
@@ -246,7 +654,6 @@ export function BackgroundCustomizer({
               step={1}
               value={draft.dim}
               onChange={(e) => update({ dim: Number(e.currentTarget.value) })}
-              disabled={!draft.imagePath}
             />
           </label>
           <label className="bg-control">
@@ -258,10 +665,32 @@ export function BackgroundCustomizer({
               step={1}
               value={draft.blur}
               onChange={(e) => update({ blur: Number(e.currentTarget.value) })}
-              disabled={!draft.imagePath}
             />
           </label>
         </div>
+
+        {transcodeProgress && (
+          <div className="bg-customizer-progress">
+            <div className="bg-customizer-progress-bar" aria-hidden="true">
+              <div
+                className="bg-customizer-progress-fill"
+                style={{ width: `${transcodeProgress.percent ?? 0}%` }}
+              />
+            </div>
+            <div className="bg-customizer-progress-row">
+              <span>{transcodeProgress.message}</span>
+              {busy && (
+                <button
+                  type="button"
+                  className="install-btn is-secondary"
+                  onClick={() => void cancelTranscode()}
+                >
+                  <span>Cancel</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="settings-notice is-error">
@@ -271,21 +700,33 @@ export function BackgroundCustomizer({
 
         <div className="bg-customizer-actions">
           <div className="bg-customizer-actions-left">
-            {draft.imagePath && (
+            {tab === "image" && draft.imagePath && (
               <button type="button" className="install-btn is-secondary" onClick={chooseImage} disabled={busy}>
                 <ImageIcon size={16} strokeWidth={2.2} />
                 <span>Replace image</span>
               </button>
             )}
-            {draft.imagePath && (
+            {tab === "image" && draft.imagePath && (
               <button type="button" className="install-btn is-secondary" onClick={clearImage} disabled={busy}>
                 <Trash2 size={16} strokeWidth={2.2} />
                 <span>Remove</span>
               </button>
             )}
-            {draft.imagePath && (
+            {tab === "image" && draft.imagePath && (
               <button type="button" className="install-btn is-secondary" onClick={reset} disabled={busy}>
                 <span>Reset position</span>
+              </button>
+            )}
+            {tab === "video" && draft.videoSource && (
+              <button type="button" className="install-btn is-secondary" onClick={chooseVideo} disabled={busy || encoding}>
+                <Film size={16} strokeWidth={2.2} />
+                <span>Replace video</span>
+              </button>
+            )}
+            {tab === "video" && (draft.videoPath || draft.videoSource) && (
+              <button type="button" className="install-btn is-secondary" onClick={clearVideo} disabled={busy || encoding}>
+                <Trash2 size={16} strokeWidth={2.2} />
+                <span>Remove</span>
               </button>
             )}
           </div>
@@ -293,9 +734,14 @@ export function BackgroundCustomizer({
             <button type="button" className="install-btn is-secondary" onClick={onCancel} disabled={busy}>
               <span>Cancel</span>
             </button>
-            <button type="button" className="install-btn is-primary" onClick={() => void apply()} disabled={busy}>
-              {busy ? <Loader2 size={16} className="audio-spin" /> : <CheckCircle2 size={16} strokeWidth={2.3} />}
-              <span>{busy ? "Saving..." : "Apply"}</span>
+            <button
+              type="button"
+              className="install-btn is-primary"
+              onClick={() => void apply()}
+              disabled={busy || encoding || (tab === "video" && !draft.videoPath)}
+            >
+              {busy || encoding ? <Loader2 size={16} className="audio-spin" /> : <CheckCircle2 size={16} strokeWidth={2.3} />}
+              <span>{encoding ? "Compressing..." : busy ? "Saving..." : "Apply"}</span>
             </button>
           </div>
         </div>

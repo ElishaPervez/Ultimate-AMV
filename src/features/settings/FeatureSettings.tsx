@@ -30,7 +30,7 @@ export function FeatureSettings({
           <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>
             <span className="setting-label">Download folder</span>
             <span className="setting-desc">
-              Where anime episodes are saved. Defaults to Videos\Ultimate AMV\anime downloads.
+              Where anime episodes are saved. Defaults to Videos\Ultimate AMV.
             </span>
           </div>
         </div>
@@ -39,7 +39,7 @@ export function FeatureSettings({
             type="text"
             className="settings-path-input"
             value={localDownloadPath}
-            placeholder="Default: Videos\Ultimate AMV\anime downloads"
+            placeholder="Default: Videos\Ultimate AMV"
             readOnly
             aria-label="Download folder path"
           />

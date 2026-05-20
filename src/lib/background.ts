@@ -15,5 +15,8 @@ export function readBackgroundState(config: Partial<AppConfig> | null | undefine
     offsetY: clampBgValue(config?.background_offset_y, 0, 100, DEFAULT_BG_STATE.offsetY),
     dim: clampBgValue(config?.background_dim, 0, 100, DEFAULT_BG_STATE.dim),
     blur: clampBgValue(config?.background_blur, 0, 40, DEFAULT_BG_STATE.blur),
+    videoPath: typeof config?.background_video === "string" ? config.background_video : "",
+    videoSource: typeof config?.background_video_source === "string" ? config.background_video_source : "",
+    videoFps: clampBgValue(config?.background_video_fps, 15, 60, DEFAULT_BG_STATE.videoFps),
   };
 }

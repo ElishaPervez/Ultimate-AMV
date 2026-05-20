@@ -246,7 +246,7 @@ pub(crate) async fn download_media(
 
 #[tauri::command]
 pub(crate) fn list_anime_folders(download_dir: Option<String>) -> Result<Vec<String>, String> {
-    let root = resolve_download_root(download_dir.as_deref());
+    let root = resolve_download_root(download_dir.as_deref()).join("anime downloads");
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -663,10 +663,9 @@ fn resolve_download_root(download_dir: Option<&str>) -> PathBuf {
     if let Ok(profile) = std::env::var("USERPROFILE") {
         return PathBuf::from(profile)
             .join("Videos")
-            .join("Ultimate AMV")
-            .join("anime downloads");
+            .join("Ultimate AMV");
     }
-    PathBuf::from("anime downloads")
+    PathBuf::from("Ultimate AMV")
 }
 
 fn download_history_path() -> PathBuf {
@@ -727,7 +726,9 @@ fn run_stream_download(
         .filter(|s| !s.is_empty());
     let output_dir = match custom_dir {
         Some(dir) => PathBuf::from(dir),
-        None => resolve_download_root(download_dir.as_deref()).join(&identity.anime_folder),
+        None => resolve_download_root(download_dir.as_deref())
+            .join("anime downloads")
+            .join(&identity.anime_folder),
     };
     std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     log_info(

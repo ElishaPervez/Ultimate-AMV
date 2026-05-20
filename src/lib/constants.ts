@@ -39,4 +39,10 @@ export const DEFAULT_BG_STATE: BackgroundState = {
   offsetY: 50,
   dim: 55,
   blur: 0,
+  videoPath: "",
+  videoSource: "",
+  videoFps: 30,
 };
+
+export const WALLPAPER_FPS_OPTIONS = [15, 24, 30, 60] as const;
+export const WALLPAPER_VIDEO_EXTENSIONS = ["mp4", "mkv", "webm", "mov", "m4v"];

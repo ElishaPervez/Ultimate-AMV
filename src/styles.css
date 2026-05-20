@@ -246,6 +246,14 @@ button {
   position: absolute;
   inset: 0;
 }
+.app-bg-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  will-change: filter;
+}
 
 .app-shell {
   position: relative;
@@ -388,6 +396,78 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.bg-customizer-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  align-self: flex-start;
+}
+.bg-customizer-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #8896a3;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.bg-customizer-tab:hover {
+  color: #d7dde3;
+}
+.bg-customizer-tab.is-active {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.bg-cropper-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.bg-control-select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e7edf2;
+  font-size: 12px;
+}
+.bg-customizer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bg-customizer-progress-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.bg-customizer-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, rgb(var(--theme-accent-rgb)), rgb(var(--theme-accent-rgb-secondary, var(--theme-accent-rgb))));
+  transition: width 120ms ease-out;
+}
+.bg-customizer-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: #c7d0d8;
 }
 
 /* ============================================================
@@ -4598,8 +4678,7 @@ button {
 }
 
 .is-compact .sidebar {
-  width: 64px;
-  padding: 18px 10px;
+  width: 100%;
 }
 
 .is-compact .nav-list {
@@ -4631,19 +4710,18 @@ button {
 .is-compact .settings-button {
   width: 40px;
   min-height: 40px;
-  grid-template-columns: 0px 40px;
+  grid-template-columns: 40px;
   justify-self: center;
   place-items: center;
   border-radius: 12px;
 }
 
 .is-compact .settings-button span {
-  width: 0;
-  padding: 0;
+  display: none;
 }
 
 .is-compact .settings-button svg {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
   justify-self: center;
   align-self: center;

@@ -35,6 +35,9 @@ export type AppConfig = {
   background_offset_y: number;
   background_dim: number;
   background_blur: number;
+  background_video: string;
+  background_video_source: string;
+  background_video_fps: number;
   audio_output_format: "wav" | "mp3";
   clip_hover_preview: boolean;
 };
@@ -46,4 +49,7 @@ export type BackgroundState = {
   offsetY: number;
   dim: number;
   blur: number;
+  videoPath: string;
+  videoSource: string;
+  videoFps: number;
 };

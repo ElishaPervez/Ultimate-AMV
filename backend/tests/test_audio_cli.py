@@ -23,6 +23,8 @@ class TestSetConfig(unittest.TestCase):
             "background_offset_y": 50.0,
             "background_dim": 55,
             "background_blur": 0,
+            "audio_output_format": "wav",
+            "clip_hover_preview": False,
         }
         payload.update(overrides)
         mock_emit.assert_called_once_with(payload)

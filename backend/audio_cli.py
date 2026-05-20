@@ -63,6 +63,9 @@ BACKGROUND_DEFAULTS = {
     "background_offset_y": 50.0,
     "background_dim": 55,
     "background_blur": 0,
+    "background_video": "",
+    "background_video_source": "",
+    "background_video_fps": 30,
 }
 
 
@@ -84,6 +87,9 @@ def _config_payload(cfg):
         "background_offset_y": float(cfg.get("background_offset_y", BACKGROUND_DEFAULTS["background_offset_y"])),
         "background_dim": int(cfg.get("background_dim", BACKGROUND_DEFAULTS["background_dim"])),
         "background_blur": int(cfg.get("background_blur", BACKGROUND_DEFAULTS["background_blur"])),
+        "background_video": cfg.get("background_video", BACKGROUND_DEFAULTS["background_video"]),
+        "background_video_source": cfg.get("background_video_source", BACKGROUND_DEFAULTS["background_video_source"]),
+        "background_video_fps": int(cfg.get("background_video_fps", BACKGROUND_DEFAULTS["background_video_fps"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
     }
@@ -191,6 +197,15 @@ def set_config(key, value):
         else:
             number = max(0, min(40, number))
         cfg[key] = number
+    elif key in {"background_video", "background_video_source"}:
+        cfg[key] = value
+    elif key == "background_video_fps":
+        try:
+            number = int(float(value))
+        except ValueError:
+            emit({"type": "error", "message": "background_video_fps must be an integer"})
+            return 1
+        cfg["background_video_fps"] = max(15, min(60, number))
     elif key == "audio_output_format":
         normalized = (value or "").strip().lower()
         if normalized not in {"wav", "mp3"}:
