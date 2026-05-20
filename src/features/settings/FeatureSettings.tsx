@@ -1,7 +1,8 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Film } from "lucide-react";
+import { Film, Music, FileAudio } from "lucide-react";
 import type { AppConfig } from "../../types/app";
+import { Dropdown } from "../../components/Dropdown";
 
 interface FeatureSettingsProps {
   backendConfig: AppConfig | null;
@@ -132,17 +133,27 @@ export function FeatureSettings({
               Format used for the vocal and instrumental stems. WAV is lossless; MP3 is roughly 1/10th the size.
             </span>
           </div>
-          <select
-            className="settings-format-select"
+          <Dropdown<"wav" | "mp3">
+            options={[
+              {
+                value: "wav",
+                label: "WAV (lossless)",
+                description: "Perfect lossless sound quality, larger file sizes.",
+                icon: FileAudio,
+              },
+              {
+                value: "mp3",
+                label: "MP3",
+                description: "High compatibility compression, ~10% size of WAV.",
+                icon: Music,
+              },
+            ]}
             value={backendConfig?.audio_output_format ?? "wav"}
-            onChange={(event) => {
-              void persistConfigField("audio_output_format", event.currentTarget.value);
+            onChange={(val) => {
+              void persistConfigField("audio_output_format", val);
             }}
-            aria-label="Vocal extraction output format"
-          >
-            <option value="wav">WAV (lossless)</option>
-            <option value="mp3">MP3</option>
-          </select>
+            align="right"
+          />
         </div>
       </div>
     </div>

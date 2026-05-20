@@ -4,7 +4,7 @@ import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCw, Globe, Link } from "lucide-react";
 import { extractEpisodeNumber } from "../../lib/episode";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { normalizeUrl } from "../../lib/url";
@@ -755,36 +755,40 @@ export function AnikaiBrowser({
           <span />
           {status === "ready" ? "Live" : status === "loading" ? "Loading" : "Error"}
         </div>
-        <select
-          value={providerMode === "custom" ? "__custom__" : providerPresetId}
-          onChange={(e) => {
-            const next = e.target.value;
-            if (next === "__custom__") {
+        <div className="provider-selector">
+          {PROVIDER_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={providerMode === "preset" && providerPresetId === preset.id ? "is-active" : ""}
+              onClick={() => {
+                setProviderMode("preset");
+                setProviderPresetId(preset.id);
+                allowedHostsRef.current = preset.hosts;
+                setAddress(preset.url);
+                setCurrentPageUrl(preset.url);
+                setLoadedUrl(preset.url);
+                setReloadKey((k) => k + 1);
+              }}
+            >
+              <Globe size={14} />
+              {preset.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={providerMode === "custom" ? "is-active" : ""}
+            onClick={() => {
               setProviderMode("custom");
               allowedHostsRef.current = [];
               setLoadedUrl(currentPageUrl);
               setReloadKey((k) => k + 1);
-              return;
-            }
-            const preset = PROVIDER_PRESETS.find((entry) => entry.id === next);
-            if (!preset) return;
-            setProviderMode("preset");
-            setProviderPresetId(preset.id);
-            allowedHostsRef.current = preset.hosts;
-            setAddress(preset.url);
-            setCurrentPageUrl(preset.url);
-            setLoadedUrl(preset.url);
-            setReloadKey((k) => k + 1);
-          }}
-          className="provider-select"
-        >
-          {PROVIDER_PRESETS.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.label}
-            </option>
-          ))}
-          <option value="__custom__">Custom URL</option>
-        </select>
+            }}
+          >
+            <Link size={14} />
+            Custom
+          </button>
+        </div>
         <input
           value={address}
           aria-label="Provider address"

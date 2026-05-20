@@ -1,0 +1,263 @@
+/* ============================================================
+   TABLE OF CONTENTS
+   ============================================================
+    1. VARIABLES, THEME TOKENS & UTILITIES
+    2. RESET & GLOBAL
+    3. APP BACKGROUND (image layer + has-app-bg chain)
+    4. BACKGROUND CUSTOMIZER MODAL
+    5. WINDOW CHROME
+    6. UPDATE TOAST
+    7. APP SHELL LAYOUT
+    8. SIDEBAR & NAVIGATION
+    9. WORKSPACE, CANVAS & FOCUS PANEL
+   10. EMPTY SURFACE
+   11. ANIKAI BROWSER LAYOUT
+   12. DOWNLOADER WORKSPACE & QUEUE
+   13. YOUTUBE DOWNLOADER
+   14. PROVIDER TOOLBAR & WEBVIEW
+   15. STREAM CAPTURE BAR
+   16. QUALITY PICKER
+   17. CLIP EXTRACTOR PANEL
+   18. CLIP PREVIEW GRID & MERGE STRIP
+   19. SPINNER
+   20. ANIME BROWSER & PLAYER
+   21. AUDIO EXTRACTION
+   22. STEM MIXER
+   23. AUDIO MESSAGES & BATCH STATUS
+   24. VIDEO / AUDIO CONVERSION
+   25. AUDIO HISTORY
+   26. LOGS PANEL
+   27. HISTORY ROW
+   28. COMPACT SIDEBAR OVERRIDES
+   29. RESPONSIVE: max-width 860px
+   30. SETTINGS PANEL
+   31. SETUP WIZARD
+   32. CLIP SERVER BADGE
+   33. STARTUP GATE
+   34. TOOLS GATE
+   35. YOUTUBE TRIM EDITOR
+   36. EPISODE LABEL MODAL
+   37. CLIP COMPAT CONVERT MODAL
+   38. DRAG & DROP ZONES
+   39. CROPPER EMPTY STATE OVERRIDES
+   40. CLIP EXPORT PROGRESS MODAL
+   41. SCENE VIEWER MODAL
+   ============================================================ */
+
+/* ============================================================
+   1. VARIABLES, THEME TOKENS & UTILITIES
+   ============================================================ */
+
+@property --sidebar-width {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 226px;
+}
+
+@property --sidebar-label-width {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 146px;
+}
+
+@property --sidebar-gap {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 10px;
+}
+
+:root {
+  font-family: 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color: #eef3f8;
+  background: #020203;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --ink: #eef3f8;
+  --muted: #94a3b8;
+  --line: rgba(255, 255, 255, 0.05);
+  --panel: rgba(10, 12, 16, 0.75);
+  --panel-strong: rgba(13, 16, 22, 0.85);
+  --glass: rgba(255, 255, 255, 0.03);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --theme-accent-rgb: 72 215 255;
+  --theme-accent-2-rgb: 99 230 162;
+  --theme-accent-contrast: #061116;
+  --cyan: rgb(var(--theme-accent-rgb));
+  --accent: rgb(var(--theme-accent-rgb));
+  --accent-gradient: linear-gradient(135deg, rgb(var(--theme-accent-rgb)), rgb(var(--theme-accent-2-rgb)));
+  --accent-glow: 0 0 20px rgb(var(--theme-accent-rgb) / 0.3);
+  --accent-soft: rgb(var(--theme-accent-rgb) / 0.1);
+  --accent-muted: rgb(var(--theme-accent-rgb) / 0.2);
+  --accent-border: rgb(var(--theme-accent-rgb) / 0.3);
+  --accent-border-strong: rgb(var(--theme-accent-rgb) / 0.5);
+  --green: #4ade80;
+  --rose: #fb7185;
+  --amber: #fbbf24;
+  --sidebar-expanded-width: 240px;
+  --sidebar-compact-width: 72px;
+  --sidebar-width: var(--sidebar-expanded-width);
+  --sidebar-label-width: 156px;
+  --sidebar-gap: 12px;
+  --radius-xl: 18px;
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --spring-easing: cubic-bezier(0.3, 1.5, 0.5, 1);
+}
+
+:root[data-theme="mint"] {
+  --theme-accent-rgb: 99 230 162;
+  --theme-accent-2-rgb: 72 215 255;
+  --theme-accent-contrast: #06140e;
+}
+
+:root[data-theme="violet"] {
+  --theme-accent-rgb: 169 140 255;
+  --theme-accent-2-rgb: 72 215 255;
+  --theme-accent-contrast: #0e0918;
+}
+
+:root[data-theme="rose"] {
+  --theme-accent-rgb: 255 109 145;
+  --theme-accent-2-rgb: 169 140 255;
+  --theme-accent-contrast: #18070d;
+}
+
+:root[data-theme="amber"] {
+  --theme-accent-rgb: 244 194 103;
+  --theme-accent-2-rgb: 255 109 145;
+  --theme-accent-contrast: #160f05;
+}
+
+.glass {
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+}
+
+.glass-strong {
+  background: var(--panel-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+}
+
+.spring-motion {
+  transition: all 400ms var(--spring-easing);
+}
+
+.accent-glow {
+  box-shadow: var(--accent-glow);
+}
+
+/* ============================================================
+   2. RESET & GLOBAL
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+}
+
+.desktop {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #020203;
+}
+
+/* ============================================================
+   3. APP BACKGROUND (image layer + has-app-bg chain)
+   ============================================================ */
+
+:root.has-app-bg,
+:root.has-app-bg body,
+:root.has-app-bg #root {
+  background: transparent;
+}
+:root.has-app-bg .desktop,
+:root.has-app-bg .app-shell,
+:root.has-app-bg .workspace {
+  background: transparent;
+}
+:root.has-app-bg .focus-panel {
+  background: transparent;
+}
+:root.has-app-bg .sidebar {
+  background: rgba(13, 16, 22, 0.45);
+}
+:root.has-app-bg .clip-extractor,
+:root.has-app-bg .downloader-workspace,
+:root.has-app-bg .anikai-browser {
+  background: transparent;
+}
+:root.has-app-bg .youtube-downloader {
+  background:
+    linear-gradient(135deg, rgb(var(--theme-accent-rgb) / 0.08), transparent 38%);
+}
+/* When a background image is set, every panel/glass surface on the path
+   to the image inherits the user's blur slider via --app-bg-blur. At
+   slider=0 the bg image stays sharp (no residual backdrop-filter blur
+   from the panel layers); above 0 the panels blur in step with the
+   slider. Modal backdrops (bg-customizer, episode-label, scene-viewer)
+   and small UI tiles (clip-corner-select) keep their fixed blur — they
+   aren't tied to the background image. */
+:root.has-app-bg .sidebar,
+:root.has-app-bg .focus-panel,
+:root.has-app-bg .glass,
+:root.has-app-bg .glass-strong,
+:root.has-app-bg .merge-strip,
+:root.has-app-bg .stem-mixer {
+  backdrop-filter: blur(var(--app-bg-blur, 0px));
+  -webkit-backdrop-filter: blur(var(--app-bg-blur, 0px));
+}
+
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.app-bg-image {
+  position: absolute;
+  inset: 0;
+  background-repeat: no-repeat;
+  background-size: cover;
+  transform-origin: 50% 50%;
+  will-change: transform, background-position, filter;
+}
+.app-bg-overlay {
+  position: absolute;
+  inset: 0;
+}
+.app-bg-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  will-change: filter;
+}
+
+.app-shell {
+  position: relative;
+  z-index: 1;
+}
+
+

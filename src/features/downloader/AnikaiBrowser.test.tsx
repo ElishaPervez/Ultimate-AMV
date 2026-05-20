@@ -133,17 +133,18 @@ describe('AnikaiBrowser', () => {
 
   it('renders the provider toolbar', () => {
     render(<AnikaiBrowser {...defaultProps} />)
-    expect(screen.getByRole('combobox')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /AniKai/i })).toBeInTheDocument()
   })
 
   it('renders AniKai as the default option in the provider select', () => {
     render(<AnikaiBrowser {...defaultProps} />)
-    const select = screen.getByRole('combobox') as HTMLSelectElement
-    expect(select.value).toBe('anikai')
+    expect(screen.getByRole('button', { name: /AniKai/i })).toBeInTheDocument()
   })
 
   it('renders AniWaves as an option in the provider select', () => {
     render(<AnikaiBrowser {...defaultProps} />)
+    const trigger = screen.getByRole('button', { name: /AniKai/i })
+    fireEvent.click(trigger)
     const options = screen.getAllByRole('option')
     const labels = options.map((o) => o.textContent)
     expect(labels).toContain('AniWaves')
@@ -151,6 +152,8 @@ describe('AnikaiBrowser', () => {
 
   it('renders Custom URL as an option', () => {
     render(<AnikaiBrowser {...defaultProps} />)
+    const trigger = screen.getByRole('button', { name: /AniKai/i })
+    fireEvent.click(trigger)
     const options = screen.getAllByRole('option')
     const labels = options.map((o) => o.textContent)
     expect(labels).toContain('Custom URL')
@@ -169,8 +172,10 @@ describe('AnikaiBrowser', () => {
 
   it('switching to Custom URL makes the address bar editable', async () => {
     render(<AnikaiBrowser {...defaultProps} />)
-    const select = screen.getByRole('combobox')
-    fireEvent.change(select, { target: { value: '__custom__' } })
+    const trigger = screen.getByRole('button', { name: /AniKai/i })
+    fireEvent.click(trigger)
+    const customOption = screen.getByRole('option', { name: /Custom URL/i })
+    fireEvent.click(customOption)
     await waitFor(() => {
       const input = screen.getByRole('textbox', { name: /Provider address/i }) as HTMLInputElement
       expect(input.readOnly).toBe(false)
@@ -179,8 +184,10 @@ describe('AnikaiBrowser', () => {
 
   it('shows a Go button in custom URL mode', async () => {
     render(<AnikaiBrowser {...defaultProps} />)
-    const select = screen.getByRole('combobox')
-    fireEvent.change(select, { target: { value: '__custom__' } })
+    const trigger = screen.getByRole('button', { name: /AniKai/i })
+    fireEvent.click(trigger)
+    const customOption = screen.getByRole('option', { name: /Custom URL/i })
+    fireEvent.click(customOption)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Go' })).toBeInTheDocument()
     })

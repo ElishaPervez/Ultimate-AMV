@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowRight, CheckCircle2, Clapperboard, Film, Info, Loader2, Scissors, Upload, X, Zap } from "lucide-react";
+import { Dropdown } from "../../components/Dropdown";
 import { Virtuoso } from "react-virtuoso";
 import {
   CLIP_AUDIO_SETTINGS_KEY,
@@ -382,6 +383,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     () => clipExportOptions(clipMode, gpuStatus),
     [clipMode, gpuStatus],
   );
+
+  const dropdownOptions = React.useMemo(() => {
+    return exportOptions.map((opt) => ({
+      value: opt.value,
+      label: opt.label,
+      disabled: opt.disabled,
+      description: opt.reason,
+    }));
+  }, [exportOptions]);
   const selectedExportOption = exportOptions.find((option) => option.value === exportFormat);
   const qualitySpec = React.useMemo(() => clipQualitySpec(exportFormat), [exportFormat]);
 
@@ -1182,18 +1192,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             <div className="clip-cols-label">
               <span>Export Format</span>
             </div>
-            <select
+            <Dropdown<ClipExportFormat>
               value={exportFormat}
-              onChange={(e) => setExportFormat(e.target.value as ClipExportFormat)}
-              className="clip-export-format-select"
-              title={selectedExportOption?.reason ?? selectedExportOption?.label}
-            >
-              {exportOptions.map((option) => (
-                <option key={option.value} value={option.value} disabled={option.disabled}>
-                  {option.label}{option.disabled ? " unavailable" : ""}
-                </option>
-              ))}
-            </select>
+              onChange={(next) => setExportFormat(next)}
+              options={dropdownOptions}
+              className="clip-export-format-dropdown"
+            />
             {selectedExportOption?.reason && <small className="stream-warning">{selectedExportOption.reason}</small>}
             {qualitySpec && (
               <VideoOutputControl

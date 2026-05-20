@@ -1,0 +1,842 @@
+/* ============================================================
+   19. SPINNER
+   ============================================================ */
+
+.is-spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ============================================================
+   26. LOGS PANEL
+   ============================================================ */
+
+.logs-panel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 14px 18px 18px;
+}
+
+.logs-toolbar {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.logs-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logs-toolbar button {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: #c8d0d7;
+  background: rgba(255, 255, 255, 0.045);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.logs-toolbar button:hover {
+  color: var(--theme-accent-contrast);
+  border-color: transparent;
+  background: var(--accent-gradient);
+}
+
+.logs-toolbar button.logs-clear-button {
+  color: #ffb7c1;
+  border-color: rgba(255, 80, 104, 0.34);
+  background: rgba(255, 41, 74, 0.1);
+}
+
+.logs-toolbar button.logs-clear-button:hover {
+  color: #fff;
+  border-color: rgba(255, 68, 92, 0.82);
+  background: rgba(255, 41, 74, 0.72);
+}
+
+.logs-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.logs-toolbar button:disabled:hover {
+  color: #c8d0d7;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.logs-toolbar button.logs-clear-button:disabled:hover {
+  color: #ffb7c1;
+  border-color: rgba(255, 80, 104, 0.34);
+  background: rgba(255, 41, 74, 0.1);
+}
+
+.terminal-log {
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  color: #d5dde4;
+  background: rgba(5, 7, 8, 0.55);
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* ============================================================
+   27. HISTORY ROW
+   ============================================================ */
+
+.history-row {
+  display: grid;
+  gap: 6px;
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.history-row div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.history-row strong {
+  font-size: 14px;
+}
+
+.history-row span,
+.history-row p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ============================================================
+   32. CLIP SERVER BADGE
+   ============================================================ */
+
+.clip-server-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  transition: all 0.2s ease;
+}
+
+.clip-source-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.clip-source-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.clip-server-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.clip-server-badge.is-warming {
+  border-color: rgba(244, 194, 103, 0.3);
+  background: rgba(244, 194, 103, 0.08);
+  color: var(--amber);
+}
+
+.clip-server-badge.is-warming::before {
+  animation: clip-badge-pulse 1.2s infinite ease-in-out;
+}
+
+.clip-server-badge.is-ready {
+  border-color: rgba(143, 227, 136, 0.3);
+  background: rgba(143, 227, 136, 0.08);
+  color: var(--green);
+}
+
+@keyframes clip-badge-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+/* ============================================================
+   33. STARTUP GATE
+   ============================================================ */
+
+.startup-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #020203;
+}
+
+.startup-gate-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  max-width: 94vw;
+  min-width: 280px;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+.startup-gate-card-wide {
+  width: min(720px, 94vw);
+  max-height: min(760px, 92vh);
+  overflow: auto;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 28px;
+}
+
+.startup-gate-icon {
+  align-self: flex-start;
+  color: var(--amber);
+}
+
+.startup-gate-icon.is-error {
+  color: var(--rose);
+}
+
+.startup-gate-card h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.startup-gate-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.startup-gate-list {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid rgba(244, 194, 103, 0.28);
+  border-radius: 8px;
+  background: rgba(244, 194, 103, 0.08);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.startup-gate-table {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+  font-size: 12px;
+}
+
+.startup-gate-table span,
+.startup-gate-table strong {
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--panel);
+}
+
+.startup-gate-table span {
+  color: var(--muted);
+}
+
+.startup-gate-table strong {
+  color: var(--ink);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.startup-gate-table strong.is-installed {
+  color: var(--green);
+}
+
+.startup-gate-table strong.is-missing {
+  color: var(--rose);
+}
+
+.startup-gate-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 109, 145, 0.34);
+  border-radius: 8px;
+  background: rgba(255, 109, 145, 0.08);
+  color: var(--rose);
+  font-size: 13px;
+}
+
+.startup-gate-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.startup-gate-log {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.startup-gate-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.startup-gate-actions .install-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  text-align: center;
+}
+
+.startup-gate-actions .install-btn span {
+  grid-column: auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.startup-gate-actions .install-btn svg {
+  grid-column: auto;
+  grid-row: auto;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 680px) {
+  .startup-gate-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================
+   34. TOOLS GATE
+   ============================================================ */
+
+.tools-gate-list {
+  display: grid;
+  gap: 10px;
+}
+
+.tools-gate-row {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.tools-gate-row.is-done {
+  border-color: rgba(99, 230, 162, 0.4);
+  background: rgba(99, 230, 162, 0.06);
+}
+
+.tools-gate-row.is-active {
+  border-color: rgba(72, 215, 255, 0.4);
+  background: rgba(72, 215, 255, 0.05);
+}
+
+.tools-gate-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tools-gate-name {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.tools-gate-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tools-gate-row.is-done .tools-gate-state {
+  color: var(--green);
+}
+
+.tools-gate-row.is-active .tools-gate-state {
+  color: var(--ink);
+}
+
+.tools-gate-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.tools-gate-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, #48d7ff, #63e6a2);
+  transition: width 120ms linear;
+}
+
+.tools-gate-row.is-done .tools-gate-bar-fill {
+  background: var(--green);
+}
+
+.tools-gate-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tools-gate-footnote {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* ============================================================
+   38. DRAG & DROP ZONES
+   ============================================================ */
+
+/* Drag-and-drop zones : hover indicator while the OS is holding files
+   over a region wired up via useFileDrop. The overlay is pointer-events:
+   none so it never swallows the underlying click. */
+.drop-zone {
+  position: relative;
+}
+.drop-zone.is-drop-target {
+  outline: 1px dashed rgb(var(--theme-accent-rgb) / 0.55);
+  outline-offset: -6px;
+  border-radius: 12px;
+}
+.drop-zone-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border-radius: inherit;
+  background: rgb(var(--theme-accent-rgb) / 0.12);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1.5px dashed rgb(var(--theme-accent-rgb) / 0.75);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.985);
+  transition:
+    opacity 140ms ease,
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1.05);
+}
+.drop-zone.is-drop-target .drop-zone-overlay {
+  opacity: 1;
+  transform: scale(1);
+}
+.drop-zone-overlay svg {
+  color: var(--cyan);
+  filter: drop-shadow(0 6px 18px rgb(var(--theme-accent-rgb) / 0.45));
+}
+.drop-zone-overlay small {
+  font-size: 12px;
+  font-weight: 600;
+  color: #aeb8c1;
+}
+
+/* ============================================================
+   42. CUSTOM DROPDOWN COMPONENT
+   ============================================================ */
+
+.custom-dropdown-container {
+  position: relative;
+  display: inline-block;
+  min-width: 150px;
+  user-select: none;
+  font-family: inherit;
+}
+
+.custom-dropdown-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+  outline: none;
+  text-align: left;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.custom-dropdown-trigger:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: var(--accent-border);
+}
+
+.custom-dropdown-trigger:focus-visible:not(:disabled) {
+  border-color: var(--accent-border-strong);
+  box-shadow: 0 0 0 2px rgb(var(--theme-accent-rgb) / 0.25), var(--accent-glow);
+}
+
+.custom-dropdown-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.custom-dropdown-trigger-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.custom-dropdown-trigger-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-dropdown-trigger-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: var(--cyan);
+}
+
+.custom-dropdown-chevron {
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.6);
+  transition: transform 300ms var(--spring-easing);
+}
+
+.custom-dropdown-chevron.is-open {
+  transform: rotate(180deg);
+  color: var(--cyan);
+}
+
+/* Dropdown Menu panel - solid background */
+.custom-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  min-width: 220px;
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+
+  background: #0d1016;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+
+  transform-origin: top center;
+  animation: dropdown-fade-in 260ms var(--spring-easing) forwards;
+}
+
+.custom-dropdown-menu.is-right {
+  left: auto;
+  right: 0;
+}
+
+@keyframes dropdown-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Search input wrapper */
+.custom-dropdown-search-wrap {
+  position: sticky;
+  top: 0;
+  background: #0d1016;
+  padding: 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  z-index: 1;
+}
+
+.custom-dropdown-search-icon {
+  position: absolute;
+  left: 12px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.custom-dropdown-search-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 11.5px;
+  padding: 6px 8px 6px 30px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.custom-dropdown-search-input:focus {
+  border-color: var(--accent-border);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Options */
+.custom-dropdown-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  max-height: 220px;
+}
+
+/* Custom Scrollbar for Options List */
+.custom-dropdown-options-list::-webkit-scrollbar,
+.custom-dropdown-menu::-webkit-scrollbar {
+  width: 5px;
+}
+
+.custom-dropdown-options-list::-webkit-scrollbar-track,
+.custom-dropdown-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-dropdown-options-list::-webkit-scrollbar-thumb,
+.custom-dropdown-menu::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 99px;
+}
+
+.custom-dropdown-options-list::-webkit-scrollbar-thumb:hover,
+.custom-dropdown-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.custom-dropdown-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
+  outline: none;
+  border: none;
+  background: transparent;
+  color: #c8d3dc;
+  text-align: left;
+  width: 100%;
+}
+
+.custom-dropdown-option:hover:not(.is-disabled),
+.custom-dropdown-option.is-focused:not(.is-disabled) {
+  background-color: var(--accent-soft);
+  color: #fff;
+}
+
+.custom-dropdown-option.is-selected:not(.is-disabled) {
+  background-color: rgb(var(--theme-accent-rgb) / 0.14);
+  color: var(--cyan);
+}
+
+.custom-dropdown-option.is-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.custom-dropdown-option-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--cyan);
+}
+
+.custom-dropdown-option-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.custom-dropdown-option-label {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.custom-dropdown-option-desc {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.25;
+}
+
+.custom-dropdown-option-check {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  align-self: center;
+  color: var(--cyan);
+  margin-left: auto;
+}
+
+/* Multi-select badges in trigger */
+.custom-dropdown-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.custom-dropdown-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--cyan);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.custom-dropdown-badge-remove {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  color: var(--cyan);
+  opacity: 0.7;
+  transition: opacity 0.1s;
+}
+
+.custom-dropdown-badge-remove:hover {
+  opacity: 1;
+}
+
+/* Empty state */
+.custom-dropdown-no-results {
+  padding: 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* Custom Dropdown Overrides for Clip Export Format */
+.clip-export-format-dropdown {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.clip-export-format-dropdown .custom-dropdown-trigger {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.clip-export-format-dropdown .custom-dropdown-trigger:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+
