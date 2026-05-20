@@ -8,6 +8,13 @@
 
 import '@testing-library/jest-dom'
 
+// jsdom doesn't implement Element.prototype.scrollIntoView. Anything that
+// calls it during render (e.g. Dropdown's keyboard nav effect) throws.
+// Stub it as a no-op so component tests can render normally.
+if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {}
+}
+
 // Install all mocks — vi.mock() calls inside these modules are hoisted
 // automatically by Vitest's module system.
 import { installTauriResets } from './tauri'

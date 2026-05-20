@@ -155,21 +155,23 @@ describe('FeatureSettings', () => {
 
   it('shows WAV as default selected audio output format', () => {
     renderFeatureSettings()
-    const select = screen.getByRole('combobox', { name: /Vocal extraction output format/i })
-    expect(select).toHaveValue('wav')
+    const trigger = screen.getByRole('button', { name: /WAV \(lossless\)/i })
+    expect(trigger).toBeInTheDocument()
   })
 
   it('shows MP3 when backendConfig.audio_output_format is mp3', () => {
     renderFeatureSettings({ backendConfig: { ...baseConfig, audio_output_format: 'mp3' } })
-    const select = screen.getByRole('combobox', { name: /Vocal extraction output format/i })
-    expect(select).toHaveValue('mp3')
+    const trigger = screen.getByRole('button', { name: /^MP3$/i })
+    expect(trigger).toBeInTheDocument()
   })
 
   it('changing audio output format calls persistConfigField with correct args', async () => {
     const user = userEvent.setup()
     const { persistConfigField } = renderFeatureSettings()
-    const select = screen.getByRole('combobox', { name: /Vocal extraction output format/i })
-    await user.selectOptions(select, 'mp3')
+    const trigger = screen.getByRole('button', { name: /WAV \(lossless\)/i })
+    await user.click(trigger)
+    const mp3Option = screen.getByRole('option', { name: /MP3/i })
+    await user.click(mp3Option)
     expect(persistConfigField).toHaveBeenCalledWith('audio_output_format', 'mp3')
   })
 })
