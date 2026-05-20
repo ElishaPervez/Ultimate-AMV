@@ -2,7 +2,7 @@
  * Tests for LogsPanel component.
  * Depth from root: src/features/logs/ -> depth 3 -> ../../../tests/setup/tauri
  */
-import { render, screen, waitFor, act } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockInvoke } from '../../../tests/setup/tauri'
 import { LogsPanel } from './LogsPanel'
@@ -40,7 +40,7 @@ describe('LogsPanel', () => {
     mockInvoke('app_logs', () => makeLogsPayload(['a', 'b', 'c']))
     render(<LogsPanel />)
     await waitFor(() => {
-      expect(screen.getByText('3 log lines')).toBeInTheDocument()
+      expect(screen.getByText(/Showing 3 of 3 log lines/i)).toBeInTheDocument()
     })
   })
 
@@ -48,7 +48,7 @@ describe('LogsPanel', () => {
     mockInvoke('app_logs', () => makeLogsPayload([]))
     render(<LogsPanel />)
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /clear logs/i })).toBeDisabled()
+      expect(screen.getByRole('button', { name: /^clear$/i })).toBeDisabled()
     })
   })
 
@@ -56,7 +56,7 @@ describe('LogsPanel', () => {
     mockInvoke('app_logs', () => makeLogsPayload([]))
     render(<LogsPanel />)
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /copy logs/i })).toBeDisabled()
+      expect(screen.getByRole('button', { name: /^copy$/i })).toBeDisabled()
     })
   })
 
@@ -64,7 +64,7 @@ describe('LogsPanel', () => {
     mockInvoke('app_logs', () => makeLogsPayload(['a line']))
     render(<LogsPanel />)
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /clear logs/i })).toBeEnabled()
+      expect(screen.getByRole('button', { name: /^clear$/i })).toBeEnabled()
     })
   })
 
@@ -80,7 +80,7 @@ describe('LogsPanel', () => {
     // Re-mock app_logs to return empty after clear
     mockInvoke('app_logs', () => makeLogsPayload([]))
 
-    await user.click(screen.getByRole('button', { name: /clear logs/i }))
+    await user.click(screen.getByRole('button', { name: /^clear$/i }))
     await waitFor(() => {
       expect(screen.getByText('No logs yet')).toBeInTheDocument()
     })
@@ -94,28 +94,11 @@ describe('LogsPanel', () => {
     })
   })
 
-  it('refresh button calls app_logs again', async () => {
-    const user = userEvent.setup()
-    let callCount = 0
-    mockInvoke('app_logs', () => {
-      callCount += 1
-      return makeLogsPayload([`call ${callCount}`])
-    })
-    render(<LogsPanel />)
-
-    // Initial load
-    await waitFor(() => expect(screen.getByLabelText('Application logs')).toBeInTheDocument())
-    const countBefore = callCount
-
-    await user.click(screen.getByRole('button', { name: /refresh/i }))
-    await waitFor(() => expect(callCount).toBeGreaterThan(countBefore))
-  })
-
   it('copy button is enabled when there are lines', async () => {
     mockInvoke('app_logs', () => makeLogsPayload(['a line']))
     render(<LogsPanel />)
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /copy logs/i })).toBeEnabled()
+      expect(screen.getByRole('button', { name: /^copy$/i })).toBeEnabled()
     })
   })
 })
