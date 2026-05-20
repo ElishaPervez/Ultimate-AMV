@@ -67,6 +67,8 @@ pub(crate) fn python_sidecar_env() -> Vec<(&'static str, std::ffi::OsString)> {
     if let Some(dir) = TOOLS_DIR_OVERRIDE.get() {
         env.push(("ULTIMATE_AMV_TOOLS_DIR", dir.clone().into_os_string()));
     }
+    env.push(("PYTHONIOENCODING", "utf-8".into()));
+    env.push(("PYTHONUTF8", "1".into()));
     env
 }
 

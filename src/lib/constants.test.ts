@@ -46,8 +46,8 @@ describe('constants', () => {
   })
 
   // Numeric constants
-  it('MAX_GRID_AUTOPLAYERS is 100', () => {
-    expect(MAX_GRID_AUTOPLAYERS).toBe(100)
+  it('MAX_GRID_AUTOPLAYERS is 999999', () => {
+    expect(MAX_GRID_AUTOPLAYERS).toBe(999999)
   })
 
   it('CLIP_PREVIEW_BATCH_SIZE is 8', () => {
