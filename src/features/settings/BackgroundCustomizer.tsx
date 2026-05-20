@@ -21,6 +21,7 @@ import { fileName } from "../../lib/paths";
 import { extensionAccept, useFileDrop } from "../../lib/useFileDrop";
 import type { BackgroundState } from "../../types/app";
 import { readBridgeError } from "../../utils/bridge";
+import { Dropdown } from "../../components/Dropdown";
 
 const BG_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 const bgImageAccept = extensionAccept(BG_IMAGE_EXTENSIONS);
@@ -638,16 +639,12 @@ export function BackgroundCustomizer({
           {tab === "video" && (
             <label className="bg-control">
               <span>FPS <em>{draft.videoFps}</em></span>
-              <select
-                className="bg-control-select"
+              <Dropdown<number>
                 value={draft.videoFps}
-                onChange={(e) => void changeFps(Number(e.currentTarget.value))}
+                onChange={(next) => void changeFps(next)}
                 disabled={!draft.videoSource || busy || encoding}
-              >
-                {availableFpsOptions.map((fps) => (
-                  <option key={fps} value={fps}>{fps} fps</option>
-                ))}
-              </select>
+                options={availableFpsOptions.map((fps) => ({ value: fps, label: `${fps} fps` }))}
+              />
             </label>
           )}
           <label className="bg-control">
