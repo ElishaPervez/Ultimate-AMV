@@ -75,7 +75,7 @@ function setupDefaultMocks() {
   mockInvoke('get_config', async () =>
     JSON.stringify({
       download_path: '/downloads',
-      provider_url: 'https://anikai.to',
+      provider_url: 'https://animesuge.cz',
       clip_extraction_mode: 'gpu',
     })
   )
@@ -133,12 +133,19 @@ describe('AnikaiBrowser', () => {
 
   it('renders the provider toolbar', () => {
     render(<AnikaiBrowser {...defaultProps} />)
-    expect(screen.getByRole('button', { name: /AniKai/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /AnimeSuge/i })).toBeInTheDocument()
   })
 
-  it('renders AniKai as the default option in the provider select', () => {
-    render(<AnikaiBrowser {...defaultProps} />)
-    expect(screen.getByRole('button', { name: /AniKai/i })).toBeInTheDocument()
+  it('renders AnimeSuge as the default option in the provider select', async () => {
+    await renderAndSettle()
+    const button = screen.getByRole('button', { name: /AnimeSuge/i })
+    expect(button.className).toMatch(/is-active/)
+  })
+
+  it('loads the AnimeSuge URL by default on first render', async () => {
+    await renderAndSettle()
+    const input = screen.getByRole('textbox', { name: /Provider address/i }) as HTMLInputElement
+    expect(input.value).toBe('https://animesuge.cz')
   })
 
   it('renders AniWaves as a provider button', () => {

@@ -31,14 +31,14 @@ type PendingLabeledDownload = {
 };
 
 type ProviderPreset = {
-  id: "anikai" | "aniwaves";
+  id: "animesuge" | "aniwaves";
   label: string;
   url: string;
   hosts: string[];
 };
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
-  { id: "anikai", label: "AniKai", url: "https://anikai.to", hosts: ["anikai.to"] },
+  { id: "animesuge", label: "AnimeSuge", url: "https://animesuge.cz", hosts: ["animesuge.cz"] },
   { id: "aniwaves", label: "AniWaves", url: "https://aniwaves.ru", hosts: ["aniwaves.ru", "aniwave.ru"] },
 ];
 
@@ -77,7 +77,7 @@ function buildAnikaiDownloadIdentity(
   qualityLabel: string,
   providerIdentity: ProviderPageIdentity | null,
 ): DownloadIdentity {
-  const normalized = normalizeUrl(pageUrl.trim() || "https://aniwaves.ru");
+  const normalized = normalizeUrl(pageUrl.trim() || DEFAULT_PROVIDER_URL);
   const title = cleanIdentityText(providerIdentity?.animeTitle) ?? inferAnikaiTitle(normalized);
   const episodeNumber = cleanIdentityText(providerIdentity?.episodeNumber) ?? inferAnikaiEpisodeNumber(normalized);
   const episodeLabel =
@@ -118,9 +118,23 @@ function inferAnikaiTitle(pageUrl: string): string | null {
   try {
     const url = new URL(pageUrl);
     const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    // The slug sits one segment after a recognized prefix. /watch/ is the
+    // AniKai/AniWaves convention, /anime/ is AnimeSuge. If neither prefix is
+    // present we fall back to the first segment, but only if it doesn't look
+    // like a generic top-level keyword that would title-case to garbage like
+    // "Anime", "Watch", "Browse".
     const watchIndex = segments.findIndex((segment) => segment.toLowerCase() === "watch");
-    const rawSlug = watchIndex >= 0 ? segments[watchIndex + 1] : segments[0];
+    const animeIndex = segments.findIndex((segment) => segment.toLowerCase() === "anime");
+    const slugIndex = watchIndex >= 0
+      ? watchIndex + 1
+      : animeIndex >= 0
+        ? animeIndex + 1
+        : 0;
+    const rawSlug = segments[slugIndex];
     if (!rawSlug) return null;
+    // Reject if rawSlug is itself a generic keyword — happens when the URL
+    // has no slug at all (e.g. /anime/ with nothing after, or /watch/).
+    if (/^(anime|watch|browse|search|home)$/i.test(rawSlug)) return null;
 
     const cleanSlug = rawSlug.split('.')[0];
     const slugParts = cleanSlug.split("-").filter(Boolean);
@@ -202,7 +216,7 @@ export function AnikaiBrowser({
   const episodeLabelTouchedRef = React.useRef(false);
   const seenCandidateUrlsRef = React.useRef<Set<string>>(new Set());
   const [providerMode, setProviderMode] = React.useState<"preset" | "custom">("preset");
-  const [providerPresetId, setProviderPresetId] = React.useState<ProviderPreset["id"]>("anikai");
+  const [providerPresetId, setProviderPresetId] = React.useState<ProviderPreset["id"]>("animesuge");
   const [address, setAddress] = React.useState(DEFAULT_PROVIDER_URL);
   const [loadedUrl, setLoadedUrl] = React.useState<string | null>(null);
   const [currentPageUrl, setCurrentPageUrl] = React.useState(DEFAULT_PROVIDER_URL);
@@ -584,6 +598,7 @@ export function AnikaiBrowser({
         height: null,
         bitrate: null,
         codec: null,
+        referer: bestCandidate.referer,
       }
       : null);
   const canDownload = captureState === "detected" && Boolean(selectedQuality);
@@ -620,7 +635,7 @@ export function AnikaiBrowser({
           candidates.map((candidate) =>
             invoke<StreamQuality[]>("inspect_stream", {
               url: candidate.url,
-              referer: currentPageUrl,
+              referer: candidate.referer ?? currentPageUrl,
             }).then((qualities) => ({ candidate, qualities })),
           ),
         );
@@ -696,7 +711,7 @@ export function AnikaiBrowser({
       subtitle: identity.episodeLabel,
       qualityLabel: identity.qualityLabel,
       url: target.url,
-      referer: currentPageUrl,
+      referer: target.referer ?? currentPageUrl,
       sourcePage: identity.sourcePage,
       folderName: null,
       formatId: null,
@@ -721,17 +736,15 @@ export function AnikaiBrowser({
         ? extractEpisodeNumber(editedEpisodeLabel)
         : baseIdentity.episodeNumber,
     };
-    const needsLabeling = !identity.animeTitle || !identity.episodeNumber;
-    if (needsLabeling) {
-      setLabelModalState({
-        target,
-        baseIdentity: identity,
-        initialAnime: identity.animeTitle ?? "",
-        initialEpisode: identity.episodeNumber ?? "",
-      });
-      return;
-    }
-    startQueuedDownload(target, identity);
+    // Always confirm via the modal so the user can review/edit detected
+    // values (anime, episode, save location) before the download is queued.
+    // Detected fields pre-fill; blanks indicate detection missed.
+    setLabelModalState({
+      target,
+      baseIdentity: identity,
+      initialAnime: identity.animeTitle ?? "",
+      initialEpisode: identity.episodeNumber ?? "",
+    });
   }
 
   function handleLabelConfirm(result: EpisodeLabelResult) {

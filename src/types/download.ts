@@ -3,6 +3,13 @@ export type DownloaderTab = "anime" | "youtube";
 export type MediaCandidate = {
   url: string;
   kind: string;
+  /**
+   * Referer URL the sniffer chose for this candidate based on the most
+   * recently observed embed/player iframe origin. `undefined` means
+   * "fall back to the current page URL" — see how `AnikaiBrowser`
+   * passes `candidate.referer ?? currentPageUrl` to `inspect_stream`.
+   */
+  referer?: string;
 };
 
 export type MediaRequestDebug = {
@@ -46,6 +53,12 @@ export type StreamQuality = {
   height?: number | null;
   bitrate?: number | null;
   codec?: string | null;
+  /**
+   * Referer that was used (and worked) for this quality during inspection.
+   * Echoed back from the Rust `inspect_stream` command so the eventual
+   * download can use the same referer header.
+   */
+  referer?: string;
 };
 
 export type CaptureState = "armed" | "inspecting" | "detected" | "downloading" | "consumed";

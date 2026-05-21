@@ -22,6 +22,13 @@ use crate::{
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
+/// curl_cffi impersonation target passed to `yt-dlp --impersonate`. Used by
+/// the anime flow to bypass Cloudflare's TLS-fingerprint anti-bot. Kept as a
+/// single constant so future updates (e.g. Chrome-117, ...) touch one spot.
+/// NOT applied to the YouTube flow — YouTube does not need it and the
+/// impersonation pathway can subtly degrade other callers.
+const YTDLP_IMPERSONATE_TARGET: &str = "Chrome-116:Windows-10";
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DownloadProgress {
@@ -34,6 +41,7 @@ pub(crate) struct DownloadProgress {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct StreamQuality {
     pub id: String,
     pub label: String,
@@ -42,6 +50,12 @@ pub(crate) struct StreamQuality {
     pub height: Option<u64>,
     pub bitrate: Option<f64>,
     pub codec: Option<String>,
+    /// Referer header that worked for this candidate during inspection.
+    /// Echoed back from `inspect_stream`'s input so the frontend can pass
+    /// the same value to the eventual yt-dlp download. `None` means the
+    /// caller did not supply one — fall back to the page URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referer: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -285,6 +299,17 @@ fn ytdlp_command(root: &Path, url: &str) -> Command {
     command
 }
 
+/// Anime-flow variant: adds `--impersonate` so curl_cffi mimics a real Chrome
+/// TLS handshake. Required for the providers we scrape (Cloudflare anti-bot,
+/// JA3-fingerprint walls). YouTube callers must use the plain
+/// `ytdlp_command` — impersonation is unnecessary there and has caused
+/// subtle degradations on other sites in the past.
+fn ytdlp_command_with_impersonate(root: &Path, url: &str) -> Command {
+    let mut command = ytdlp_command(root, url);
+    command.arg("--impersonate").arg(YTDLP_IMPERSONATE_TARGET);
+    command
+}
+
 fn add_browser_headers(command: &mut Command, referer: &str) {
     command
         .arg("--user-agent")
@@ -295,7 +320,7 @@ fn add_browser_headers(command: &mut Command, referer: &str) {
 
 fn inspect_stream_formats(url: String, referer: String) -> Result<Vec<StreamQuality>, String> {
     let root = app_root()?;
-    let mut command = ytdlp_command(&root, &url);
+    let mut command = ytdlp_command_with_impersonate(&root, &url);
     command
         .arg("--dump-single-json")
         .arg("--no-warnings")
@@ -375,6 +400,11 @@ fn inspect_stream_formats(url: String, referer: String) -> Result<Vec<StreamQual
                 height,
                 bitrate,
                 codec,
+                referer: if referer.trim().is_empty() {
+                    None
+                } else {
+                    Some(referer.clone())
+                },
             });
         }
     }
@@ -388,6 +418,11 @@ fn inspect_stream_formats(url: String, referer: String) -> Result<Vec<StreamQual
             height: None,
             bitrate: None,
             codec: None,
+            referer: if referer.trim().is_empty() {
+                None
+            } else {
+                Some(referer.clone())
+            },
         });
     }
 
@@ -742,7 +777,7 @@ fn run_stream_download(
         }),
     );
 
-    let mut command = ytdlp_command(&root, &url);
+    let mut command = ytdlp_command_with_impersonate(&root, &url);
 
     command
         .arg("--newline")

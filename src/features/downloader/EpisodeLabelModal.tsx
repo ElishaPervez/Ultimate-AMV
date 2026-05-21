@@ -146,13 +146,13 @@ export function EpisodeLabelModal({
         <div className="episode-label-header">
           <div>
             <span className="episode-label-kicker">
-              <Sparkles size={13} strokeWidth={2.2} /> Confirm episode
+              <Sparkles size={13} strokeWidth={2.2} /> Confirm download
             </span>
-            <h2>Where should this download land?</h2>
+            <h2>Review download details</h2>
             <p>
               {customDir
                 ? "Using a custom folder. Episode number still determines the filename."
-                : "We couldn't auto-detect this one. Pick an existing series or type a new name : and confirm the episode number."}
+                : "Detected values are pre-filled below. Edit anything that's wrong, then confirm to start the download."}
             </p>
           </div>
           <button type="button" className="episode-label-close" onClick={onCancel} aria-label="Cancel">
@@ -171,7 +171,17 @@ export function EpisodeLabelModal({
               Use anime folder instead
             </button>
           </div>
-        ) : (
+        ) : downloadDir ? (
+          <div className="episode-label-customdir is-default">
+            <FolderOpen size={18} strokeWidth={1.9} />
+            <div>
+              <small>Saving to (default)</small>
+              <strong>{downloadDir}\anime downloads\{trimmedAnime || "<anime name>"}</strong>
+            </div>
+          </div>
+        ) : null}
+
+        {!customDir && (
           <div className="episode-label-field">
             <label htmlFor="episode-label-anime">
               <Tv size={14} strokeWidth={2.1} /> Anime
