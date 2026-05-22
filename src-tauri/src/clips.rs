@@ -417,11 +417,21 @@ fn run_clip_export_merged(
     let out_dir = PathBuf::from(&output_dir);
     fs::create_dir_all(&out_dir).map_err(|e| format!("Could not create output directory: {e}"))?;
 
-    let base_name = clips
+    let mut base_name = clips
         .iter()
         .map(|c| (c.index + 1).to_string())
         .collect::<Vec<_>>()
         .join("+");
+    if base_name.len() > 120 {
+        if clips.len() > 10 {
+            let first_few = clips.iter().take(4).map(|c| (c.index + 1).to_string()).collect::<Vec<_>>().join("+");
+            let last_few = clips.iter().skip(clips.len() - 4).map(|c| (c.index + 1).to_string()).collect::<Vec<_>>().join("+");
+            base_name = format!("{}+...+{} ({} clips)", first_few, last_few, clips.len());
+        } else {
+            base_name.truncate(110);
+            base_name.push_str("...");
+        }
+    }
     let ext = preset_extension(&preset);
     let mut output = out_dir.join(format!("{base_name}.{ext}"));
     let mut suffix = 1;
