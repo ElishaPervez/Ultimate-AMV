@@ -31,6 +31,22 @@ FEATURE_REQUIREMENTS = {
         ],
         "packages": [],
     },
+    "bgremove_cpu": {
+        "modules": [
+            ("typing_extensions", "typing_extensions"),
+            ("numpy", "numpy"),
+            ("rembg", "rembg>=2.0.50"),
+        ],
+        "packages": [],
+    },
+    "bgremove_gpu": {
+        "modules": [
+            ("typing_extensions", "typing_extensions"),
+            ("numpy", "numpy"),
+            ("rembg", "rembg[gpu]>=2.0.50"),
+        ],
+        "packages": [],
+    },
 }
 
 KNOWN_MODULE_PACKAGES = {
@@ -286,6 +302,12 @@ def missing_feature_dependencies(feature, gpu=False):
     elif feature == "clip_gpu":
         if not _torch_ready(True):
             missing.append(("torch", "torch CUDA"))
+    elif feature == "bgremove_gpu":
+        if not _runtime_ready(True):
+            missing.append(("onnxruntime", "onnxruntime-gpu"))
+    elif feature == "bgremove_cpu":
+        if not _runtime_ready(False):
+            missing.append(("onnxruntime", "onnxruntime"))
 
     return missing
 

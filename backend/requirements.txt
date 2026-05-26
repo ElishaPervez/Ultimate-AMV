@@ -4,3 +4,5 @@ numpy>=1.26.0
 typing_extensions>=4.0.0
 transnetv2-pytorch
 scenedetect[opencv]>=0.6.7
+rembg>=2.0.50
+

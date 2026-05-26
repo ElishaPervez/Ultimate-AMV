@@ -6,6 +6,7 @@ export type SectionId =
   | "audio-extraction"
   | "video-conversion"
   | "audio-conversion"
+  | "bg-removal"
   | "logs"
   | "settings";
 

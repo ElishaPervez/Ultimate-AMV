@@ -130,6 +130,10 @@ pub(crate) fn clip_cli_path(root: &Path) -> PathBuf {
     root.join("backend").join("clip_cli.py")
 }
 
+pub(crate) fn bgremove_cli_path(root: &Path) -> PathBuf {
+    root.join("backend").join("bgremove_cli.py")
+}
+
 pub(crate) fn run_audio_cli(args: &[&str]) -> Result<String, String> {
     let root = app_root()?;
     if args.first().copied() != Some("logs") {
@@ -186,3 +190,57 @@ pub(crate) fn run_audio_cli(args: &[&str]) -> Result<String, String> {
         Err(stderr)
     }
 }
+
+pub(crate) fn run_bgremove_cli(args: &[&str]) -> Result<String, String> {
+    let root = app_root()?;
+    log_info(
+        "bgremove.bridge.start",
+        "Starting background removal bridge command",
+        json!({ "args": args }),
+    );
+    let mut command = cmd(python_exe(&root));
+    command
+        .arg("-I")
+        .arg(bgremove_cli_path(&root))
+        .args(args)
+        .current_dir(&root);
+    apply_python_env(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Python background removal bridge: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        log_info(
+            "bgremove.bridge.complete",
+            "Background removal bridge command completed",
+            json!({ "args": args }),
+        );
+        Ok(stdout)
+    } else if !stdout.is_empty() {
+        log_error(
+            "bgremove.bridge.error",
+            "Background removal bridge command failed",
+            json!({
+                "args": args,
+                "code": output.status.code(),
+                "stdout": truncate_log_text(&stdout),
+                "stderr": truncate_log_text(&stderr),
+            }),
+        );
+        Err(stdout)
+    } else {
+        log_error(
+            "bgremove.bridge.error",
+            "Background removal bridge command failed",
+            json!({
+                "args": args,
+                "code": output.status.code(),
+                "stderr": truncate_log_text(&stderr),
+            }),
+        );
+        Err(stderr)
+    }
+}
+

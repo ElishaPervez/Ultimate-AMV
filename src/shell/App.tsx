@@ -11,6 +11,7 @@ import {
   Music2,
   ScrollText,
   Settings,
+  Sparkles,
 } from "lucide-react";
 import { readBackgroundState } from "../lib/background";
 import { APP_THEMES, DEFAULT_BG_STATE } from "../lib/constants";
@@ -30,6 +31,7 @@ import { BackgroundLayer } from "../features/settings/BackgroundLayer";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
+import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
 import { SidebarButton } from "./SidebarButton";
 import { WindowChrome } from "./WindowChrome";
 
@@ -37,6 +39,7 @@ const primaryItems: NavItem[] = [
   { id: "audio-extraction", label: "Vocal Separation", short: "Vocals", icon: AudioLines },
   { id: "clip-hunting", label: "Scene Splitter", short: "Splitter", icon: Compass },
   { id: "downloader", label: "Downloader", short: "Download", icon: Download },
+  { id: "bg-removal", label: "Background Removal", short: "Matting", icon: Sparkles },
   { id: "audio-conversion", label: "Audio Conversion", short: "Audio", icon: Music2 },
   { id: "video-conversion", label: "Video Conversion", short: "Video", icon: Film },
 ];
@@ -66,6 +69,11 @@ const panelMeta: Record<SectionId, { kicker: string; title: string; stats: strin
     kicker: "Conversion",
     title: "Audio Conversion",
     stats: ["WAV", "MP3", "Archive"],
+  },
+  "bg-removal": {
+    kicker: "Isolation",
+    title: "Background Removal",
+    stats: ["SkyTNT", "Alpha", "Fast GPU"],
   },
   settings: {
     kicker: "Options",
@@ -97,6 +105,7 @@ export function App() {
   const isDownloader = active === "downloader";
   const isAudioConversion = active === "audio-conversion";
   const isVideoConversion = active === "video-conversion";
+  const isBgRemoval = active === "bg-removal";
   const isLogs = active === "logs";
   const isSettings = active === "settings";
 
@@ -156,6 +165,8 @@ export function App() {
 
   const modeTabs = isAudioExtraction
     ? ([{ id: "extract", label: "Extract" }] as const)
+    : isBgRemoval
+      ? ([{ id: "bgremove", label: "Isolate" }] as const)
     : isLogs
       ? ([{ id: "logs", label: "Logs" }] as const)
       : isSettings
@@ -294,7 +305,10 @@ export function App() {
                 <div className={`panel-view spring-motion ${isAudioExtraction ? "is-active" : "is-hidden"}`} aria-hidden={!isAudioExtraction}>
                   <AudioExtractionPanel />
                 </div>
-                {!isClipHunting && !isDownloader && !isAudioExtraction && (
+                <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
+                  <BgRemovePanel />
+                </div>
+                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && (
                   <div className="panel-view is-active spring-motion">
                     {isAudioConversion ? <MediaToAudioPanel />
                       : isVideoConversion ? <VideoToVideoPanel />
