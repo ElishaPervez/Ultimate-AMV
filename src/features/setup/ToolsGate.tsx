@@ -320,7 +320,7 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
         </h2>
         <p>
           {isInstalling
-            ? "Downloading video and audio tools (FFmpeg, ffprobe, yt-dlp, and system libraries). This is a one-time setup — future updates will be much smaller."
+            ? "Downloading video and audio tools. This is a one-time setup — future updates will be much smaller."
             : phase === "error"
               ? "The download was interrupted. Check your network and try again. Partial files were cleaned up."
               : "Ultimate AMV needs to download video and audio tools (about 200 MB) to your computer. This is a one-time setup."}

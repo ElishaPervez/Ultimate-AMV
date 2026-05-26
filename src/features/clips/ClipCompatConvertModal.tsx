@@ -49,7 +49,7 @@ export function ClipCompatConvertModal({
             </span>
             <h2>This file can't be read directly</h2>
             <p>
-              <strong>{displayName}</strong> uses a codec or container the clip extractor can't open.
+              <strong>{displayName}</strong> uses a format the clip extractor can't open.
               We can convert it to a compatible format : your original file stays untouched,
               and the converted copy is kept in the app's cache so future runs are instant.
             </p>

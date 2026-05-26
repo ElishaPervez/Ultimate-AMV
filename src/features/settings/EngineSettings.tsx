@@ -67,7 +67,7 @@ export function EngineSettings({
             <span className="setting-label">Active mode</span>
             <span className="setting-desc">
               {installedMode === "gpu"
-                ? "GPU (CUDA)"
+                ? "GPU (Faster)"
                 : installedMode === "cpu"
                   ? "CPU-only"
                   : status
@@ -92,11 +92,11 @@ export function EngineSettings({
             <span className="setting-desc">
               {status
                 ? [
-                  status.dependencies.torch ? `PyTorch ${status.dependencies.torch_version ?? ""}` : "PyTorch missing",
-                  status.dependencies.onnxruntime ? "ONNX OK" : "ONNX missing",
-                  status.dependencies.audio_separator ? "audio-separator OK" : "audio-separator missing",
-                  status.dependencies.typing_extensions ? "typing_extensions OK" : "typing_extensions missing",
-                  status.dependencies.pydub ? "pydub OK" : "pydub missing",
+                  status.dependencies.torch ? "AI core ✓" : "AI core missing",
+                  status.dependencies.onnxruntime ? "Inference engine ✓" : "Inference engine missing",
+                  status.dependencies.audio_separator ? "Vocal splitter ✓" : "Vocal splitter missing",
+                  status.dependencies.typing_extensions ? "Utilities ✓" : "Utilities missing",
+                  status.dependencies.pydub ? "Audio toolkit ✓" : "Audio toolkit missing",
                 ].join("  ·  ")
                 : "Loading..."}
             </span>
