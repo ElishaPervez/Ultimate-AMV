@@ -2011,3 +2011,14 @@
   box-shadow: 0 0 8px rgb(var(--theme-accent-rgb) / 0.5);
 }
 
+/* Custom overrides for react-colorful: make the selector pointer "ball" sleeker and refined */
+.react-colorful__pointer {
+  width: 16px !important;
+  height: 16px !important;
+}
+
+.react-colorful__pointer-fill {
+  border: 2px solid #ffffff !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45) !important;
+}
+
