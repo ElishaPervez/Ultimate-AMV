@@ -111,7 +111,7 @@ describe('SettingsPanel', () => {
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
     await waitFor(() => screen.getByRole('button', { name: /Theme & Social/i }))
     await user.click(screen.getByRole('button', { name: /Theme & Social/i }))
-    expect(screen.getByText('Gradient theme')).toBeInTheDocument()
+    expect(screen.getByText('Theme colors')).toBeInTheDocument()
   })
 
   it('loads clip_hover_preview=false by default when config returns false', async () => {

@@ -56,24 +56,24 @@ function renderAppearance(overrides: {
 describe('AppearanceSettings', () => {
   it('renders without crashing', () => {
     renderAppearance()
-    expect(screen.getByText('Gradient theme')).toBeInTheDocument()
+    expect(screen.getByText('Theme colors')).toBeInTheDocument()
   })
 
   it('shows color picker with current primary color value', () => {
     renderAppearance({ themeColors: { primary: '#aabbcc', secondary: '#112233' } })
-    const color1 = screen.getByLabelText(/Gradient theme color 1/i)
+    const color1 = screen.getByLabelText(/Theme color 1/i)
     expect(color1).toHaveValue('#aabbcc')
   })
 
   it('shows color picker with current secondary color value', () => {
     renderAppearance({ themeColors: { primary: '#aabbcc', secondary: '#112233' } })
-    const color2 = screen.getByLabelText(/Gradient theme color 2/i)
+    const color2 = screen.getByLabelText(/Theme color 2/i)
     expect(color2).toHaveValue('#112233')
   })
 
   it('calls persistConfigField("theme_color_a", ...) when color 1 changes and blurs', async () => {
     const { persistConfigField } = renderAppearance()
-    const color1 = screen.getByLabelText(/Gradient theme color 1/i)
+    const color1 = screen.getByLabelText(/Theme color 1/i)
     fireEvent.change(color1, { target: { value: '#ff0000' } })
     fireEvent.blur(color1)
     expect(persistConfigField).toHaveBeenCalledWith('theme_color_a', '#ff0000')
@@ -81,7 +81,7 @@ describe('AppearanceSettings', () => {
 
   it('calls persistConfigField("theme_color_b", ...) when color 2 changes and blurs', async () => {
     const { persistConfigField } = renderAppearance()
-    const color2 = screen.getByLabelText(/Gradient theme color 2/i)
+    const color2 = screen.getByLabelText(/Theme color 2/i)
     fireEvent.change(color2, { target: { value: '#00ff00' } })
     fireEvent.blur(color2)
     expect(persistConfigField).toHaveBeenCalledWith('theme_color_b', '#00ff00')
@@ -92,7 +92,7 @@ describe('AppearanceSettings', () => {
     const handler = (e: Event) => events.push(e as CustomEvent)
     window.addEventListener('theme-changed', handler)
     renderAppearance()
-    const color1 = screen.getByLabelText(/Gradient theme color 1/i)
+    const color1 = screen.getByLabelText(/Theme color 1/i)
     fireEvent.change(color1, { target: { value: '#ff0000' } })
     fireEvent.blur(color1)
     window.removeEventListener('theme-changed', handler)
@@ -106,7 +106,7 @@ describe('AppearanceSettings', () => {
 
   it('shows "Customize background" button when background image is set', () => {
     renderAppearance({ backendConfig: { ...baseConfig, background_image: '/path/to/bg.jpg' } })
-    expect(screen.getByRole('button', { name: /Customize background/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Edit background/i })).toBeInTheDocument()
   })
 
   it('clicking background button dispatches bg-customize-open event', async () => {
@@ -121,20 +121,20 @@ describe('AppearanceSettings', () => {
 
   it('Discord toggle shows Enabled when discordEnabled=true', () => {
     renderAppearance({ discordEnabled: true })
-    const toggle = screen.getByRole('switch', { name: /Show activity on Discord/i })
+    const toggle = screen.getByRole('switch', { name: /Show status on Discord/i })
     expect(toggle).toHaveAttribute('aria-checked', 'true')
   })
 
   it('Discord toggle shows Disabled when discordEnabled=false', () => {
     renderAppearance({ discordEnabled: false })
-    const toggle = screen.getByRole('switch', { name: /Show activity on Discord/i })
+    const toggle = screen.getByRole('switch', { name: /Show status on Discord/i })
     expect(toggle).toHaveAttribute('aria-checked', 'false')
   })
 
   it('clicking Discord toggle calls toggleDiscordPresence', async () => {
     const user = userEvent.setup()
     const { toggleDiscordPresence } = renderAppearance({ discordEnabled: true })
-    await user.click(screen.getByRole('switch', { name: /Show activity on Discord/i }))
+    await user.click(screen.getByRole('switch', { name: /Show status on Discord/i }))
     expect(toggleDiscordPresence).toHaveBeenCalledTimes(1)
   })
 })
