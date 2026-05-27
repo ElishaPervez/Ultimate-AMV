@@ -34,46 +34,46 @@ import { SidebarButton } from "./SidebarButton";
 import { WindowChrome } from "./WindowChrome";
 
 const primaryItems: NavItem[] = [
-  { id: "audio-extraction", label: "Vocal Extraction", short: "Vocal", icon: AudioLines },
-  { id: "clip-hunting", label: "Clip Hunting", short: "Hunt", icon: Compass },
-  { id: "downloader", label: "Downloader", short: "Down", icon: Download },
-  { id: "audio-conversion", label: "Any To Audio", short: "Audio", icon: Music2 },
-  { id: "video-conversion", label: "Video To Video", short: "Video", icon: Film },
+  { id: "audio-extraction", label: "Vocal Separation", short: "Vocals", icon: AudioLines },
+  { id: "clip-hunting", label: "Scene Splitter", short: "Splitter", icon: Compass },
+  { id: "downloader", label: "Downloader", short: "Download", icon: Download },
+  { id: "audio-conversion", label: "Audio Conversion", short: "Audio", icon: Music2 },
+  { id: "video-conversion", label: "Video Conversion", short: "Video", icon: Film },
 ];
 
 const panelMeta: Record<SectionId, { kicker: string; title: string; stats: string[] }> = {
   "clip-hunting": {
-    kicker: "Hunt",
-    title: "Clip Hunting",
+    kicker: "Splitter",
+    title: "Scene Splitter",
     stats: ["Scene ranges", "Preview", "Export"],
   },
   downloader: {
-    kicker: "Fetch",
+    kicker: "Download",
     title: "Downloader",
     stats: ["Anime", "YouTube", "Queue"],
   },
   "audio-extraction": {
-    kicker: "Vocals",
-    title: "Vocal Extraction",
+    kicker: "Separation",
+    title: "Vocal Separation",
     stats: ["GPU", "CPU", "Stem export"],
   },
   "video-conversion": {
-    kicker: "Encode",
-    title: "Video To Video",
+    kicker: "Conversion",
+    title: "Video Conversion",
     stats: ["NVENC", "ProRes", "Progress"],
   },
   "audio-conversion": {
-    kicker: "Convert",
-    title: "Any To Audio",
+    kicker: "Conversion",
+    title: "Audio Conversion",
     stats: ["WAV", "MP3", "Archive"],
   },
   settings: {
-    kicker: "System",
+    kicker: "Options",
     title: "Settings",
     stats: ["Paths", "Sources", "Hardware"],
   },
   logs: {
-    kicker: "System",
+    kicker: "Events",
     title: "Logs",
     stats: ["Events", "Errors", "Setup"],
   },
@@ -166,12 +166,12 @@ export function App() {
             { id: "youtube", label: "YouTube Download" },
           ] as const)
           : isClipHunting
-            ? ([{ id: "extractor", label: "Clip extractor" }] as const)
+            ? ([{ id: "extractor", label: "Scene splitter" }] as const)
           : isAudioConversion || isVideoConversion
             ? ([{ id: "convert", label: "Convert" }] as const)
             : ([
               { id: "media", label: "Media browser" },
-              { id: "clip", label: "Clip extraction" },
+              { id: "clip", label: "Scene splitting" },
             ] as const);
 
   return (
@@ -209,7 +209,7 @@ export function App() {
             <div className="brand-cluster">
               <div className="brand-copy">
                 <span className="brand-name">Ultimate AMV</span>
-                <span className="brand-subtitle">Creative Engine</span>
+                <span className="brand-subtitle">Toolkit</span>
               </div>
             </div>
           </div>
@@ -234,7 +234,7 @@ export function App() {
               onClick={() => setActive("logs")}
             >
               <ScrollText size={21} strokeWidth={2.05} />
-              <span>System Logs</span>
+              <span>Logs</span>
             </button>
 
             <button
@@ -244,7 +244,7 @@ export function App() {
               onClick={() => setActive("settings")}
             >
               <Settings size={22} strokeWidth={2.15} />
-              <span>Engine Settings</span>
+              <span>Settings</span>
             </button>
           </div>
         </aside>

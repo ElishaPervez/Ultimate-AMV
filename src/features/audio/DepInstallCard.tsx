@@ -21,8 +21,7 @@ export function DepInstallCard({
         <div>
           <h2>One-time engine setup</h2>
           <p className="audio-card-sub">
-            Vocal Extraction needs PyTorch, audio-separator, and the model runtime. Pick a mode and we'll install
-            everything for you.
+            Vocal Separation needs helper programs to run. Pick a mode and we'll install everything for you.
           </p>
         </div>
       </header>
@@ -30,8 +29,8 @@ export function DepInstallCard({
       <ul className="install-detect">
         {gpuSetupBlocked && (
           <li className="install-warning">
-            <span className="install-detect-label">Compatible GPU not found</span>
-            <span className="install-detect-value">GPU Vocal Extraction needs an NVIDIA CUDA GPU.</span>
+            <span className="install-detect-label">Compatible graphics card not found</span>
+            <span className="install-detect-value">GPU Vocal Separation requires an NVIDIA graphics card.</span>
           </li>
         )}
         <li>
@@ -50,11 +49,11 @@ export function DepInstallCard({
           className={`install-btn ${hasGpu ? "is-primary" : "is-secondary"}`}
           onClick={() => onChoose("gpu")}
           disabled={gpuSetupBlocked}
-          title={hasGpu ? "Install GPU mode (CUDA 12.8)" : "Compatible GPU not found"}
+          title={hasGpu ? "Install GPU mode (Faster)" : "Compatible graphics card not found"}
         >
           <Zap size={16} strokeWidth={2.3} />
           <span>Install GPU mode</span>
-          <small>{hasGpu ? "CUDA 12.8 : faster" : "Compatible GPU not found"}</small>
+          <small>{hasGpu ? "NVIDIA GPU : faster" : "Compatible graphics card not found"}</small>
         </button>
 
         <button
@@ -64,7 +63,7 @@ export function DepInstallCard({
         >
           <Cpu size={16} strokeWidth={2.3} />
           <span>Install CPU only</span>
-          <small>{hasGpu ? "Skip GPU : works anywhere" : "Recommended"}</small>
+          <small>{hasGpu ? "Skip GPU : works on any computer" : "Recommended"}</small>
         </button>
       </div>
     </section>

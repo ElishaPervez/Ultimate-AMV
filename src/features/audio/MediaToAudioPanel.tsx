@@ -127,7 +127,7 @@ export function MediaToAudioPanel() {
       </div>
       <div className="conversion-hero">
         <div>
-          <span className="conversion-kicker">Any To Audio</span>
+          <span className="conversion-kicker">Audio Conversion</span>
           <h2>Extract a clean edit-ready audio file</h2>
         </div>
         <div className="conversion-format-card">

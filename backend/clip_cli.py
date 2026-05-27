@@ -342,7 +342,7 @@ def extract_gpu_nelux(input_path, info, threshold, min_clip_seconds, batch_frame
     device = torch.device("cuda")
     
     # --- STAGE 1: Pure Hardware Decode ---
-    progress("decode", 1, f"Decoding at 8000+ FPS with Nelux Ultimate...", started_at)
+    progress("decode", 1, f"Decoding video frames...", started_at)
 
     reader = VideoReader(str(input_path), decode_accelerator="nvdec", resize=(FRAME_W, FRAME_H))
     frame_count = len(reader)
@@ -627,7 +627,7 @@ def extract_gpu_nelux_with_model(input_path, info, threshold, min_clip_seconds, 
     device = torch.device("cuda")
     
     # --- STAGE 1: Pure Hardware Decode ---
-    progress("decode", 1, f"Decoding at 8000+ FPS with Nelux Ultimate...", started_at)
+    progress("decode", 1, f"Decoding video frames...", started_at)
 
     reader = VideoReader(str(input_path), decode_accelerator="nvdec", resize=(FRAME_W, FRAME_H))
     frame_count = len(reader)

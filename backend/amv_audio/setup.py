@@ -139,7 +139,7 @@ def _collect_gpu_plan():
     rows.append({"component": "Target Mode", "status": "GPU (CUDA 12.8 / cu128)"})
     rows.append({"component": "PyTorch", "status": torch_version or "Missing"})
     rows.append({"component": "GPU Runtime", "status": "Installed" if ort_gpu else "Needs install"})
-    rows.append({"component": "Nelux Ultimate", "status": "Installed" if nelux else ("Missing DLLs (reinstall)" if nelux_broken_binaries else "Needs install")})
+    rows.append({"component": "Nelux", "status": "Installed" if nelux else ("Missing DLLs (reinstall)" if nelux_broken_binaries else "Needs install")})
     rows.append({"component": "audio-separator", "status": "Installed" if audio_separator else "Needs install"})
     rows.append({"component": "Audio runtime deps", "status": "Installed" if not missing_audio_runtime else f"Missing {len(missing_audio_runtime)}"})
     rows.append({"component": "typing_extensions", "status": "Installed" if typing_extensions else "Needs install"})

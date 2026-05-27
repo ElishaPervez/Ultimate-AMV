@@ -654,8 +654,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           failedPath: unsupported.path,
           failedIndex: unsupported.index,
           rawError: unsupported.codec === "unknown"
-            ? `Couldn't read this file's metadata : it may be corrupted or use an exotic container. Convert it to a compatible format to try again.`
-            : `Codec "${unsupported.codec}" isn't supported by the GPU clip extractor. Only H.264, HEVC, and AV1 work directly on the GPU path. Convert to a compatible format, or switch the clip extractor to CPU mode in Settings.`,
+            ? `Couldn't read this file's details — it may be damaged or use an unusual format. Convert it to a compatible format to try again.`
+            : `This file's video format (${unsupported.codec}) isn't supported by the GPU clip extractor. Convert it to a compatible format, or switch the clip extractor to CPU mode in Settings.`,
         });
         return;
       }
@@ -680,7 +680,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       percent: 0,
       message: videos.length > 1
         ? `Starting ${videos.length} episode batch...`
-        : clipMode === "gpu" ? "Starting RTX TransNetV2 extraction..." : "Starting PySceneDetect CPU extraction...",
+        : clipMode === "gpu" ? "Starting GPU scene detection..." : "Starting CPU scene detection...",
     });
 
     try {
@@ -690,7 +690,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           type: "progress",
           stage: "dependencies",
           percent: 0,
-          message: "Warming RTX clip server for batch extraction...",
+          message: "Preparing GPU clip server for batch extraction...",
         });
         await invoke("warmup_clip_server").catch((warmupError) => {
           setServerStatus("cold");
@@ -829,7 +829,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setCompatModal({
       failedPath,
       failedIndex,
-      rawError: "Extraction was running too long. The source may use a codec the extractor can't read.",
+      rawError: "Extraction was running too long. The source may use a format the extractor can't read.",
     });
     clipCancellingRef.current = true;
     void invoke("cancel_clip");
@@ -1839,7 +1839,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             type="button"
             className="clip-convert-suggest"
             onClick={() => openCompatModalForCurrent()}
-            title="If this is taking too long, the source may use a codec the extractor can't read. Convert it to a compatible format."
+            title="If this is taking too long, the source may use a format the extractor can't read. Convert it to a compatible format."
           >
             Stuck? Convert to compatible format
           </button>

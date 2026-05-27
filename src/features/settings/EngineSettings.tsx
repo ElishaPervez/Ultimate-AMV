@@ -53,12 +53,12 @@ export function EngineSettings({
   return (
     <div className="settings-category-wrapper">
       <div className="settings-group glass">
-        <div className="settings-group-header">AI Hardware Engine</div>
+        <div className="settings-group-header">AI Engine</div>
         <div className="settings-engine-warning accent-glow">
           <AlertTriangle size={15} />
           <span>
-            This engine is shared between <strong>Vocal Extraction</strong> and <strong>Clip Extraction</strong>.
-            Because they share a single PyTorch environment, you must use the same hardware mode for both.
+            This engine is shared between <strong>Vocal Separation</strong> and <strong>Scene Splitting</strong>.
+            Because they both use the same AI background environment, they must run on the same hardware.
           </span>
         </div>
 
@@ -67,7 +67,7 @@ export function EngineSettings({
             <span className="setting-label">Active mode</span>
             <span className="setting-desc">
               {installedMode === "gpu"
-                ? "GPU (CUDA)"
+                ? "GPU (Faster)"
                 : installedMode === "cpu"
                   ? "CPU-only"
                   : status
@@ -88,15 +88,15 @@ export function EngineSettings({
 
         <div className="setting-row deps-row">
           <div className="setting-info">
-            <span className="setting-label">Dependency status</span>
+            <span className="setting-label">Helper software status</span>
             <span className="setting-desc">
               {status
                 ? [
-                  status.dependencies.torch ? `PyTorch ${status.dependencies.torch_version ?? ""}` : "PyTorch missing",
-                  status.dependencies.onnxruntime ? "ONNX OK" : "ONNX missing",
-                  status.dependencies.audio_separator ? "audio-separator OK" : "audio-separator missing",
-                  status.dependencies.typing_extensions ? "typing_extensions OK" : "typing_extensions missing",
-                  status.dependencies.pydub ? "pydub OK" : "pydub missing",
+                  status.dependencies.torch ? "AI core ✓" : "AI core missing",
+                  status.dependencies.onnxruntime ? "Inference engine ✓" : "Inference engine missing",
+                  status.dependencies.audio_separator ? "Vocal splitter ✓" : "Vocal splitter missing",
+                  status.dependencies.typing_extensions ? "Utilities ✓" : "Utilities missing",
+                  status.dependencies.pydub ? "Audio toolkit ✓" : "Audio toolkit missing",
                 ].join("  ·  ")
                 : "Loading..."}
             </span>
@@ -107,7 +107,7 @@ export function EngineSettings({
           {gpuSetupBlocked && (
             <div className="settings-gpu-warning glass">
               <AlertTriangle size={15} />
-              <span>Compatible GPU not found. GPU Vocal Extraction needs an NVIDIA CUDA GPU.</span>
+              <span>Compatible graphics card not found. GPU mode requires an NVIDIA graphics card.</span>
             </div>
           )}
           <button
@@ -116,15 +116,15 @@ export function EngineSettings({
             onClick={() => switchMode("gpu")}
             disabled={settingsChecking || gpuAllSet || setupRunning !== null || gpuSetupBlocked}
             title={
-              settingsChecking ? "Checking GPU compatibility..." :
+              settingsChecking ? "Checking graphics card..." :
                 gpuAllSet ? "GPU mode is ready" :
-                  gpuSetupBlocked ? "Compatible GPU not found" :
-                    "Switch to GPU mode (CUDA 12.8)"
+                  gpuSetupBlocked ? "Compatible graphics card not found" :
+                    "Switch to GPU mode (Faster)"
             }
           >
             <Zap size={16} strokeWidth={2.3} />
             <span>{settingsChecking ? "Checking GPU" : gpuAllSet ? "GPU ready" : "Switch to GPU"}</span>
-            <small>{settingsChecking ? "Please wait" : gpuAllSet ? "Already set up" : hasGpu ? "CUDA 12.8 : faster" : "Compatible GPU not found"}</small>
+            <small>{settingsChecking ? "Please wait" : gpuAllSet ? "Already set up" : hasGpu ? "NVIDIA GPU : faster" : "Compatible graphics card not found"}</small>
           </button>
 
           <button
@@ -136,7 +136,7 @@ export function EngineSettings({
           >
             <Cpu size={16} strokeWidth={2.3} />
             <span>{settingsChecking ? "Checking CPU" : cpuAllSet ? "CPU ready" : "Switch to CPU"}</span>
-            <small>{settingsChecking ? "Please wait" : cpuAllSet ? "Already set up" : hasGpu ? "Fallback : works anywhere" : "Recommended"}</small>
+            <small>{settingsChecking ? "Please wait" : cpuAllSet ? "Already set up" : hasGpu ? "Works on any computer" : "Recommended"}</small>
           </button>
         </div>
 
@@ -172,9 +172,9 @@ export function EngineSettings({
         <div className="settings-group-header">Storage</div>
         <div className="setting-row">
           <div className="setting-info">
-            <span className="setting-label">Preview cache</span>
+            <span className="setting-label">Saved video previews</span>
             <span className="setting-desc">
-              Generated thumbnail clips used by the clip grid. Safe to clear &mdash; previews regenerate on demand.
+              Saved video loops used when showing previews. Safe to clear &mdash; they will be created again when needed.
             </span>
           </div>
           <button
@@ -182,7 +182,7 @@ export function EngineSettings({
             className="settings-action-pill is-danger spring-motion"
             onClick={() => clearCache()}
             disabled={clearingCache}
-            title="Delete cached clip preview files"
+            title="Delete saved video previews"
           >
             <span className="settings-action-pill-icon" aria-hidden="true">
               {clearingCache ? <Loader2 size={16} className="audio-spin" /> : <Trash2 size={16} strokeWidth={2.3} />}

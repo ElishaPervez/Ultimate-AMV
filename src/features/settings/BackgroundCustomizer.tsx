@@ -30,7 +30,7 @@ const bgImageAccept = extensionAccept(BG_IMAGE_EXTENSIONS);
 const bgVideoAccept = extensionAccept(WALLPAPER_VIDEO_EXTENSIONS);
 
 const LEGIBILITY_NOTICE_TEXT =
-  "Bright wallpapers can wash out fine text and buttons. If the UI gets hard to read, raise the Dim slider, add some Blur, or pick a darker image.";
+  "Bright wallpapers can make text and buttons hard to see. If you can't read the screen well, make the background darker, add some blur, or choose a darker image.";
 const LEGIBILITY_NOTICE_TYPING_MS = 34;
 const LEGIBILITY_NOTICE_UNLOCK_MS = 10000;
 const LEGIBILITY_NOTICE_LEAVE_MS = 700;
@@ -573,7 +573,7 @@ export function BackgroundCustomizer({
             onClick={() => setTab("video")}
           >
             <Film size={14} strokeWidth={2.2} />
-            <span>Live wallpaper</span>
+            <span>Video wallpaper</span>
           </button>
         </div>
 
@@ -662,7 +662,7 @@ export function BackgroundCustomizer({
               <div className="bg-cropper-empty">
                 <Film size={28} strokeWidth={1.6} />
                 <span>{encoding ? "Compressing" : "Preparing"} {videoSourceName}</span>
-                <small>Preview will start as soon as the encode finishes.</small>
+                <small>Preview will start as soon as the video is ready.</small>
               </div>
             ) : (
               <div className="bg-cropper-empty">
@@ -688,12 +688,12 @@ export function BackgroundCustomizer({
         <div className="bg-customizer-hint">
           {tab === "image"
             ? draft.imagePath
-              ? "Drag inside the frame to pan · scroll to zoom"
+              ? "Drag to move the image · scroll to zoom"
               : ""
             : draft.videoSource
               ? sourceFps && sourceFps > 0
-                ? `Source is ${sourceFps.toFixed(2)} fps · changing FPS re-encodes (cached after the first pass).`
-                : "Changing FPS re-encodes (cached after the first pass)."
+                ? `Video is ${sourceFps.toFixed(2)} frames per second · changing FPS converts the video again (cached after the first time).`
+                : "Changing FPS converts the video again (cached after the first time)."
               : ""}
         </div>
 
@@ -714,7 +714,7 @@ export function BackgroundCustomizer({
           )}
           {tab === "video" && (
             <label className="bg-control">
-              <span>FPS <em>{draft.videoFps}</em></span>
+              <span>Frames per second <em>{draft.videoFps}</em></span>
               <Dropdown<number>
                 value={draft.videoFps}
                 onChange={(next) => void changeFps(next)}

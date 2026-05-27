@@ -104,7 +104,7 @@ describe('AppearanceSettings', () => {
     expect(screen.getByRole('button', { name: /Choose background/i })).toBeInTheDocument()
   })
 
-  it('shows "Customize background" button when background image is set', () => {
+  it('shows "Edit background" button when background image is set', () => {
     renderAppearance({ backendConfig: { ...baseConfig, background_image: '/path/to/bg.jpg' } })
     expect(screen.getByRole('button', { name: /Edit background/i })).toBeInTheDocument()
   })

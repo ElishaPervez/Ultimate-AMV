@@ -82,7 +82,7 @@ describe('SettingsPanel', () => {
     setupDefaultMocks()
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
     await waitFor(() => {
-      expect(screen.getByText('System & Engine')).toBeInTheDocument()
+      expect(screen.getByText('AI Engine & System')).toBeInTheDocument()
     })
   })
 
@@ -90,7 +90,7 @@ describe('SettingsPanel', () => {
     setupDefaultMocks()
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
     await waitFor(() => {
-      const btn = screen.getByRole('button', { name: /System & Engine/i })
+      const btn = screen.getByRole('button', { name: /AI Engine & System/i })
       expect(btn).toHaveClass('is-active')
     })
   })
@@ -99,8 +99,8 @@ describe('SettingsPanel', () => {
     const user = userEvent.setup()
     setupDefaultMocks()
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
-    await waitFor(() => screen.getByRole('button', { name: /Feature Preferences/i }))
-    await user.click(screen.getByRole('button', { name: /Feature Preferences/i }))
+    await waitFor(() => screen.getByRole('button', { name: /App Settings/i }))
+    await user.click(screen.getByRole('button', { name: /App Settings/i }))
     // Feature tab shows download folder setting
     expect(screen.getByText('Download folder')).toBeInTheDocument()
   })
@@ -109,8 +109,8 @@ describe('SettingsPanel', () => {
     const user = userEvent.setup()
     setupDefaultMocks()
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
-    await waitFor(() => screen.getByRole('button', { name: /Theme & Social/i }))
-    await user.click(screen.getByRole('button', { name: /Theme & Social/i }))
+    await waitFor(() => screen.getByRole('button', { name: /Theme & Status/i }))
+    await user.click(screen.getByRole('button', { name: /Theme & Status/i }))
     expect(screen.getByText('Theme colors')).toBeInTheDocument()
   })
 
@@ -118,9 +118,9 @@ describe('SettingsPanel', () => {
     setupDefaultMocks()
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
     // Navigate to Features tab
-    await waitFor(() => screen.getByRole('button', { name: /Feature Preferences/i }))
+    await waitFor(() => screen.getByRole('button', { name: /App Settings/i }))
     await act(async () => {
-      screen.getByRole('button', { name: /Feature Preferences/i }).click()
+      screen.getByRole('button', { name: /App Settings/i }).click()
     })
     await waitFor(() => {
       const toggle = screen.getByRole('switch', { name: /Hover-to-Play previews/i })
@@ -133,7 +133,7 @@ describe('SettingsPanel', () => {
     mockInvoke('audio_status', () => statusJson())
     render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
     await act(async () => {
-      screen.getByRole('button', { name: /Feature Preferences/i }).click()
+      screen.getByRole('button', { name: /App Settings/i }).click()
     })
     await waitFor(() => {
       const toggle = screen.getByRole('switch', { name: /Hover-to-Play previews/i })
@@ -149,7 +149,7 @@ describe('SettingsPanel', () => {
     await waitFor(() => screen.getByRole('button', { name: /Clear cache/i }))
     await user.click(screen.getByRole('button', { name: /Clear cache/i }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(screen.getByText(/Clear preview cache/i)).toBeInTheDocument()
+    expect(screen.getByText(/Clear saved previews/i)).toBeInTheDocument()
   })
 
   it('confirming clear cache modal calls clear_app_cache invoke', async () => {

@@ -237,8 +237,8 @@ export function YoutubeDownloaderPanel({
               </span>
               <small>
                 {[
-                  format.vcodec ? `v: ${format.vcodec}` : null,
-                  format.acodec ? `a: ${format.acodec}` : null,
+                  format.vcodec ? `video: ${format.vcodec}` : null,
+                  format.acodec ? `audio: ${format.acodec}` : null,
                   format.filesize ? formatBytes(format.filesize) : null,
                 ].filter(Boolean).join(" - ") || "Auto-pick best video and audio streams"}
               </small>
@@ -265,7 +265,7 @@ export function YoutubeDownloaderPanel({
       ) : isLive ? (
         <div className="youtube-trim-disabled">
           <Scissors size={14} strokeWidth={2.1} />
-          <span>Live streams cannot be clipped : yt-dlp does not support sections on live URLs.</span>
+          <span>Live streams cannot be clipped.</span>
         </div>
       ) : null}
 

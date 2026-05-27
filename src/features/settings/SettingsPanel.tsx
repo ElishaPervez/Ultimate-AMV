@@ -201,13 +201,13 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
   function confirmSwitchMode(mode: "cpu" | "gpu") {
     setConfirmModal({
       open: true,
-      title: `Switch to ${mode.toUpperCase()} engine?`,
+      title: `Switch to ${mode.toUpperCase()} AI engine?`,
       description: (
         <p>
-          You are about to switch the AI hardware engine to <strong>{mode.toUpperCase()}</strong>.{" "}
+          You are about to switch the AI engine to <strong>{mode.toUpperCase()}</strong>.{" "}
           {mode === "gpu"
-            ? "This will download and configure CUDA libraries (PyTorch GPU build) which needs a stable internet connection and around 2-3 GB of disk space. Any active audio separations will be paused."
-            : "This will install the CPU-only PyTorch wheel for universal hardware compatibility. Processing will be slower but will run on any computer."}
+            ? "This will set up GPU support, which requires a stable internet connection and about 2 to 3 GB of free space. Any active song separations will be paused."
+            : "This will set up the CPU version for universal compatibility. It will run slower, but works on any computer."}
         </p>
       ),
       confirmText: `Switch to ${mode.toUpperCase()}`,
@@ -222,10 +222,10 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
   function confirmClearCache() {
     setConfirmModal({
       open: true,
-      title: "Clear preview cache?",
+      title: "Clear saved previews?",
       description: (
         <p>
-          Delete all cached clip preview files? Previews will regenerate the next time you open the clip extractor.
+          Delete all saved video previews? They will be created again the next time you open the video page.
         </p>
       ),
       confirmText: "Clear cache",
@@ -264,7 +264,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
           onClick={() => setActiveTab("engine")}
         >
           <Zap size={15} />
-          <span>System & Engine</span>
+          <span>AI Engine & System</span>
         </button>
         <button
           type="button"
@@ -272,7 +272,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
           onClick={() => setActiveTab("features")}
         >
           <Sliders size={15} />
-          <span>Feature Preferences</span>
+          <span>App Settings</span>
         </button>
         <button
           type="button"
@@ -280,7 +280,7 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
           onClick={() => setActiveTab("appearance")}
         >
           <Palette size={15} />
-          <span>Theme & Social</span>
+          <span>Theme & Status</span>
         </button>
       </div>
 

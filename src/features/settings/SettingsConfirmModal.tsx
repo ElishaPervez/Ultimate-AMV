@@ -43,7 +43,7 @@ export function SettingsConfirmModal({
         <div className="episode-label-header">
           <div>
             <span className="episode-label-kicker">
-              <AlertTriangle size={13} strokeWidth={2.2} /> Confirm action
+              <AlertTriangle size={13} strokeWidth={2.2} /> Are you sure?
             </span>
             <h2 style={{ marginTop: "6px" }}>{title}</h2>
             <div className="settings-confirm-desc">{description}</div>

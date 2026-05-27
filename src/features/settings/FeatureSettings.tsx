@@ -62,15 +62,15 @@ export function FeatureSettings({
       </div>
 
       <div className="settings-group glass">
-        <div className="settings-group-header">Clip Extraction</div>
+        <div className="settings-group-header">Scene Splitting</div>
 
         <div className="setting-row">
           <div className="setting-info">
-            <span className="setting-label">Detection engine</span>
+            <span className="setting-label">Detector type</span>
             <span className="setting-desc">
               {currentMode === "gpu"
-                ? "RTX TransNetV2 with NVDEC analysis decode (locked to AI Hardware Engine)"
-                : "PySceneDetect CPU detection for broad hardware support (locked to AI Hardware Engine)"}
+                ? "Fast RTX detector (controlled by AI Engine settings)"
+                : "Universal CPU detector (controlled by AI Engine settings)"}
             </span>
           </div>
           <div className="deps-badge">
@@ -125,26 +125,26 @@ export function FeatureSettings({
       </div>
 
       <div className="settings-group glass">
-        <div className="settings-group-header">Vocal Extraction</div>
+        <div className="settings-group-header">Vocal Separation</div>
         <div className="setting-row">
           <div className="setting-info">
-            <span className="setting-label">Stem output format</span>
+            <span className="setting-label">Audio file format</span>
             <span className="setting-desc">
-              Format used for the vocal and instrumental stems. WAV is lossless; MP3 is roughly 1/10th the size.
+              Format used for separating vocals and music. WAV is high quality; MP3 uses less space.
             </span>
           </div>
           <Dropdown<"wav" | "mp3">
             options={[
               {
                 value: "wav",
-                label: "WAV (lossless)",
-                description: "Perfect lossless sound quality, larger file sizes.",
+                label: "WAV (high quality)",
+                description: "Best sound quality, larger files.",
                 icon: FileAudio,
               },
               {
                 value: "mp3",
-                label: "MP3",
-                description: "High compatibility compression, ~10% size of WAV.",
+                label: "MP3 (smaller size)",
+                description: "Smaller files, plays on almost any device.",
                 icon: Music,
               },
             ]}

@@ -27,7 +27,7 @@ describe('ToolsGate', () => {
     // Never resolves — component stays in checking phase
     mockInvoke('tools_status', () => new Promise(() => {}))
     render(<ToolsGate onReady={vi.fn()} />)
-    expect(screen.getByText('Checking media tools...')).toBeInTheDocument()
+    expect(screen.getByText('Checking video and audio tools...')).toBeInTheDocument()
   })
 
   it('calls onReady when tools are already ok', async () => {
@@ -43,7 +43,7 @@ describe('ToolsGate', () => {
     mockInvoke('tools_status', () => makeToolsStatus(false))
     render(<ToolsGate onReady={vi.fn()} />)
     await waitFor(() => {
-      expect(screen.getByText('First-launch tools download')).toBeInTheDocument()
+      expect(screen.getByText('First-launch download')).toBeInTheDocument()
     })
   })
 
@@ -73,8 +73,8 @@ describe('ToolsGate', () => {
     mockInvoke('tools_install', () => new Promise(() => {}))
     render(<ToolsGate onReady={vi.fn()} />)
 
-    await waitFor(() => screen.getByText('Download tools'))
-    await user.click(screen.getByRole('button', { name: /download tools/i }))
+    await waitFor(() => screen.getByText('Download and install'))
+    await user.click(screen.getByRole('button', { name: /download and install/i }))
 
     await waitFor(() => {
       const installCalls = mockInvokeFn.mock.calls.filter(([cmd]) => cmd === 'tools_install')
@@ -88,11 +88,11 @@ describe('ToolsGate', () => {
     mockInvoke('tools_install', () => new Promise(() => {}))
     render(<ToolsGate onReady={vi.fn()} />)
 
-    await waitFor(() => screen.getByText('Download tools'))
-    await user.click(screen.getByRole('button', { name: /download tools/i }))
+    await waitFor(() => screen.getByText('Download and install'))
+    await user.click(screen.getByRole('button', { name: /download and install/i }))
 
     await waitFor(() => {
-      expect(screen.getByText('Setting up media tools')).toBeInTheDocument()
+      expect(screen.getByText('Setting up video and audio tools')).toBeInTheDocument()
     })
   })
 
@@ -102,8 +102,8 @@ describe('ToolsGate', () => {
     mockInvoke('tools_install', () => new Promise(() => {}))
     render(<ToolsGate onReady={vi.fn()} />)
 
-    await waitFor(() => screen.getByText('Download tools'))
-    await user.click(screen.getByRole('button', { name: /download tools/i }))
+    await waitFor(() => screen.getByText('Download and install'))
+    await user.click(screen.getByRole('button', { name: /download and install/i }))
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
@@ -117,8 +117,8 @@ describe('ToolsGate', () => {
     mockInvoke('tools_cancel', () => undefined)
     render(<ToolsGate onReady={vi.fn()} />)
 
-    await waitFor(() => screen.getByText('Download tools'))
-    await user.click(screen.getByRole('button', { name: /download tools/i }))
+    await waitFor(() => screen.getByText('Download and install'))
+    await user.click(screen.getByRole('button', { name: /download and install/i }))
     await waitFor(() => screen.getByRole('button', { name: /cancel/i }))
     await user.click(screen.getByRole('button', { name: /cancel/i }))
 
@@ -134,11 +134,11 @@ describe('ToolsGate', () => {
     mockInvoke('tools_install', () => new Promise(() => {}))
     render(<ToolsGate onReady={vi.fn()} />)
 
-    await waitFor(() => screen.getByText('Download tools'))
-    await user.click(screen.getByRole('button', { name: /download tools/i }))
+    await waitFor(() => screen.getByText('Download and install'))
+    await user.click(screen.getByRole('button', { name: /download and install/i }))
 
     // Wait for install phase
-    await waitFor(() => screen.getByText('Setting up media tools'))
+    await waitFor(() => screen.getByText('Setting up video and audio tools'))
 
     // Dispatch a download-progress event
     dispatchTauriEvent('tools-progress', {
@@ -164,7 +164,7 @@ describe('ToolsGate', () => {
     mockInvoke('tools_status', () => { throw new Error('Network error') })
     render(<ToolsGate onReady={vi.fn()} />)
     await waitFor(() => {
-      expect(screen.getByText(/tools install failed/i)).toBeInTheDocument()
+      expect(screen.getByText(/download failed/i)).toBeInTheDocument()
     })
   })
 
@@ -180,8 +180,8 @@ describe('ToolsGate', () => {
     mockInvoke('tools_install', async () => undefined)
     render(<ToolsGate onReady={onReady} />)
 
-    await waitFor(() => screen.getByText('Download tools'))
-    await user.click(screen.getByRole('button', { name: /download tools/i }))
+    await waitFor(() => screen.getByText('Download and install'))
+    await user.click(screen.getByRole('button', { name: /download and install/i }))
 
     await waitFor(() => {
       expect(onReady).toHaveBeenCalledTimes(1)

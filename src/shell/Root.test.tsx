@@ -83,7 +83,7 @@ describe('Root', () => {
     await user.click(screen.getByRole('button', { name: 'Ready' }))
 
     await waitFor(() => {
-      expect(screen.getByText('Loading setup state...')).toBeInTheDocument()
+      expect(screen.getByText('Loading settings...')).toBeInTheDocument()
     })
   })
 
@@ -111,7 +111,7 @@ describe('Root', () => {
     await user.click(screen.getByRole('button', { name: 'Ready' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/Checking.*dependencies/i)).toBeInTheDocument()
+      expect(screen.getByText(/Checking.*Engine/i)).toBeInTheDocument()
     })
   })
 
@@ -141,7 +141,7 @@ describe('Root', () => {
     await user.click(screen.getByRole('button', { name: 'Ready' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/CPU Engine Needs Setup/i)).toBeInTheDocument()
+      expect(screen.getByText(/CPU AI Engine Needs Setup/i)).toBeInTheDocument()
     })
   })
 
@@ -157,7 +157,7 @@ describe('Root', () => {
     await user.click(screen.getByRole('button', { name: 'Ready' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/GPU Engine Needs Setup/i)).toBeInTheDocument()
+      expect(screen.getByText(/GPU AI Engine Needs Setup/i)).toBeInTheDocument()
     })
   })
 
@@ -171,9 +171,9 @@ describe('Root', () => {
     render(<Root />)
 
     await user.click(screen.getByRole('button', { name: 'Ready' }))
-    await waitFor(() => screen.getByText(/CPU Engine Needs Setup/i))
+    await waitFor(() => screen.getByText(/CPU AI Engine Needs Setup/i))
 
-    await user.click(screen.getByRole('button', { name: /continue anyway/i }))
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
 
     await waitFor(() => {
       expect(screen.getByTestId('app-panel')).toBeInTheDocument()

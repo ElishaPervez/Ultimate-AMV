@@ -159,7 +159,7 @@ export function Root() {
       <div className="startup-gate">
         <div className="startup-gate-card">
           <Loader2 size={22} className="audio-spin" />
-          <span>Loading setup state...</span>
+          <span>Loading settings...</span>
         </div>
       </div>
     );
@@ -174,7 +174,7 @@ export function Root() {
       <div className="startup-gate">
         <div className="startup-gate-card">
           <Loader2 size={22} className="audio-spin" />
-          <span>Checking {startupMode ? startupMode.toUpperCase() : "engine"} dependencies...</span>
+          <span>Checking {startupMode ? startupMode.toUpperCase() : "AI"} Engine...</span>
         </div>
       </div>
     );
@@ -198,15 +198,15 @@ export function Root() {
           )}
           <h2>
             {isRepairing
-              ? `Repairing ${mode.toUpperCase()} Engine`
+              ? `Repairing ${mode.toUpperCase()} AI Engine`
               : startupState === "error"
-                ? "Dependency Check Failed"
-                : `${mode.toUpperCase()} Engine Needs Setup`}
+                ? "Engine Check Failed"
+                : `${mode.toUpperCase()} AI Engine Needs Setup`}
           </h2>
           <p>
             {isRepairing
-              ? "Installing the missing packages into the bundled Python runtime."
-              : "Startup checked the configured engine and found packages that need repair before all features are ready."}
+              ? "Installing missing helper files."
+              : "We found some files that need repair before Ultimate AMV is ready to use."}
           </p>
 
           {issueRows.length > 0 && (
@@ -253,15 +253,15 @@ export function Root() {
           <div className="startup-gate-actions">
             <button type="button" className="install-btn" onClick={repairStartupDependencies} disabled={isRepairing || !startupMode}>
               {isRepairing ? <Loader2 size={16} className="audio-spin" /> : mode === "gpu" ? <Zap size={16} /> : <Cpu size={16} />}
-              <span>{isRepairing ? "Repairing" : `Repair ${mode.toUpperCase()} Engine`}</span>
+              <span>{isRepairing ? "Repairing" : `Repair ${mode.toUpperCase()} AI Engine`}</span>
             </button>
             <button type="button" className="install-btn is-secondary" onClick={() => void checkStartupDependencies()} disabled={isRepairing}>
               <RefreshCw size={16} />
-              <span>Retry Check</span>
+              <span>Check again</span>
             </button>
             <button type="button" className="install-btn is-secondary" onClick={() => setStartupState("ready")} disabled={isRepairing}>
               <ArrowRight size={16} />
-              <span>Continue Anyway</span>
+              <span>Skip for now</span>
             </button>
           </div>
         </div>

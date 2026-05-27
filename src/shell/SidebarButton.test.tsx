@@ -10,8 +10,8 @@ import '../../tests/setup/tauri'
 
 const testItem = {
   id: 'audio-extraction' as const,
-  label: 'Vocal Extraction',
-  short: 'Vocal',
+  label: 'Vocal Separation',
+  short: 'Vocals',
   icon: AudioLines,
 }
 
@@ -25,7 +25,7 @@ describe('SidebarButton', () => {
         onClick={vi.fn()}
       />,
     )
-    expect(screen.getByText('Vocal Extraction')).toBeInTheDocument()
+    expect(screen.getByText('Vocal Separation')).toBeInTheDocument()
   })
 
   it('applies is-active class when active prop is true', () => {
@@ -37,7 +37,7 @@ describe('SidebarButton', () => {
         onClick={vi.fn()}
       />,
     )
-    const button = screen.getByRole('button', { name: 'Vocal Extraction' })
+    const button = screen.getByRole('button', { name: 'Vocal Separation' })
     expect(button).toHaveClass('is-active')
   })
 
@@ -50,7 +50,7 @@ describe('SidebarButton', () => {
         onClick={vi.fn()}
       />,
     )
-    const button = screen.getByRole('button', { name: 'Vocal Extraction' })
+    const button = screen.getByRole('button', { name: 'Vocal Separation' })
     expect(button).not.toHaveClass('is-active')
   })
 
@@ -65,7 +65,7 @@ describe('SidebarButton', () => {
         onClick={handleClick}
       />,
     )
-    await user.click(screen.getByRole('button', { name: 'Vocal Extraction' }))
+    await user.click(screen.getByRole('button', { name: 'Vocal Separation' }))
     expect(handleClick).toHaveBeenCalledTimes(1)
   })
 
@@ -79,7 +79,7 @@ describe('SidebarButton', () => {
       />,
     )
     expect(
-      screen.getByRole('button', { name: 'Vocal Extraction' }),
+      screen.getByRole('button', { name: 'Vocal Separation' }),
     ).toBeInTheDocument()
   })
 
@@ -92,8 +92,8 @@ describe('SidebarButton', () => {
         onClick={vi.fn()}
       />,
     )
-    const button = screen.getByRole('button', { name: 'Vocal Extraction' })
-    expect(button).toHaveAttribute('title', 'Vocal Extraction')
+    const button = screen.getByRole('button', { name: 'Vocal Separation' })
+    expect(button).toHaveAttribute('title', 'Vocal Separation')
   })
 
   it('has no title attribute when expanded', () => {
@@ -105,7 +105,7 @@ describe('SidebarButton', () => {
         onClick={vi.fn()}
       />,
     )
-    const button = screen.getByRole('button', { name: 'Vocal Extraction' })
+    const button = screen.getByRole('button', { name: 'Vocal Separation' })
     expect(button).not.toHaveAttribute('title')
   })
 })

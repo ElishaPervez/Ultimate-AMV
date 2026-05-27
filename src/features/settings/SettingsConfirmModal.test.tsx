@@ -36,8 +36,8 @@ describe('SettingsConfirmModal', () => {
   })
 
   it('displays the title text', () => {
-    renderModal({ title: 'Are you sure?' })
-    expect(screen.getByText('Are you sure?')).toBeInTheDocument()
+    renderModal({ title: 'Confirm deletion?' })
+    expect(screen.getByText('Confirm deletion?')).toBeInTheDocument()
   })
 
   it('displays confirm button with confirmText', () => {

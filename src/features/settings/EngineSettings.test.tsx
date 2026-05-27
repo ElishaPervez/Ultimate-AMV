@@ -94,14 +94,14 @@ function renderEngine(overrides: {
 describe('EngineSettings', () => {
   it('renders without crashing', () => {
     renderEngine()
-    expect(screen.getByText('AI Hardware Engine')).toBeInTheDocument()
+    expect(screen.getByText('AI Engine')).toBeInTheDocument()
   })
 
   it('shows GPU warning when GPU is not available', () => {
     renderEngine({ status: cpuStatus })
     // cpuStatus.hardware.gpu_type is "none", so gpuSetupBlocked = true
     // Multiple elements may contain the text (warning div and button subtitle)
-    const matches = screen.getAllByText(/Compatible GPU not found/i)
+    const matches = screen.getAllByText(/Compatible graphics card not found/i)
     expect(matches.length).toBeGreaterThan(0)
   })
 

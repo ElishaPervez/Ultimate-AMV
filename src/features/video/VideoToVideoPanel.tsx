@@ -22,17 +22,17 @@ function videoPresetInfo(preset: VideoTranscodePreset): { title: string; subtitl
     case "gpu-intra":
       return {
         title: "GPU Intra MOV",
-        subtitle: "NVDEC H.264/HEVC decode to HEVC NVENC Main10 all-intra",
+        subtitle: "GPU-accelerated high-quality conversion for fast editing",
       };
     case "prores-lt":
       return {
         title: "ProRes 422 LT",
-        subtitle: "10-bit 4:2:2 ProRes LT MOV for lighter editing intermediates",
+        subtitle: "Lighter editing-ready format, good balance of quality and size",
       };
     case "prores-hq":
       return {
         title: "ProRes 422 HQ",
-        subtitle: "10-bit 4:2:2 ProRes HQ MOV for high-quality intermediates",
+        subtitle: "High-quality editing-ready format for maximum detail",
       };
   }
 }
@@ -179,7 +179,7 @@ export function VideoToVideoPanel() {
         try {
           const codec = await invoke<string>("video_source_codec", { inputPath });
           if (!["h264", "hevc"].includes(codec)) {
-            setError(`GPU Intra supports H.264 or HEVC sources only because it uses NVIDIA NVDEC. ${fileName(inputPath)} is ${codec}. Choose ProRes LT or ProRes HQ for this file.`);
+            setError(`GPU Intra only works with certain video formats. ${fileName(inputPath)} uses ${codec}, which isn't supported. Choose ProRes LT or ProRes HQ for this file.`);
             return;
           }
         } catch (codecError) {
@@ -196,7 +196,7 @@ export function VideoToVideoPanel() {
     setProgress({
       stage: "starting",
       percent: 0,
-      message: selectedFiles.length > 1 ? `Preparing ${selectedFiles.length} video transcodes...` : "Preparing ffmpeg transcode...",
+      message: selectedFiles.length > 1 ? `Preparing ${selectedFiles.length} video conversions...` : "Preparing conversion...",
     });
     try {
       const completed: BatchItemStatus[] = [];
@@ -227,18 +227,18 @@ export function VideoToVideoPanel() {
         setBatchItems([...completed]);
       }
       if (videoCancellingRef.current) {
-        setError("Video transcode cancelled.");
+        setError("Video conversion cancelled.");
         setProgress({
           stage: "cancelled",
           percent: null,
-          message: "Video transcode cancelled.",
+          message: "Video conversion cancelled.",
         });
         return;
       }
       setProgress({
         stage: "complete",
         percent: 100,
-        message: `Transcoded ${completed.filter((item) => item.status === "done").length}/${selectedFiles.length} files.`,
+        message: `Converted ${completed.filter((item) => item.status === "done").length}/${selectedFiles.length} files.`,
       });
     } catch (conversionError) {
       setError(readBridgeError(conversionError));
@@ -265,13 +265,13 @@ export function VideoToVideoPanel() {
     >
       <div className="drop-zone-overlay">
         <Upload size={32} strokeWidth={1.8} />
-        <span>Drop video to transcode</span>
+        <span>Drop video to convert</span>
         <small>MP4 · MKV · MOV · WEBM · AVI · M4V</small>
       </div>
       <div className="conversion-hero">
         <div>
-          <span className="conversion-kicker">Video To Video</span>
-          <h2>Transcode footage for editing</h2>
+          <span className="conversion-kicker">Video Conversion</span>
+          <h2>Convert footage for editing</h2>
         </div>
         <div className="conversion-format-card wide">
           {gpuStatus && (
@@ -283,7 +283,7 @@ export function VideoToVideoPanel() {
           {preset === "gpu-intra" && (
             <div className="conversion-compat is-locked">
               <Info size={15} />
-              <span>GPU Intra accepts H.264 or HEVC source videos only. ProRes presets accept broader input formats.</span>
+              <span>GPU Intra only works with certain video formats. ProRes presets accept a wider range of inputs.</span>
             </div>
           )}
           <span>Preset</span>

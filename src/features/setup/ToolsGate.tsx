@@ -42,12 +42,12 @@ type BinaryProgress = {
 };
 
 const STAGE_LABEL: Record<BinaryProgress["state"], string> = {
-  pending: "Queued",
+  pending: "Waiting",
   downloading: "Downloading",
-  verifying: "Verifying",
+  verifying: "Checking",
   installing: "Installing",
   done: "Ready",
-  skipped: "Already present",
+  skipped: "Already ready",
 };
 
 function formatBytes(value: number | null): string {
@@ -246,9 +246,9 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
       <div className="startup-gate">
         <div className="startup-gate-card startup-gate-card-wide">
           <AlertTriangle size={30} className="startup-gate-icon is-error" />
-          <h2>Tools install failed</h2>
+          <h2>Download failed</h2>
           <p>
-            Could not check media tools. Check your network connection and try again.
+            Could not check video and audio tools. Check your network connection and try again.
           </p>
           {error && (
             <div className="startup-gate-error">
@@ -282,7 +282,7 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
       <div className="startup-gate">
         <div className="startup-gate-card">
           <Loader2 size={22} className="audio-spin" />
-          <span>Checking media tools...</span>
+          <span>Checking video and audio tools...</span>
         </div>
       </div>
     );
@@ -313,17 +313,17 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
         )}
         <h2>
           {isInstalling
-            ? "Setting up media tools"
+            ? "Setting up video and audio tools"
             : phase === "error"
-              ? "Tools install failed"
-              : "First-launch tools download"}
+              ? "Download failed"
+              : "First-launch download"}
         </h2>
         <p>
           {isInstalling
-            ? "Downloading FFmpeg, ffprobe, yt-dlp, and the shared FFmpeg DLLs nelux needs. This is a one-time setup : future updates will be tiny."
+            ? "Downloading video and audio tools. This is a one-time setup — future updates will be much smaller."
             : phase === "error"
               ? "The download was interrupted. Check your network and try again. Partial files were cleaned up."
-              : "Ultimate AMV needs to download FFmpeg / ffprobe / yt-dlp / nelux DLLs (about 200 MB) into a per-user cache. This is a one-time setup."}
+              : "Ultimate AMV needs to download video and audio tools (about 200 MB) to your computer. This is a one-time setup."}
         </p>
 
         <div className="tools-gate-list">
@@ -363,13 +363,13 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
                     {state === "downloading" && progress
                       ? `${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}`
                       : state === "done"
-                        ? "Verified and installed"
+                        ? "Ready and installed"
                         : state === "skipped"
-                          ? "Already present in cache"
+                          ? "Already installed"
                           : state === "verifying"
-                            ? "Verifying SHA256..."
+                            ? "Checking file safety..."
                             : state === "installing"
-                              ? "Extracting and placing files..."
+                              ? "Setting up files..."
                               : "Waiting"}
                   </span>
                 </div>
@@ -404,7 +404,7 @@ export function ToolsGate({ onReady }: { onReady: () => void }) {
             <>
               <button type="button" className="install-btn" onClick={() => void startInstall()}>
                 <Download size={16} />
-                <span>{phase === "error" ? "Retry download" : "Download tools"}</span>
+                <span>{phase === "error" ? "Retry download" : "Download and install"}</span>
               </button>
               <button
                 type="button"

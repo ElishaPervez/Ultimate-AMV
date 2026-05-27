@@ -131,11 +131,11 @@ export function SetupWizard({ onComplete }: Props) {
       <div className="setup-content">
         {step === "hardware" && (
           <div className="setup-card">
-            <h2>Detecting Hardware</h2>
+            <h2>Checking your computer</h2>
             {!hardware ? (
               <div className="setup-loading">
                 <Loader2 size={28} className="audio-spin" />
-                <span>Scanning system...</span>
+                <span>Scanning computer...</span>
               </div>
             ) : (
               <>
@@ -143,7 +143,7 @@ export function SetupWizard({ onComplete }: Props) {
                   {hardware.hasNvidiaGpu ? <Zap size={24} /> : <Cpu size={24} />}
                   <div>
                     <div className="setup-hw-name">
-                      {hardware.gpuName ?? (hardware.hasNvidiaGpu ? "NVIDIA GPU" : "No NVIDIA GPU detected")}
+                      {hardware.gpuName ?? (hardware.hasNvidiaGpu ? "NVIDIA graphics card" : "No NVIDIA graphics card detected")}
                     </div>
                     <div className="setup-hw-msg">{hardware.message}</div>
                   </div>
@@ -160,9 +160,9 @@ export function SetupWizard({ onComplete }: Props) {
 
         {step === "recommend" && hardware && (
           <div className="setup-card">
-            <h2>Choose Engine</h2>
+            <h2>Choose AI Engine</h2>
             <p className="setup-desc">
-              Select how Ultimate AMV runs AI vocal extraction and clip detection.
+              Select how Ultimate AMV separates vocals and splits video scenes.
             </p>
             <div className="setup-mode-options">
               <label
@@ -178,11 +178,11 @@ export function SetupWizard({ onComplete }: Props) {
                 />
                 <Zap size={20} />
                 <div>
-                  <span className="setup-mode-name">GPU mode (CUDA 12.8)</span>
+                  <span className="setup-mode-name">GPU mode (Faster)</span>
                   <span className="setup-mode-desc">
                     {hardware.hasNvidiaGpu
-                      ? `Uses ${hardware.gpuName ?? "your NVIDIA GPU"} : faster, downloads ~3 GB`
-                      : "Requires an NVIDIA GPU : not detected on this machine"}
+                      ? `Uses ${hardware.gpuName ?? "your NVIDIA graphics card"} : faster, downloads about 3 GB`
+                      : "Requires an NVIDIA graphics card : not found on this computer"}
                   </span>
                 </div>
               </label>
@@ -198,7 +198,7 @@ export function SetupWizard({ onComplete }: Props) {
                 <div>
                   <span className="setup-mode-name">CPU mode</span>
                   <span className="setup-mode-desc">
-                    Works on any machine : slower, downloads ~200 MB
+                    Works on any computer : slower, downloads about 200 MB
                   </span>
                 </div>
               </label>
@@ -247,13 +247,13 @@ export function SetupWizard({ onComplete }: Props) {
 
         {step === "install" && (
           <div className="setup-card">
-            <h2>Installing Dependencies</h2>
+            <h2>Installing helper files</h2>
             {!installing && !error && logLines.length === 0 && (
               <>
                 <p className="setup-desc">
                   {selectedMode === "gpu"
-                    ? "Will download PyTorch with CUDA 12.8 and AI models (~3 GB)."
-                    : "Will download PyTorch CPU and AI models (~200 MB)."}
+                    ? "Will download graphics card support files and AI models (about 3 GB)."
+                    : "Will download universal files and AI models (about 200 MB)."}
                 </p>
                 <div className="setup-nav">
                   <button

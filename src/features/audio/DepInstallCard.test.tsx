@@ -120,7 +120,7 @@ describe('DepInstallCard', () => {
     expect(gpuBtn).toBeDisabled()
   })
 
-  it('shows "Compatible GPU not found" warning li when gpuSetupBlocked=true', () => {
+  it('shows "Compatible graphics card not found" warning li when gpuSetupBlocked=true', () => {
     const status = makeStatus()
     render(
       <DepInstallCard
@@ -134,10 +134,10 @@ describe('DepInstallCard', () => {
     // so we target the warning li specifically via the install-warning class.
     const warningEl = document.querySelector('.install-warning')
     expect(warningEl).toBeInTheDocument()
-    expect(warningEl?.textContent).toContain('Compatible GPU not found')
+    expect(warningEl?.textContent).toContain('Compatible graphics card not found')
   })
 
-  it('does not show "Compatible GPU not found" warning when gpuSetupBlocked=false', () => {
+  it('does not show "Compatible graphics card not found" warning when gpuSetupBlocked=false', () => {
     const status = makeStatus()
     render(
       <DepInstallCard
@@ -148,7 +148,7 @@ describe('DepInstallCard', () => {
       />,
     )
     // The warning list item should not be present
-    const warningItems = screen.queryAllByText(/compatible gpu not found/i)
+    const warningItems = screen.queryAllByText(/compatible graphics card not found/i)
     // If it appears it's in button title/label — just check the warning li is not present
     const installWarnings = document.querySelectorAll('.install-warning')
     expect(installWarnings).toHaveLength(0)

@@ -155,22 +155,22 @@ describe('FeatureSettings', () => {
 
   it('shows WAV as default selected audio output format', () => {
     renderFeatureSettings()
-    const trigger = screen.getByRole('button', { name: /WAV \(lossless\)/i })
+    const trigger = screen.getByRole('button', { name: /WAV \(high quality\)/i })
     expect(trigger).toBeInTheDocument()
   })
 
   it('shows MP3 when backendConfig.audio_output_format is mp3', () => {
     renderFeatureSettings({ backendConfig: { ...baseConfig, audio_output_format: 'mp3' } })
-    const trigger = screen.getByRole('button', { name: /^MP3$/i })
+    const trigger = screen.getByRole('button', { name: /MP3 \(smaller size\)/i })
     expect(trigger).toBeInTheDocument()
   })
 
   it('changing audio output format calls persistConfigField with correct args', async () => {
     const user = userEvent.setup()
     const { persistConfigField } = renderFeatureSettings()
-    const trigger = screen.getByRole('button', { name: /WAV \(lossless\)/i })
+    const trigger = screen.getByRole('button', { name: /WAV \(high quality\)/i })
     await user.click(trigger)
-    const mp3Option = screen.getByRole('option', { name: /MP3/i })
+    const mp3Option = screen.getByRole('option', { name: /MP3 \(smaller size\)/i })
     await user.click(mp3Option)
     expect(persistConfigField).toHaveBeenCalledWith('audio_output_format', 'mp3')
   })
