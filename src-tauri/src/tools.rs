@@ -340,10 +340,10 @@ fn install_single(src_path: &Path, dest_dir: &Path, dest_name: &str) -> Result<(
 fn glob_matches(pattern: &str, candidate: &str) -> bool {
     // Minimal "**/x" style matcher: split on "/", each segment is "**", "*x", or literal.
     // Candidate is a forward-slashed zip entry name. The glob "**/bin/ffmpeg.exe" must
-    // match any zip entry whose path ends in /bin/ffmpeg.exe (BtbN's win64 zip wraps
-    // everything in a top-level versioned dir like ffmpeg-n8.1.1-2-…/bin/ffmpeg.exe,
-    // and the manifest must not pin to that exact prefix because the prefix changes
-    // with each upstream rebuild even at the same tag).
+    // match any zip entry whose path ends in /bin/ffmpeg.exe. These win64 ffmpeg zips
+    // (gyan's codexffmpeg, and BtbN before it) wrap everything in a top-level versioned
+    // dir like ffmpeg-8.1.1-full_build/bin/ffmpeg.exe, and the manifest must not pin to
+    // that exact prefix because the prefix changes with every upstream version bump.
     let pattern = pattern.replace('\\', "/");
     let candidate = candidate.replace('\\', "/");
     let p_parts: Vec<&str> = pattern.split('/').collect();
@@ -661,25 +661,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glob_matches_btbn_zip_layout() {
-        // BtbN's win64-gpl zip wraps everything in a top-level versioned dir
-        // like ffmpeg-N-124464-…/bin/ffmpeg.exe. The "**/bin/ffmpeg.exe" glob
-        // must match that without us having to pin the prefix in tools.json.
+    fn glob_matches_ffmpeg_zip_layout() {
+        // These win64 ffmpeg zips wrap everything in a top-level versioned dir
+        // (gyan: ffmpeg-8.1.1-full_build/bin/…; BtbN before it: ffmpeg-N-…/bin/…).
+        // The "**/bin/ffmpeg.exe" glob must match that without us having to pin the
+        // prefix in tools.json, which changes with every upstream version bump.
+        assert!(glob_matches(
+            "**/bin/ffmpeg.exe",
+            "ffmpeg-8.1.1-full_build/bin/ffmpeg.exe"
+        ));
+        assert!(glob_matches(
+            "**/bin/ffprobe.exe",
+            "ffmpeg-8.1.1-full_build/bin/ffprobe.exe"
+        ));
+        assert!(glob_matches(
+            "**/bin/*.dll",
+            "ffmpeg-8.1.1-full_build-shared/bin/avcodec-62.dll"
+        ));
+        // Legacy BtbN layout must still match too (matcher is host-agnostic).
         assert!(glob_matches(
             "**/bin/ffmpeg.exe",
             "ffmpeg-N-124464-gb2867481d9-win64-gpl/bin/ffmpeg.exe"
         ));
-        assert!(glob_matches(
-            "**/bin/*.dll",
-            "ffmpeg-n8.1.1-2-gfb216b5fac-win64-gpl-shared-8.1/bin/avcodec-62.dll"
-        ));
         assert!(!glob_matches(
             "**/bin/ffmpeg.exe",
-            "ffmpeg-n8.1.1-2-gfb216b5fac-win64-gpl-shared-8.1/bin/ffprobe.exe"
+            "ffmpeg-8.1.1-full_build-shared/bin/ffprobe.exe"
         ));
         assert!(!glob_matches(
             "**/bin/*.dll",
-            "ffmpeg-n8.1.1-2-gfb216b5fac-win64-gpl-shared-8.1/share/man/man1/ffmpeg.1.txt"
+            "ffmpeg-8.1.1-full_build-shared/share/man/man1/ffmpeg.1.txt"
         ));
     }
 }
