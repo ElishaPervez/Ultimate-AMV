@@ -5,6 +5,19 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] : 2026-05-30
+
+### Fixed
+- **First-launch tools install no longer fails with an ffmpeg 404.** The
+  bundled ffmpeg downloads pointed at a BtbN FFmpeg-Builds *autobuild*
+  release, which upstream rotates and deletes over time. That build was
+  removed, so `ffmpeg-static` returned HTTP 404 (and `ffmpeg-shared` never
+  got its turn) and the first-launch tools install aborted on a clean
+  machine. Both entries now download from gyan's permanent
+  `codexffmpeg` 8.1.1 release (the same ffmpeg version, so the clip
+  pipeline's DLL dependency is unchanged), which upstream never deletes.
+  yt-dlp was unaffected (it already used a permanent versioned URL).
+
 ## [0.12.0] : 2026-05-22
 
 ### Added
@@ -221,6 +234,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.12.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.12.1
 [0.12.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.12.0
 [0.11.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.11.0
 
