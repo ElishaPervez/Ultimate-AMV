@@ -1,0 +1,1222 @@
+/* ============================================================
+   TSUKYIO VAULT PANEL
+   Credit-forward in-app browser for the external Tsukyio anime
+   asset vault. Matches the app's glass/accent idiom.
+   ============================================================ */
+
+.tsukyio-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 18px 20px 14px;
+  gap: 14px;
+  overflow: hidden;
+}
+
+/* ---- Brand mark (placeholder "T" until a real logo ships) ----
+   TODO: swap this text mark for the bundled Tsukyio logo asset
+   (LogoTsukyio.png) once it is added to the app's assets. */
+.tsukyio-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--theme-accent-contrast);
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow);
+}
+
+.tsukyio-brand-mark.sm {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  font-size: 19px;
+}
+
+/* ---- Connect empty-state ---- */
+.tsukyio-connect {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.tsukyio-connect-card {
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 36px 34px;
+  border-radius: 18px;
+  border: 1px solid var(--glass-border);
+}
+
+.tsukyio-connect-card h2 {
+  margin: 6px 0 0;
+  font-size: 22px;
+}
+
+.tsukyio-connect-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.tsukyio-connect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 6px;
+}
+
+.tsukyio-credit {
+  margin-top: 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* ---- Header ---- */
+.tsukyio-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tsukyio-header-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tsukyio-header-brand h2 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.tsukyio-kicker {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.tsukyio-header-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  opacity: 0.9;
+}
+
+.tsukyio-header-link:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+/* ---- Toolbar (search + deep toggle) ---- */
+.tsukyio-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tsukyio-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 220px;
+}
+
+.tsukyio-search-icon {
+  position: absolute;
+  left: 12px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.tsukyio-search input {
+  width: 100%;
+  padding: 9px 12px 9px 34px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.tsukyio-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tsukyio-search-clear {
+  position: absolute;
+  right: 8px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tsukyio-search-clear:hover {
+  color: var(--ink);
+}
+
+/* On the discovery home the search bar is the primary affordance — give it
+   more presence than the in-browse toolbar. */
+.tsukyio-toolbar.is-home .tsukyio-search input {
+  padding: 13px 14px 13px 40px;
+  font-size: 14.5px;
+  border-radius: 13px;
+}
+
+.tsukyio-toolbar.is-home .tsukyio-search-icon {
+  left: 14px;
+}
+
+/* The header brand doubles as the "back to home" affordance. */
+.tsukyio-home-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.tsukyio-home-link:hover .tsukyio-brand-mark {
+  filter: brightness(1.08);
+}
+
+.tsukyio-home-link:hover h2 {
+  color: var(--accent);
+}
+
+/* ---- Category chips ---- */
+.tsukyio-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.tsukyio-cat-chip {
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tsukyio-cat-chip:hover {
+  color: var(--ink);
+  border-color: rgb(var(--theme-accent-rgb) / 0.4);
+}
+
+.tsukyio-cat-chip.is-active {
+  color: var(--theme-accent-contrast);
+  background: var(--accent-gradient);
+  border-color: transparent;
+}
+
+/* ---- Breadcrumb ---- */
+.tsukyio-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  min-height: 22px;
+}
+
+.tsukyio-crumb-up {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--muted);
+  cursor: pointer;
+  margin-right: 4px;
+}
+
+.tsukyio-crumb-up:hover {
+  color: var(--ink);
+}
+
+.tsukyio-crumb {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.tsukyio-crumb:hover {
+  text-decoration: underline;
+}
+
+.tsukyio-crumb.is-current {
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+}
+
+.tsukyio-crumb-sep {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tsukyio-results-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  min-height: 14px;
+}
+
+/* ---- Grid ---- */
+.tsukyio-grid-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding-right: 4px;
+}
+
+.tsukyio-grid-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+
+.tsukyio-grid-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+
+.tsukyio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 16px;
+  padding-bottom: 6px;
+}
+
+.tsukyio-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  overflow: hidden;
+  text-align: left;
+}
+
+.tsukyio-folder-card {
+  cursor: pointer;
+  border: 1px solid var(--glass-border);
+  color: var(--ink);
+  background: var(--glass);
+  font: inherit;
+}
+
+.tsukyio-folder-card:hover {
+  border-color: rgb(var(--theme-accent-rgb) / 0.4);
+}
+
+.tsukyio-thumb {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  display: grid;
+  place-items: center;
+  background: #0c0d12;
+  color: var(--muted);
+  overflow: hidden;
+}
+
+.tsukyio-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tsukyio-thumb-fallback {
+  display: grid;
+  place-items: center;
+  color: rgb(var(--theme-accent-rgb) / 0.6);
+}
+
+/* Clickable thumbnail: opens the preview modal. Rendered as a <button> so
+   it's keyboard-focusable; the reset strips the native button chrome. */
+.tsukyio-thumb-preview {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  cursor: pointer;
+  appearance: none;
+  width: 100%;
+}
+
+.tsukyio-thumb-preview:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Centered play glyph that fades in on hover so it's discoverable that the
+   tile is clickable for preview. */
+.tsukyio-play-affordance {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+
+.tsukyio-play-affordance svg {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
+}
+
+.tsukyio-thumb-preview:hover .tsukyio-play-affordance,
+.tsukyio-thumb-preview:focus-visible .tsukyio-play-affordance {
+  opacity: 1;
+}
+
+.tsukyio-thumb-tag,
+.tsukyio-cat-badge {
+  position: absolute;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.tsukyio-thumb-tag {
+  bottom: 8px;
+  left: 8px;
+}
+
+.tsukyio-cat-badge {
+  top: 8px;
+  left: 8px;
+  color: var(--accent);
+}
+
+.tsukyio-via-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--accent);
+  border: 1px solid rgb(var(--theme-accent-rgb) / 0.35);
+}
+
+.tsukyio-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px 12px;
+  min-width: 0;
+}
+
+.tsukyio-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tsukyio-card-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tsukyio-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tsukyio-dl-btn {
+  width: 100%;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  font-size: 12px;
+}
+
+.tsukyio-dl-error {
+  font-size: 10.5px;
+  color: #f87171;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tsukyio-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.tsukyio-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent-gradient);
+  transition: width 0.15s ease;
+}
+
+/* ---- Pagination ---- */
+.tsukyio-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding-top: 4px;
+}
+
+.tsukyio-page-info {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---- Loading + empty ---- */
+.tsukyio-loading,
+.tsukyio-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 20px;
+}
+
+.tsukyio-empty h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.tsukyio-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.tsukyio-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* ============================================================
+   RESULTS ROW + RIGHT-SIDE PREVIEW DOCK
+   Browse/search views split into a scrolling results column on the
+   left and a persistent preview dock on the right. The dock keeps a
+   selected clip playing while the user keeps browsing/paginating.
+   ============================================================ */
+.tsukyio-results-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 16px;
+}
+
+/* Left column: the scrolling grid + pagination. Reflows narrower when the
+   dock is open; full width when it's collapsed. */
+.tsukyio-results-col {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* The dock: fixed width, full height of the results region, its own scroll. */
+.tsukyio-dock {
+  flex: 0 0 380px;
+  width: 380px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  overflow: hidden;
+}
+
+.tsukyio-dock-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px 9px 13px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.tsukyio-dock-bar-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.tsukyio-dock-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tsukyio-dock-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tsukyio-dock-icon-btn:hover {
+  color: var(--ink);
+  border-color: var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Scrollable inner body so a long title / actions never overflow the dock. */
+.tsukyio-dock-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.tsukyio-dock-body::-webkit-scrollbar {
+  width: 9px;
+}
+
+.tsukyio-dock-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+
+/* Media wrapper — positions the fullscreen expand button over the video. */
+.tsukyio-dock-media {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* The dock's player stage. For video this is a 16:9 black box; the audio
+   variant collapses it (see .tsukyio-player-stage.is-audio below). */
+.tsukyio-player-stage {
+  position: relative;
+  width: 100%;
+}
+
+.tsukyio-player-stage:not(.is-audio) {
+  aspect-ratio: 16 / 9;
+  background: #000;
+  display: grid;
+  place-items: center;
+}
+
+.tsukyio-player-stage video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #000;
+}
+
+/* The spinner / error overlay centered on top of the media box. */
+.tsukyio-player-stage .scene-viewer-loading,
+.tsukyio-player-stage .scene-viewer-error {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+}
+
+.tsukyio-player-stage.is-audio .scene-viewer-loading,
+.tsukyio-player-stage.is-audio .scene-viewer-error {
+  position: static;
+}
+
+/* Fullscreen-expand affordance (video only), top-right over the picture. */
+.tsukyio-dock-expand {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.tsukyio-dock-expand:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.tsukyio-dock-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tsukyio-dock-kicker {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.tsukyio-dock-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.tsukyio-dock-sub {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.tsukyio-dock-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Empty state: tidy placeholder when no clip is selected. */
+.tsukyio-dock-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 20px;
+  text-align: center;
+}
+
+.tsukyio-dock-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  color: rgb(var(--theme-accent-rgb) / 0.7);
+  background: rgb(var(--theme-accent-rgb) / 0.1);
+  border: 1px solid rgb(var(--theme-accent-rgb) / 0.22);
+}
+
+.tsukyio-dock-empty-title {
+  margin: 4px 0 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.tsukyio-dock-empty-sub {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* Slim re-open affordance shown when the dock is collapsed. */
+.tsukyio-dock-reopen {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  align-self: stretch;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.tsukyio-dock-reopen:hover {
+  color: var(--accent);
+  border-color: rgb(var(--theme-accent-rgb) / 0.45);
+}
+
+/* Selected clip card gets an accent ring so the dock's source is obvious. */
+.tsukyio-clip-card.is-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Stack the results row on narrow panels: dock drops under the grid. */
+@media (max-width: 900px) {
+  .tsukyio-results-row {
+    flex-direction: column;
+  }
+
+  .tsukyio-dock {
+    flex: 0 0 auto;
+    width: 100%;
+  }
+
+  .tsukyio-dock-reopen {
+    width: 100%;
+    height: 30px;
+    align-self: auto;
+  }
+}
+
+/* Audio assets don't need a 16:9 black letterbox — collapse the stage to a
+   compact bar that hosts the custom player, still centered. */
+.scene-viewer-stage.is-audio {
+  /* Audio has no picture — don't render the big black 16:9 video box. Make the
+     stage transparent and let the player card below be the whole visible
+     element, so there's no surrounding black void. */
+  aspect-ratio: auto;
+  min-height: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  display: block;
+  padding: 0;
+}
+
+/* ---- Custom audio player ----
+   Replaces the native <audio controls> pill with an app-branded, glassy
+   player. The bare <audio> stays as the hidden playback engine; everything
+   visible is bound to it via audioRef. Reuses the .scene-viewer-* control
+   idiom (button / time / scrub) so it matches the video viewer. */
+
+/* The playback engine: present in the DOM but never shown. Kept renderable
+   (not display:none) so the element behaves identically to a visible media
+   element across WebView2 versions. */
+.tsukyio-audio-engine {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tsukyio-audio-player {
+  /* No card chrome — the player lives DIRECTLY in the modal body, not in a
+     nested bordered/gradient box. The modal is already the container; the only
+     remaining "box" is the small equalizer artwork tile (the player's art). */
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  width: 100%;
+  /* Sit lower in the modal — give clear separation from the title/metadata
+     above instead of crowding up against it. */
+  padding: 34px 2px 14px;
+}
+
+/* While loading or errored the controls are inert: dimmed and non-interactive
+   so the overlaid spinner / error message reads as the active state. */
+.tsukyio-audio-player.is-inert {
+  opacity: 0.4;
+  pointer-events: none;
+  filter: grayscale(0.4);
+}
+
+/* ---- Controls row ---- */
+.tsukyio-audio-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Filled accent play/pause — the focal control of the bar. Higher specificity
+   so it overrides the shared .scene-viewer-button ghost styling. */
+.tsukyio-audio-player .tsukyio-audio-play {
+  flex-shrink: 0;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--theme-accent-contrast);
+  border: none;
+  box-shadow: var(--accent-glow);
+  transition: transform 120ms ease, filter 120ms ease;
+}
+.tsukyio-audio-player .tsukyio-audio-play:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: scale(1.05);
+}
+.tsukyio-audio-player .tsukyio-audio-play:disabled {
+  opacity: 0.5;
+}
+
+/* Tabular-numbers time readout; narrower than the video viewer's since the
+   `m:ss / m:ss` strings here are short. */
+.tsukyio-audio-time {
+  min-width: 84px;
+  color: rgba(238, 243, 248, 0.85);
+}
+
+/* The scrub slider reuses .scene-viewer-scrub* for the track/fill; just give
+   it the accent focus ring and a disabled appearance. */
+.tsukyio-audio-scrub:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.tsukyio-audio-scrub.is-disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* ---- Volume cluster ---- */
+.tsukyio-audio-volume {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Native range input styled to match the accent. Compact so it sits inline
+   with the mute button without crowding the scrub bar. */
+.tsukyio-audio-vol-slider {
+  width: 90px;
+  height: 4px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+  cursor: pointer;
+  outline: none;
+}
+
+.tsukyio-audio-vol-slider:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.tsukyio-audio-vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 0;
+  box-shadow: 0 0 6px rgb(var(--theme-accent-rgb) / 0.5);
+  cursor: pointer;
+}
+
+.tsukyio-audio-vol-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 0;
+  box-shadow: 0 0 6px rgb(var(--theme-accent-rgb) / 0.5);
+  cursor: pointer;
+}
+
+.tsukyio-audio-vol-slider:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tsukyio-audio-vol-slider:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Stack the player on narrow modals so the scrub bar keeps usable width. */
+@media (max-width: 480px) {
+  .tsukyio-audio-player {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+}
+
+/* ---- Audio player inside the dock ----
+   The dock is far narrower than the old modal (~352px content vs the modal's
+   wide stage), so the controls would crowd if laid out in one row. Re-tune:
+   tighter top padding (no big title block above it in the dock) and a stacked
+   layout so the seek bar keeps usable width. The play button and the
+   time/volume cluster share the first row; the scrub bar spans the second. */
+.tsukyio-player-stage.is-audio .tsukyio-audio-player {
+  padding: 16px 4px 8px;
+}
+
+.tsukyio-player-stage.is-audio .tsukyio-audio-controls {
+  flex-wrap: wrap;
+  gap: 10px 12px;
+}
+
+.tsukyio-player-stage.is-audio .tsukyio-audio-scrub {
+  order: 3;
+  flex-basis: 100%;
+  width: 100%;
+}
+
+.tsukyio-player-stage.is-audio .tsukyio-audio-volume {
+  margin-left: auto;
+}
+
+.tsukyio-player-stage.is-audio .tsukyio-audio-vol-slider {
+  width: 72px;
+}
+
+/* ============================================================
+   DISCOVERY HOME (default view: search bar + 9 category tiles)
+   ============================================================ */
+.tsukyio-home {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-bottom: 8px;
+}
+
+.tsukyio-home-head h3 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  color: var(--ink);
+}
+
+.tsukyio-home-head p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.tsukyio-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+  gap: 14px;
+}
+
+.tsukyio-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 16px 16px;
+  min-height: 128px;
+  border-radius: 14px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.tsukyio-tile:hover {
+  border-color: rgb(var(--theme-accent-rgb) / 0.45);
+  transform: translateY(-2px);
+}
+
+.tsukyio-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Per-category accent wash. The gradient sits behind the content (z -1) and
+   the tile clips it; each accent class just swaps the two stops. */
+.tsukyio-tile-glow {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.16;
+  background: linear-gradient(135deg, var(--tile-a, var(--accent)) 0%, var(--tile-b, var(--accent)) 100%);
+  transition: opacity 160ms ease;
+}
+
+.tsukyio-tile:hover .tsukyio-tile-glow {
+  opacity: 0.28;
+}
+
+.tsukyio-tile-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--tile-a, var(--accent)) 0%, var(--tile-b, var(--accent)) 100%);
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.28);
+}
+
+.tsukyio-tile-name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.tsukyio-tile-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* Category accents — pure CSS, no remote images. */
+.tsukyio-tile.accent-precuts { --tile-a: #6366f1; --tile-b: #8b5cf6; }
+.tsukyio-tile.accent-raw { --tile-a: #0ea5e9; --tile-b: #2563eb; }
+.tsukyio-tile.accent-flow { --tile-a: #06b6d4; --tile-b: #14b8a6; }
+.tsukyio-tile.accent-vocals { --tile-a: #ec4899; --tile-b: #f43f5e; }
+.tsukyio-tile.accent-overlays { --tile-a: #a855f7; --tile-b: #d946ef; }
+.tsukyio-tile.accent-sfx { --tile-a: #f59e0b; --tile-b: #f97316; }
+.tsukyio-tile.accent-remake { --tile-a: #8b5cf6; --tile-b: #ec4899; }
+.tsukyio-tile.accent-green { --tile-a: #22c55e; --tile-b: #16a34a; }
+.tsukyio-tile.accent-credits { --tile-a: #64748b; --tile-b: #475569; }
+
+/* ============================================================
+   GROUPED SEARCH RESULTS (stacked sections)
+   ============================================================ */
+.tsukyio-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding-bottom: 8px;
+}
+
+.tsukyio-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tsukyio-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.tsukyio-section-head h3 {
+  margin: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 9px;
+  font-size: 14.5px;
+  color: var(--ink);
+}
+
+.tsukyio-section-count {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--theme-accent-contrast);
+  background: var(--accent-gradient);
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.tsukyio-section-cap {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.tsukyio-show-all {
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.tsukyio-show-all:hover {
+  border-color: rgb(var(--theme-accent-rgb) / 0.45);
+}
+
+.tsukyio-show-all.is-foot {
+  align-self: center;
+  margin-top: 2px;
+}

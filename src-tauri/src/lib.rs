@@ -16,6 +16,7 @@ mod preview;
 mod python_env;
 mod sniffer;
 mod tools;
+mod tsukyio;
 mod video_cmds;
 mod wallpaper;
 mod bgremove_cmds;
@@ -83,6 +84,52 @@ fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     match &result {
         Ok(_) => log_info("shell.open_path.complete", "Path opened in shell", json!({ "path": path })),
         Err(error) => log_error("shell.open_path.error", "Could not open path in shell", json!({ "path": path, "error": error })),
+    }
+    result
+}
+
+/// Reveals a file in the OS file manager (selecting it), as opposed to
+/// `open_path` which launches the file in its default app. On Windows we run
+/// `explorer /select,<path>`; on macOS `open -R <path>`; on Linux there is no
+/// portable "select" verb, so we fall back to opening the containing folder.
+#[tauri::command]
+fn reveal_in_folder(#[allow(unused_variables)] app: tauri::AppHandle, path: String) -> Result<(), String> {
+    log_info("shell.reveal.start", "Revealing path in file manager", json!({ "path": &path }));
+
+    let result: Result<(), String> = {
+        #[cfg(target_os = "windows")]
+        {
+            cmd("explorer")
+                .arg(format!("/select,{}", path))
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            cmd("open")
+                .arg("-R")
+                .arg(&path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            use tauri_plugin_opener::OpenerExt;
+            let parent = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            app.opener()
+                .open_path(parent, None::<String>)
+                .map_err(|e| e.to_string())
+        }
+    };
+
+    match &result {
+        Ok(_) => log_info("shell.reveal.complete", "Path revealed in file manager", json!({ "path": path })),
+        Err(error) => log_error("shell.reveal.error", "Could not reveal path", json!({ "path": path, "error": error })),
     }
     result
 }
@@ -285,6 +332,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Holds the Tsukyio Bearer key for the `tsukyio://` streaming proxy so
+        // the key never has to appear in any media URL the DOM can read.
+        .manage(tsukyio::TsukyioSession::default())
+        // Proxies the remote Tsukyio media stream through a local app-trusted
+        // origin (http://tsukyio.localhost on Windows) so WebView2 can play the
+        // cross-origin Range stream that it otherwise rejects. See tsukyio.rs.
+        .register_asynchronous_uri_scheme_protocol(
+            tsukyio::TSUKYIO_PROTOCOL,
+            tsukyio::handle_stream_protocol,
+        )
         .setup(|app| {
             discord::start();
             match tools::ensure_writable_tools_dir(&app.handle()) {
@@ -376,9 +433,16 @@ pub fn run() {
             bgremove_cmds::bgremove_save_preview,
             bgremove_cmds::cancel_bgremove,
             open_path,
+            reveal_in_folder,
             tools::tools_status,
             tools::tools_install,
             tools::tools_cancel,
+            tsukyio::tsukyio_test_connection,
+            tsukyio::tsukyio_browse,
+            tsukyio::tsukyio_search,
+            tsukyio::tsukyio_deep_search,
+            tsukyio::tsukyio_download,
+            tsukyio::tsukyio_set_session_key,
             discord_set_state,
             discord_clear,
             write_file

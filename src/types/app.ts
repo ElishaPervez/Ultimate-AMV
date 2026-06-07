@@ -3,6 +3,7 @@ import React from "react";
 export type SectionId =
   | "clip-hunting"
   | "downloader"
+  | "tsukyio"
   | "audio-extraction"
   | "video-conversion"
   | "audio-conversion"
@@ -41,6 +42,7 @@ export type AppConfig = {
   background_video_fps: number;
   audio_output_format: "wav" | "mp3";
   clip_hover_preview: boolean;
+  tsukyio_api_key: string;
 };
 
 export type BackgroundState = {

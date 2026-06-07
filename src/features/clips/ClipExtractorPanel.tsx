@@ -75,6 +75,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     "hevc-cpu": 18,
     "prores-lt": 0,
     "prores-hq": 0,
+    "lossless-cut": 0,
   });
   const [visibleRowRange, setVisibleRowRange] = React.useState<{ startIndex: number; endIndex: number } | null>(null);
   const [progress, setProgress] = React.useState<ClipProgress | null>(null);
@@ -93,6 +94,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [convertMessage, setConvertMessage] = React.useState<string | null>(null);
   // Maps a converted cache path -> the original filename it replaced (for the badge).
   const [convertedSources, setConvertedSources] = React.useState<Record<string, string>>({});
+  // Maps a RAW source path -> a converted proxy path used ONLY to feed the GPU
+  // detector. The proxy is a lossy 8-bit transcode, so it must never reach
+  // preview or export — those always read the raw. Scene timecodes from the
+  // proxy align with the raw because the convert is a straight full transcode
+  // (same fps/duration, no trimming). See clip_compat_convert in clips.rs.
+  const [detectorProxies, setDetectorProxies] = React.useState<Record<string, string>>({});
   const [clipModeLoaded, setClipModeLoaded] = React.useState(false);
   const [activationEpoch, setActivationEpoch] = React.useState(0);
   // Store the viewer's selection by id (not by value): the `clips` array
@@ -454,7 +461,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       value: opt.value,
       label: opt.label,
       disabled: opt.disabled,
-      description: opt.reason,
+      description: opt.description ?? opt.reason,
     }));
   }, [exportOptions]);
   const selectedExportOption = exportOptions.find((option) => option.value === exportFormat);
@@ -644,20 +651,22 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (videos.length === 0 || isExtracting) return;
     const force = options?.force ?? false;
 
-    // Preflight codec check : only the GPU path is codec-fragile. nelux+NVDEC
-    // can hang in native code on anything outside the supported set; CPU mode
-    // goes through ffmpeg directly and handles every codec ffmpeg knows.
+    // GPU mode no longer blocks on a codec preflight. The Python backend
+    // routes any codec NVDEC/nelux can't decode straight to software decode ->
+    // the same TransNetV2 model (mode stays "gpu"), so detection quality is
+    // unchanged and we avoid both the lossy forced-convert AND the nelux
+    // native-hang risk on unsupported codecs. We still probe here purely to
+    // surface a heads-up log line when the slower software-decode route will
+    // kick in; we do NOT pop the convert modal or abort.
     if (clipMode === "gpu") {
       const unsupported = await findFirstUnsupportedGpuCodec(videos);
       if (unsupported) {
-        setCompatModal({
-          failedPath: unsupported.path,
-          failedIndex: unsupported.index,
-          rawError: unsupported.codec === "unknown"
-            ? `Couldn't read this file's details — it may be damaged or use an unusual format. Convert it to a compatible format to try again.`
-            : `This file's video format (${unsupported.codec}) isn't supported by the GPU clip extractor. Convert it to a compatible format, or switch the clip extractor to CPU mode in Settings.`,
-        });
-        return;
+        logFrontend(
+          "info",
+          "frontend.clip.gpu_software_decode",
+          "Unsupported GPU codec detected; backend will use software decode -> TransNetV2",
+          { path: unsupported.path, codec: unsupported.codec },
+        );
       }
     }
 
@@ -703,17 +712,21 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const results: ClipExtractionResult[] = [];
       for (let index = 0; index < videos.length; index += 1) {
         if (clipCancellingRef.current) break;
-        const inputPath = videos[index];
+        const rawPath = videos[index];
+        // Feed the detector the proxy if one exists for this raw (manual
+        // last-resort convert), but everything user-facing stays on the raw.
+        const detectInput = detectorProxies[rawPath] ?? rawPath;
+        const inputPath = detectInput;
         clipBatchProgressRef.current = {
           activeIndex: index,
           total: videos.length,
-          inputPath,
+          inputPath: rawPath,
         };
         setProgress({
           type: "progress",
           stage: "starting",
           percent: Math.round((index / videos.length) * 100),
-          message: `Episode ${index + 1}/${videos.length}: ${fileName(inputPath)}`,
+          message: `Episode ${index + 1}/${videos.length}: ${fileName(rawPath)}`,
         });
         const raw = await invoke<string>("clip_extract", { inputPath, mode: clipMode, force });
         // Strict type check rather than substring — the cached "done" payload
@@ -728,16 +741,27 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         } catch {
           isServerTask = false;
         }
-        const payload = isServerTask
+        const rawPayload = isServerTask
           ? await waitForClipServerResult(clipAbortRef)
           : parseBridgePayload<ClipExtractionResult>(raw);
+        // If detection ran on a proxy, rewrite every scene's source (and the
+        // top-level input) back to the RAW so preview + export read the
+        // original file, never the lossy proxy. Timecodes are unchanged
+        // because the proxy is a straight full transcode of the raw.
+        const payload: ClipExtractionResult = detectInput !== rawPath
+          ? {
+              ...rawPayload,
+              input: rawPath,
+              scenes: rawPayload.scenes.map((scene) => ({ ...scene, source: rawPath })),
+            }
+          : rawPayload;
         results.push(payload);
         setResult(combineClipResults(results, clipMode));
         setProgress({
           type: "progress",
           stage: "complete",
           percent: Math.round(((index + 1) / videos.length) * 100),
-          message: `Episode ${index + 1}/${videos.length} complete: ${fileName(inputPath)}`,
+          message: `Episode ${index + 1}/${videos.length} complete: ${fileName(rawPath)}`,
           elapsedSeconds: results.reduce((total, item) => total + (item.totalSeconds || 0), 0),
         });
       }
@@ -773,7 +797,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   async function handleConvertCompat() {
     if (!compatModal || isConverting) return;
-    const { failedPath, failedIndex } = compatModal;
+    const { failedPath } = compatModal;
     setIsConverting(true);
     setConvertMessage("Converting to compatible format...");
     setError(null);
@@ -788,19 +812,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const payload = parseBridgePayload<{ output: string; cached: boolean }>(raw);
       const convertedPath = payload.output;
       const originalName = fileName(failedPath);
-      setConvertedSources((current) => ({ ...current, [convertedPath]: originalName }));
-      const nextVideos = [...selectedVideos];
-      if (nextVideos[failedIndex] === failedPath) {
-        nextVideos[failedIndex] = convertedPath;
-      } else {
-        const swapIndex = nextVideos.indexOf(failedPath);
-        if (swapIndex >= 0) nextVideos[swapIndex] = convertedPath;
-      }
-      setSelectedVideos(nextVideos);
+      // Keep selectedVideos on the RAW. Register the proxy as a detector-only
+      // input keyed by the raw path: the next extraction feeds the proxy to
+      // the detector, but scene sources are rewritten back to the raw so
+      // preview/export never touch the lossy proxy. The badge keys off the
+      // raw path so the user still sees the "converted for detection" marker.
+      setConvertedSources((current) => ({ ...current, [failedPath]: originalName }));
+      setDetectorProxies((current) => ({ ...current, [failedPath]: convertedPath }));
       setCompatModal(null);
       setConvertMessage(null);
       setIsConverting(false);
-      void startExtraction(nextVideos);
+      // selectedVideos already holds the raw at failedIndex; just re-run.
+      void startExtraction(selectedVideos, { force: true });
     } catch (convertError) {
       const errorText = readBridgeError(convertError);
       setError(errorText);
@@ -949,6 +972,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     },
     [mergeOrderedClips],
   );
+  // Container extension the backend will actually write for the current
+  // preset, so the merge UI labels match the real output file.
+  const mergeExt = clipPresetExtension(exportFormat);
 
   async function handleClipClick(
     clip: ClipPreviewItem,
@@ -1331,7 +1357,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setIsExtracting(true);
     const mergeRow: ClipExportRow = {
       id: `merge-${mergeFilenameStem}`,
-      label: `${mergeFilenameStem}.mov`,
+      label: `${mergeFilenameStem}.${mergeExt}`,
       range: `${mergeOrderedClips.length} clips`,
       status: "active",
     };
@@ -1343,7 +1369,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       activePercent: 0,
       activeFps: null,
       activeSpeed: null,
-      activeMessage: `Merging ${exportClips.length} clips into ${mergeFilenameStem}.mov...`,
+      activeMessage: `Merging ${exportClips.length} clips into ${mergeFilenameStem}.${mergeExt}...`,
       phase: "running",
       outputDir: selected,
     });
@@ -1616,10 +1642,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           )}
           <em>{clipMode === "gpu" ? "GPU mode · RTX TransNetV2" : "CPU mode · PySceneDetect"}</em>
           {convertedBadgeNames.length > 0 && (
-            <span className="clip-compat-badge" title="The clip extractor is reading a converted copy stored in the app's cache. The original file is untouched.">
+            <span className="clip-compat-badge" title="Scene detection runs on a converted copy in the app's cache, but previews and exports still read your original file. The original is untouched.">
               {convertedBadgeNames.length === 1
-                ? `Using converted copy of ${convertedBadgeNames[0]}`
-                : `Using converted copies for ${convertedBadgeNames.length} files`}
+                ? `Detecting from a converted copy of ${convertedBadgeNames[0]} (exports use the original)`
+                : `Detecting from converted copies for ${convertedBadgeNames.length} files (exports use the originals)`}
             </span>
           )}
         </div>
@@ -1778,13 +1804,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                 className="clip-confirm-button spring-motion accent-glow"
                 disabled={mergeOrder.length < 2 || isExtracting}
                 onClick={startMergeExport}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to merge" : `Merge into ${mergeFilenameStem}.mov`}
+                title={mergeOrder.length < 2 ? "Select at least 2 clips to merge" : `Merge into ${mergeFilenameStem}.${mergeExt}`}
               >
                 <CheckCircle2 size={17} strokeWidth={2.1} />
                 <span>
                   {mergeOrder.length < 2
                     ? "Select 2+ clips"
-                    : `Merge into ${mergeFilenameStem}.mov`}
+                    : `Merge into ${mergeFilenameStem}.${mergeExt}`}
                 </span>
               </button>
             </>
@@ -1969,7 +1995,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                   ? "Click clips in the order they should play"
                   : mergeOrderedClips.length < 2
                     ? "Pick at least 2 clips"
-                    : `→ ${mergeFilenameStem}.mov`}
+                    : `→ ${mergeFilenameStem}.${mergeExt}`}
               </span>
               {mergeOrderedClips.length > 0 && (
                 <button
@@ -2007,10 +2033,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   );
 }
 
-// nelux+NVDEC reliably decodes only these codecs. Anything else either errors
-// out or hangs in native code without raising : so we refuse the GPU path
-// upfront and prompt the user to convert. Keep this list in sync with
-// cuvid_decoder() in backend/clip_cli.py.
+// nelux+NVDEC reliably hardware-decodes only these codecs. Anything else can
+// hang in native C++ without raising, so the backend routes those files to a
+// software decode -> TransNetV2 (still "gpu" mode) path instead of touching
+// nelux/NVDEC. This set is now used only to log a "software decode will be
+// used" heads-up before extraction — it no longer blocks the GPU path or pops
+// the convert modal. Keep in sync with GPU_DECODABLE_CODECS / cuvid_decoder()
+// in backend/clip_cli.py.
 const GPU_SUPPORTED_CODECS = new Set(["h264", "hevc", "av1"]);
 
 async function findFirstUnsupportedGpuCodec(
@@ -2143,8 +2172,32 @@ type ClipExportOption = {
   value: ClipExportFormat;
   label: string;
   disabled: boolean;
+  // Shown as a warning under the dropdown when the option is selected
+  // (typically the "why is this disabled" message).
   reason?: string;
+  // Always-on dropdown description line for the option.
+  description?: string;
 };
+
+// Mirrors preset_extension() in src-tauri/src/clips.rs. Used for UI labels so
+// the displayed filename matches the file the backend writes.
+function clipPresetExtension(format: ClipExportFormat): string {
+  switch (format) {
+    case "prores-lt":
+    case "prores-hq":
+    case "gpu-intra":
+      return "mov";
+    case "h264-cpu":
+    case "hevc-cpu":
+    case "h264-nvenc":
+    case "av1-nvenc":
+      return "mp4";
+    case "lossless-cut":
+      return "mkv";
+    default:
+      return "mov";
+  }
+}
 
 function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
   switch (format) {
@@ -2205,6 +2258,7 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
       };
     case "prores-lt":
     case "prores-hq":
+    case "lossless-cut":
     default:
       return null;
   }
@@ -2220,42 +2274,55 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
 
   return [
     {
+      value: "lossless-cut",
+      label: "Lossless cut (no re-encode)",
+      disabled: false,
+      description: "Bit-exact stream copy of the original, fastest. Snaps to the nearest keyframe (not frame-accurate). Saved as MKV.",
+    },
+    {
       value: "prores-lt",
       label: "ProRes LT MOV",
       disabled: false,
+      description: "Editing-friendly 10-bit intermediate, larger files. Re-encoded from the original.",
     },
     {
       value: "prores-hq",
       label: "ProRes HQ MOV",
       disabled: false,
+      description: "Highest-quality 10-bit intermediate for NLEs, largest files. Re-encoded from the original.",
     },
     {
       value: "h264-cpu",
       label: "H.264 CPU MP4",
       disabled: false,
+      description: "Widely compatible delivery codec (libx264). Lower CRF = higher quality.",
     },
     {
       value: "hevc-cpu",
       label: "HEVC CPU MP4",
       disabled: false,
+      description: "Smaller files than H.264 at equal quality (libx265). Lower CRF = higher quality.",
     },
     {
       value: "gpu-intra",
       label: "GPU Intra MOV",
       disabled: !gpuMode || !gpuIntraReady,
       reason: !gpuMode ? cpuModeReason : gpuIntraReady ? undefined : statusMessage,
+      description: "All-intra HEVC 10-bit via NVENC, edit-friendly and fast on RTX.",
     },
     {
       value: "h264-nvenc",
       label: "H.264 NVENC MP4",
       disabled: !gpuMode || !h264NvencReady,
       reason: !gpuMode ? cpuModeReason : h264NvencReady ? undefined : "Bundled FFmpeg does not expose h264_nvenc on this machine.",
+      description: "Fast GPU H.264 delivery encode. Lower CQ = higher quality.",
     },
     {
       value: "av1-nvenc",
       label: "AV1 NVENC MP4",
       disabled: !gpuMode || !av1NvencReady,
       reason: !gpuMode ? cpuModeReason : av1NvencReady ? undefined : "Bundled FFmpeg does not expose av1_nvenc on this machine.",
+      description: "Fast GPU AV1 delivery encode, smallest files. Lower CQ = higher quality.",
     },
   ];
 }

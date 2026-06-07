@@ -11,9 +11,9 @@
     },
     {
       "name": "ffmpeg-static",
-      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-05-15-13-34/ffmpeg-N-124464-gb2867481d9-win64-gpl.zip",
-      "sha256": "c0b8d88b1736d414380a67a88f571634cbd06829f9b55f915ea88dffe4548811",
-      "size": 219013697,
+      "url": "https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-full_build.zip",
+      "sha256": "49b28c5f16addd40239a66949973458769b7056fb7752c30ac0d53389d09a552",
+      "size": 252194496,
       "kind": "zip",
       "extract": [
         { "from": "**/bin/ffmpeg.exe", "to": "ffmpeg.exe" },
@@ -22,9 +22,9 @@
     },
     {
       "name": "ffmpeg-shared",
-      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-05-15-13-34/ffmpeg-n8.1.1-2-gfb216b5fac-win64-gpl-shared-8.1.zip",
-      "sha256": "8e236d6b3882fc31c1e5ed71be1240361153b42aa61968e5bf9234ea48c4296e",
-      "size": 96398211,
+      "url": "https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-full_build-shared.zip",
+      "sha256": "4296b396bdfd5fbc3dfc75ab4c8703354a56963232d65c4182993543df2d2f45",
+      "size": 101083228,
       "kind": "zip",
       "extract": [
         { "from": "**/bin/*.dll", "to_dir": "ffmpeg-shared" }

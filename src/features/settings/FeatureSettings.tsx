@@ -23,6 +23,23 @@ export function FeatureSettings({
   setLocalDownloadPath,
   currentMode,
 }: FeatureSettingsProps) {
+  // Local draft of the Tsukyio key so we don't fire a config write on every
+  // keystroke; persist on Save (matching how the download path persists on a
+  // discrete action rather than per-character).
+  const [tsukyioKey, setTsukyioKey] = React.useState(backendConfig?.tsukyio_api_key ?? "");
+  const [tsukyioSaved, setTsukyioSaved] = React.useState(false);
+
+  React.useEffect(() => {
+    setTsukyioKey(backendConfig?.tsukyio_api_key ?? "");
+  }, [backendConfig?.tsukyio_api_key]);
+
+  async function saveTsukyioKey() {
+    await persistConfigField("tsukyio_api_key", tsukyioKey.trim());
+    setTsukyioSaved(true);
+    window.dispatchEvent(new CustomEvent("tsukyio-config-changed"));
+    window.setTimeout(() => setTsukyioSaved(false), 2500);
+  }
+
   return (
     <div className="settings-category-wrapper">
       <div className="settings-group glass">
@@ -57,6 +74,46 @@ export function FeatureSettings({
             }}
           >
             Browse
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-group glass">
+        <div className="settings-group-header">Tsukyio Vault</div>
+        <div className="setting-row">
+          <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>
+            <span className="setting-label">API key</span>
+            <span className="setting-desc">
+              Connect the Tsukyio anime asset vault to browse and download clips in-app.
+              Get a free key at{" "}
+              <a href="https://tsukyio.com" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                tsukyio.com
+              </a>
+              . Powered by Tsukyio.
+            </span>
+          </div>
+        </div>
+        <div className="settings-download-path-row">
+          <input
+            type="password"
+            className="settings-path-input"
+            value={tsukyioKey}
+            placeholder="tsk_..."
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(e) => setTsukyioKey(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void saveTsukyioKey();
+            }}
+            aria-label="Tsukyio API key"
+          />
+          <button
+            type="button"
+            className="settings-path-browse-btn spring-motion"
+            disabled={tsukyioKey.trim() === (backendConfig?.tsukyio_api_key ?? "").trim()}
+            onClick={() => void saveTsukyioKey()}
+          >
+            {tsukyioSaved ? "Saved" : "Save key"}
           </button>
         </div>
       </div>

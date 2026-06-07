@@ -1,6 +1,10 @@
 # Donor projects kept for reference only.
 reference/
 
+# moongetsu's PRIVATE Tsukyio AE extension source. Shared in confidence to
+# document the vault API — reference only. MUST NOT be committed to the public repo.
+Tsukyio-AE-Extension-development/
+
 # Local agent/editor state.
 .claude/
 .vscode/

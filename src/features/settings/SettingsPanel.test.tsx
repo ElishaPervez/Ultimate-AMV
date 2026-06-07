@@ -33,6 +33,7 @@ function configJson(overrides: Record<string, unknown> = {}): string {
     background_video_fps: 30,
     audio_output_format: 'wav',
     clip_hover_preview: false,
+    tsukyio_api_key: '',
     ...overrides,
   }
   return JSON.stringify(config)

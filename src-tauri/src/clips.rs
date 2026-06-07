@@ -35,8 +35,122 @@ fn preset_extension(preset: &str) -> &'static str {
     match preset {
         "prores-lt" | "prores-hq" | "gpu-intra" => "mov",
         "h264-cpu" | "hevc-cpu" | "h264-nvenc" | "av1-nvenc" => "mp4",
+        // Stream-copy preset: container must tolerate arbitrary source codecs
+        // (10-bit HEVC, AV1, exotic profiles) without re-muxing limits. MKV is
+        // the robust choice — MP4/MOV reject several codecs on -c copy.
+        "lossless-cut" => "mkv",
         _ => "mov",
     }
+}
+
+const VIDEO_PRESETS: &[&str] = &[
+    "gpu-intra",
+    "prores-lt",
+    "prores-hq",
+    "h264-nvenc",
+    "av1-nvenc",
+    "h264-cpu",
+    "hevc-cpu",
+    "lossless-cut",
+];
+
+// Source color metadata read off the input stream with ffprobe. We TAG these
+// onto every re-encode output (no pixel conversion) so downstream players /
+// NLEs stop guessing range + matrix and crushing or washing the blacks.
+#[derive(Clone, Default)]
+struct ColorMetadata {
+    primaries: Option<String>,
+    transfer: Option<String>,
+    matrix: Option<String>,
+    range: Option<String>,
+}
+
+fn ffprobe_color_field(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() || trimmed == "unknown" || trimmed == "N/A" || trimmed == "reserved" {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+// Probe color_primaries / color_transfer / color_space (matrix) / color_range
+// off the first video stream. Anything missing falls back to the BT.709
+// limited-range default (the anime Blu-ray standard) so the output is always
+// fully tagged rather than left unlabeled.
+fn probe_color_metadata(ffprobe: &Path, input: &Path) -> ColorMetadata {
+    let output = cmd(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=color_primaries,color_transfer,color_space,color_range")
+        .arg("-of").arg("default=noprint_wrappers=1:nokey=0")
+        .arg(input)
+        .output();
+
+    let mut meta = ColorMetadata::default();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let Some((key, value)) = line.split_once('=') else { continue };
+                match key.trim() {
+                    "color_primaries" => meta.primaries = ffprobe_color_field(Some(value)),
+                    "color_transfer" => meta.transfer = ffprobe_color_field(Some(value)),
+                    "color_space" => meta.matrix = ffprobe_color_field(Some(value)),
+                    "color_range" => meta.range = ffprobe_color_field(Some(value)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    meta
+}
+
+// Resolve the four color fields to concrete values, defaulting untagged
+// sources to BT.709 limited (tv) — the anime BD standard. Returned as
+// (primaries, transfer, matrix, range) where range is normalized to tv/pc.
+fn resolved_color(meta: &ColorMetadata) -> (String, String, String, &'static str) {
+    let primaries = meta.primaries.clone().unwrap_or_else(|| "bt709".to_string());
+    let transfer = meta.transfer.clone().unwrap_or_else(|| "bt709".to_string());
+    let matrix = meta.matrix.clone().unwrap_or_else(|| "bt709".to_string());
+    let range = match meta.range.as_deref() {
+        Some("pc") | Some("full") | Some("jpeg") => "pc",
+        // tv / limited / mpeg / unknown all map to limited range.
+        _ => "tv",
+    };
+    (primaries, transfer, matrix, range)
+}
+
+// Build the output-side color TAG flags. These label the bitstream; they do
+// not run any zscale/colorspace pixel conversion. NOTE: on their own these
+// flags are not enough — ffmpeg only writes color_primaries / color_trc into
+// the encoder VUI when the *frames* carry those properties, so a matching
+// setparams filter (see setparams_filter) must run on the video too. We emit
+// both: the filter stamps the frame metadata, these flags stamp the muxer.
+fn color_tag_args(meta: &ColorMetadata) -> Vec<String> {
+    let (primaries, transfer, matrix, range) = resolved_color(meta);
+    vec![
+        "-color_primaries".to_string(),
+        primaries,
+        "-color_trc".to_string(),
+        transfer,
+        "-colorspace".to_string(),
+        matrix,
+        "-color_range".to_string(),
+        range.to_string(),
+    ]
+}
+
+// The setparams filter that stamps the resolved color metadata onto the
+// frames. Required alongside color_tag_args so color_primaries / color_trc
+// actually reach the encoder VUI (passing the -color_* output flags alone
+// leaves primaries + transfer "unknown" in the bitstream). Pixel data is
+// untouched — setparams only labels.
+fn setparams_filter(meta: &ColorMetadata) -> String {
+    let (primaries, transfer, matrix, range) = resolved_color(meta);
+    format!(
+        "setparams=color_primaries={primaries}:color_trc={transfer}:colorspace={matrix}:range={range}"
+    )
 }
 
 #[tauri::command]
@@ -47,8 +161,8 @@ pub(crate) async fn clip_export(
     preset: String,
     quality_value: Option<i32>,
 ) -> Result<String, String> {
-    if !matches!(preset.as_str(), "gpu-intra" | "prores-lt" | "prores-hq" | "h264-nvenc" | "av1-nvenc" | "h264-cpu" | "hevc-cpu") {
-        return Err("Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, av1-nvenc, h264-cpu, or hevc-cpu".to_string());
+    if !VIDEO_PRESETS.contains(&preset.as_str()) {
+        return Err("Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, av1-nvenc, h264-cpu, hevc-cpu, or lossless-cut".to_string());
     }
     log_info(
         "clip.export.start",
@@ -105,6 +219,7 @@ fn run_clip_export(
 
     for (i, clip) in clips.iter().enumerate() {
         let input = canonical_input_path(&clip.source)?;
+        let color = probe_color_metadata(&ffprobe, &input);
 
         let ext = preset_extension(&preset);
         let output = loop {
@@ -279,8 +394,45 @@ fn run_clip_export(
                 ]);
                 format!("Encoding HEVC (CPU) clip {}/{}", i + 1, clips.len())
             }
+            "lossless-cut" => {
+                // Bit-exact stream copy — no re-encode. Keyframe-only seek:
+                // -ss BEFORE -i snaps the cut to the nearest preceding
+                // keyframe (NOT frame-accurate; surfaced in the UI). Color
+                // metadata rides along untouched with -c copy, so no color
+                // tag flags are appended for this preset.
+                args.extend([
+                    "-ss".to_string(),
+                    format!("{export_start:.3}"),
+                    "-i".to_string(),
+                    input.to_string_lossy().to_string(),
+                    "-t".to_string(),
+                    format!("{export_duration:.3}"),
+                    "-map".to_string(),
+                    "0:v:0".to_string(),
+                    "-map".to_string(),
+                    "0:a:0?".to_string(),
+                    "-c".to_string(),
+                    "copy".to_string(),
+                    "-avoid_negative_ts".to_string(),
+                    "make_zero".to_string(),
+                ]);
+                format!("Lossless cut clip {}/{}", i + 1, clips.len())
+            }
             _ => unreachable!(),
         };
+
+        // Tag (do not convert) the source's color metadata on every re-encode
+        // output. The setparams filter stamps the frame-level color props so
+        // the encoder VUI carries primaries + transfer (output -color* flags
+        // alone leave those "unknown"); color_tag_args stamps the muxer.
+        // Skipped for lossless-cut, where -c copy preserves the original tags
+        // verbatim. None of the re-encode single presets use -vf elsewhere, so
+        // a single -vf setparams is safe to append here.
+        if preset != "lossless-cut" {
+            args.push("-vf".to_string());
+            args.push(setparams_filter(&color));
+            args.extend(color_tag_args(&color));
+        }
 
         args.extend([
             "-progress".to_string(),
@@ -317,6 +469,8 @@ fn run_clip_export(
                 ];
                 fallback_args.extend(input_args.iter().cloned());
                 fallback_args.extend([
+                    "-vf".to_string(),
+                    setparams_filter(&color),
                     "-c:v".to_string(),
                     "libx264".to_string(),
                     "-preset".to_string(),
@@ -329,6 +483,9 @@ fn run_clip_export(
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
+                ]);
+                fallback_args.extend(color_tag_args(&color));
+                fallback_args.extend([
                     "-progress".to_string(),
                     "pipe:1".to_string(),
                     "-stats_period".to_string(),
@@ -370,8 +527,8 @@ pub(crate) async fn clip_export_merged(
     if clips.len() < 2 {
         return Err("Merge requires at least 2 clips".to_string());
     }
-    if !matches!(preset.as_str(), "gpu-intra" | "prores-lt" | "prores-hq" | "h264-nvenc" | "av1-nvenc" | "h264-cpu" | "hevc-cpu") {
-        return Err("Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, av1-nvenc, h264-cpu, or hevc-cpu".to_string());
+    if !VIDEO_PRESETS.contains(&preset.as_str()) {
+        return Err("Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, av1-nvenc, h264-cpu, hevc-cpu, or lossless-cut".to_string());
     }
     log_info(
         "clip.export_merged.start",
@@ -458,6 +615,27 @@ fn run_clip_export_merged(
     }
     let any_has_audio = input_has_audio.iter().any(|&h| h);
 
+    // Color metadata is read off the first input. The merged output is a
+    // single stream, so it carries one consistent tag set; for the typical
+    // same-episode merge every segment shares these values anyway.
+    let color = probe_color_metadata(&ffprobe, &input_paths[0]);
+
+    // Lossless-cut merge takes a separate stream-copy path (filter_complex
+    // requires re-encoding, which would defeat the point). Each segment is
+    // copied to a temp keyframe-snapped file, then concatenated with the
+    // concat demuxer — bit-exact, color tags ride along untouched.
+    if preset == "lossless-cut" {
+        return run_lossless_cut_merge(
+            &window,
+            &ffmpeg,
+            &clips,
+            &input_paths,
+            &input_index_for_clip,
+            &out_dir,
+            &output,
+        );
+    }
+
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
@@ -499,13 +677,18 @@ fn run_clip_export_merged(
         }
     }
     let n = clips.len();
+    // filter_complex (trim/concat) strips stream-level color metadata, so we
+    // re-stamp it inside the graph with setparams (matched by the output -color*
+    // flags below). Untagged sources default to BT.709 limited — the anime BD
+    // standard.
+    let setparams = setparams_filter(&color);
     if any_has_audio {
         filter_parts.push(format!(
-            "{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+            "{concat_inputs}concat=n={n}:v=1:a=1[cv][outa];[cv]{setparams}[outv]"
         ));
     } else {
         filter_parts.push(format!(
-            "{concat_inputs}concat=n={n}:v=1:a=0[outv]"
+            "{concat_inputs}concat=n={n}:v=1:a=0[cv];[cv]{setparams}[outv]"
         ));
     }
     args.push("-filter_complex".to_string());
@@ -628,6 +811,9 @@ fn run_clip_export_merged(
 
     let pre_encode_args = args.clone();
     args.extend(encode_args);
+    // Output-side color tags matching the in-graph setparams above, so the
+    // muxer writes the labels into the container.
+    args.extend(color_tag_args(&color));
 
     args.extend([
         "-progress".to_string(),
@@ -679,6 +865,7 @@ fn run_clip_export_merged(
                     "-b:a".to_string(), "320k".to_string(),
                 ]);
             }
+            fallback_args.extend(color_tag_args(&color));
             fallback_args.extend([
                 "-progress".to_string(), "pipe:1".to_string(),
                 "-stats_period".to_string(), "0.5".to_string(),
@@ -703,6 +890,144 @@ fn run_clip_export_merged(
         output: output.to_string_lossy().to_string(),
         archived_original: None,
         preset,
+    };
+    serde_json::to_string(&done).map_err(|error| error.to_string())
+}
+
+// Lossless-cut merge: stream-copy each segment to a keyframe-snapped temp MKV,
+// then concat-demux them into one MKV with -c copy. Bit-exact, no re-encode;
+// color metadata + every other stream parameter ride along untouched. Cuts
+// snap to the nearest preceding keyframe (not frame-accurate — surfaced in the
+// UI). Audio is copied per-segment if present; segments with no audio simply
+// have none in the concat (the concat demuxer tolerates a missing audio stream
+// across parts so long as the muxer settings line up, which they do for
+// same-codec same-source segments).
+fn run_lossless_cut_merge(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    clips: &[ExportClip],
+    input_paths: &[PathBuf],
+    input_index_for_clip: &[usize],
+    out_dir: &Path,
+    output: &Path,
+) -> Result<String, String> {
+    let temp_dir = out_dir.join(format!(".losslesscut_tmp_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Could not create temporary merge directory: {e}"))?;
+
+    // RAII-ish cleanup of the temp dir on every exit path.
+    struct TempDirGuard(PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = TempDirGuard(temp_dir.clone());
+
+    let mut total_duration = 0.0_f64;
+    let mut concat_list = String::new();
+    let mut segment_paths: Vec<PathBuf> = Vec::with_capacity(clips.len());
+
+    for (i, clip) in clips.iter().enumerate() {
+        let input = &input_paths[input_index_for_clip[i]];
+        let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
+        let offset = 1.5 / fps;
+        let start = clip.start + offset;
+        let raw_duration = (clip.end - start).max(0.0);
+        let duration = if raw_duration > 0.05 { raw_duration - 0.015 } else { raw_duration };
+        total_duration += duration;
+
+        let segment = temp_dir.join(format!("seg_{i:04}.mkv"));
+        let args: Vec<String> = vec![
+            "-y".to_string(),
+            "-hide_banner".to_string(),
+            "-nostdin".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-ss".to_string(),
+            format!("{start:.3}"),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-t".to_string(),
+            format!("{duration:.3}"),
+            "-map".to_string(),
+            "0:v:0".to_string(),
+            "-map".to_string(),
+            "0:a:0?".to_string(),
+            "-c".to_string(),
+            "copy".to_string(),
+            "-avoid_negative_ts".to_string(),
+            "make_zero".to_string(),
+            segment.to_string_lossy().to_string(),
+        ];
+        emit_conversion_progress(
+            window,
+            "decode",
+            Some(((i as f32) / (clips.len() as f32)) * 90.0),
+            format!("Cutting segment {}/{} (lossless)...", i + 1, clips.len()),
+            None,
+            None,
+        );
+        run_ffmpeg_with_progress(
+            window,
+            ffmpeg,
+            args,
+            duration,
+            "Cutting lossless segment",
+            Some(&CLIP_CHILD_PID),
+        )?;
+
+        // Concat-demuxer list lines escape single quotes per ffmpeg's syntax.
+        let escaped = segment.to_string_lossy().replace('\'', "'\\''");
+        concat_list.push_str(&format!("file '{escaped}'\n"));
+        segment_paths.push(segment);
+    }
+
+    let list_path = temp_dir.join("concat.txt");
+    fs::write(&list_path, concat_list)
+        .map_err(|e| format!("Could not write concat list: {e}"))?;
+
+    let concat_args: Vec<String> = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-f".to_string(),
+        "concat".to_string(),
+        "-safe".to_string(),
+        "0".to_string(),
+        "-i".to_string(),
+        list_path.to_string_lossy().to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        "-stats_period".to_string(),
+        "0.5".to_string(),
+        output.to_string_lossy().to_string(),
+    ];
+    emit_conversion_progress(
+        window,
+        "encode",
+        Some(92.0_f32),
+        format!("Joining {} lossless segments...", clips.len()),
+        None,
+        None,
+    );
+    run_ffmpeg_with_progress(
+        window,
+        ffmpeg,
+        concat_args,
+        total_duration,
+        "Joining lossless segments",
+        Some(&CLIP_CHILD_PID),
+    )?;
+
+    let done = ConversionDone {
+        r#type: "done".to_string(),
+        input: format!("{} clips merged", clips.len()),
+        output: output.to_string_lossy().to_string(),
+        archived_original: None,
+        preset: "lossless-cut".to_string(),
     };
     serde_json::to_string(&done).map_err(|error| error.to_string())
 }
@@ -762,9 +1087,19 @@ fn generate_scene_clip(
 
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
+    let ffprobe = find_tool(&root, "ffprobe");
     ensure_tool(&ffmpeg)?;
 
     let input = canonical_input_path(&source_path)?;
+    // Carry the source's color metadata through onto the preview so the player
+    // shows the same range/matrix the final export will use (defaults to
+    // BT.709 limited when untagged). ffprobe is optional here — if it's
+    // missing we still render with the BT.709 default.
+    let color = if ensure_tool(&ffprobe).is_ok() {
+        probe_color_metadata(&ffprobe, &input)
+    } else {
+        ColorMetadata::default()
+    };
     // Content-fingerprint key so renames / copies / moves of the same file
     // all share the same cache folder. Path-based keys here would cache-
     // miss every time the user renamed the source.
@@ -779,10 +1114,11 @@ fn generate_scene_clip(
 
     let start_key = format!("{:.3}", start);
     let end_key = format!("{:.3}", end);
-    // v5: drop scene_id from filename (was path-dependent via clip.id);
-    // (start, end) is unique-per-source by definition since scenes don't
-    // overlap. v4 retained: -hwaccel auto for universal hw decode accel.
-    let range_key = short_stable_id(&[&start_key, &end_key, "scene-clip-v5"]);
+    // v6: tag source color metadata onto the preview (bumped from v5 to
+    // regenerate previews that were cached untagged). v5: dropped scene_id
+    // from filename; (start, end) is unique-per-source by definition since
+    // scenes don't overlap. v4: -hwaccel auto for universal hw decode accel.
+    let range_key = short_stable_id(&[&start_key, &end_key, "scene-clip-v6"]);
     let output = cache_dir.join(format!("{range_key}.mp4"));
     let duration = (end - start).max(0.05);
 
@@ -797,12 +1133,12 @@ fn generate_scene_clip(
     let use_nvenc = *H264_NVENC_AVAILABLE
         .get_or_init(|| ffmpeg_listing(&ffmpeg, "-encoders").contains("h264_nvenc"));
 
-    if let Err(error) = render_scene_clip_job(&ffmpeg, &input, &output, start, duration, use_nvenc)
+    if let Err(error) = render_scene_clip_job(&ffmpeg, &input, &output, start, duration, use_nvenc, &color)
     {
         // Software fallback: NVENC can refuse some sources (10-bit HEVC, exotic
         // pixel formats) where libx264 still happily encodes.
         if use_nvenc {
-            render_scene_clip_job(&ffmpeg, &input, &output, start, duration, false)?;
+            render_scene_clip_job(&ffmpeg, &input, &output, start, duration, false, &color)?;
         } else {
             return Err(error);
         }
@@ -818,6 +1154,7 @@ fn render_scene_clip_job(
     start: f64,
     duration: f64,
     use_nvenc: bool,
+    color: &ColorMetadata,
 ) -> Result<(), String> {
     // Dual -ss for fast accurate seek:
     //   - Coarse -ss BEFORE -i: ffmpeg keyframe-seeks straight to ~2s before
@@ -863,9 +1200,11 @@ fn render_scene_clip_job(
         // upscaling, which would just slow the encode for no quality gain.
         // Single quotes are intentional - they tell ffmpeg's expression
         // parser to treat the inner comma as a function arg, not a filter
-        // chain separator.
+        // chain separator. setparams is chained on so the preview carries the
+        // same color tags the export will (scale preserves color; setparams
+        // only labels). Defaults to BT.709 limited when the source is untagged.
         "-vf".to_string(),
-        "scale=-2:'min(720,ih)'".to_string(),
+        format!("scale=-2:'min(720,ih)',{}", setparams_filter(color)),
     ];
 
     if use_nvenc {
@@ -891,6 +1230,11 @@ fn render_scene_clip_job(
             "yuv420p".to_string(),
         ]);
     }
+
+    // Tag the source color metadata onto the preview (scale preserves color,
+    // so this labels rather than converts). Untagged sources default to
+    // BT.709 limited.
+    args.extend(color_tag_args(color));
 
     args.extend([
         "-c:a".to_string(),

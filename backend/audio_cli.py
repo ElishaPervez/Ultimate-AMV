@@ -101,6 +101,7 @@ def _config_payload(cfg):
         "background_video_fps": int(cfg.get("background_video_fps", BACKGROUND_DEFAULTS["background_video_fps"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
+        "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
     }
 
 
@@ -223,6 +224,8 @@ def set_config(key, value):
         cfg["audio_output_format"] = normalized
     elif key == "clip_hover_preview":
         cfg["clip_hover_preview"] = value.lower() == "true"
+    elif key == "tsukyio_api_key":
+        cfg["tsukyio_api_key"] = (value or "").strip()
     save_config(cfg)
     emit(_config_payload(cfg))
 

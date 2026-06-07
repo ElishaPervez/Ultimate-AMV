@@ -108,12 +108,42 @@ pub(crate) async fn get_config() -> Result<String, String> {
         .map_err(|error| error.to_string())?
 }
 
+/// Config keys whose value is a secret and must never hit the on-disk log in
+/// plaintext. A key is sensitive if its name (case-insensitive) contains any
+/// of these substrings, so `tsukyio_api_key`, `*_token`, `*_secret`,
+/// `*_password` are all covered without an explicit allow-list.
+pub(crate) fn is_sensitive_config_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    ["key", "token", "secret", "password"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Produces a log-safe rendering of a config value: secrets become a short
+/// masked placeholder (first 4 chars + ellipsis, or just `<redacted>` when too
+/// short to show a prefix safely), everything else logs verbatim.
+pub(crate) fn redact_config_value(key: &str, value: &str) -> String {
+    if !is_sensitive_config_key(key) {
+        return value.to_string();
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let prefix: String = trimmed.chars().take(4).collect();
+    if prefix.chars().count() < 4 {
+        "<redacted>".to_string()
+    } else {
+        format!("{prefix}…")
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn set_config(key: String, value: String) -> Result<String, String> {
     log_info(
         "config.set.start",
         "Updating app configuration",
-        json!({ "key": &key, "value": &value }),
+        json!({ "key": &key, "value": redact_config_value(&key, &value) }),
     );
     let log_key = key.clone();
     let result = tauri::async_runtime::spawn_blocking(move || run_audio_cli(&["set-config", &key, &value]))
@@ -121,7 +151,47 @@ pub(crate) async fn set_config(key: String, value: String) -> Result<String, Str
         .map_err(|error| error.to_string())?;
     match &result {
         Ok(_) => log_info("config.set.complete", "App configuration updated", json!({ "key": log_key })),
-        Err(error) => log_error("config.set.error", "App configuration update failed", json!({ "key": log_key, "error": error })),
+        Err(error) => {
+            // For sensitive keys the CLI error body could echo the value, so
+            // never log it verbatim.
+            let safe_error = if is_sensitive_config_key(&log_key) {
+                "<redacted>".to_string()
+            } else {
+                error.clone()
+            };
+            log_error("config.set.error", "App configuration update failed", json!({ "key": log_key, "error": safe_error }));
+        }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensitive_keys_are_detected_case_insensitively() {
+        assert!(is_sensitive_config_key("tsukyio_api_key"));
+        assert!(is_sensitive_config_key("API_KEY"));
+        assert!(is_sensitive_config_key("access_token"));
+        assert!(is_sensitive_config_key("client_secret"));
+        assert!(is_sensitive_config_key("PASSWORD"));
+        assert!(!is_sensitive_config_key("download_path"));
+        assert!(!is_sensitive_config_key("theme"));
+        assert!(!is_sensitive_config_key("clip_extraction_mode"));
+    }
+
+    #[test]
+    fn redact_masks_secrets_but_passes_normal_values() {
+        // Non-sensitive: verbatim.
+        assert_eq!(redact_config_value("download_path", "D:/clips"), "D:/clips");
+        // Sensitive with a usable prefix: first 4 chars + ellipsis, never the rest.
+        let masked = redact_config_value("tsukyio_api_key", "tsk_supersecretvalue");
+        assert_eq!(masked, "tsk_…");
+        assert!(!masked.contains("supersecret"));
+        // Sensitive but short: no prefix leaked.
+        assert_eq!(redact_config_value("tsukyio_api_key", "ab"), "<redacted>");
+        // Empty stays empty (clearing the key).
+        assert_eq!(redact_config_value("tsukyio_api_key", ""), "");
+    }
 }

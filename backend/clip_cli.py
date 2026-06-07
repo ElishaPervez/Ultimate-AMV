@@ -503,8 +503,35 @@ def scenes_from_ranges(input_path, ranges, duration, min_clip_seconds):
     return scenes
 
 
+# Codecs nelux/NVDEC can hardware-decode. Anything outside this set must NOT
+# touch the nelux/NVDEC path — nelux can wedge in C++ on unsupported codecs and
+# only a process kill recovers. Keep in sync with GPU_SUPPORTED_CODECS in
+# src/features/clips/ClipExtractorPanel.tsx and cuvid_decoder() above.
+GPU_DECODABLE_CODECS = {"h264", "hevc", "av1"}
+
+
+def extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=None):
+    """GPU detection on a codec NVDEC/nelux can't decode.
+
+    Decodes frames with ffmpeg's software decoder (handles any codec) and feeds
+    them into the SAME TransNetV2 model used by the hardware path. The result is
+    identical-quality scene detection; only the decode stage is on CPU. mode
+    stays "gpu" for the caller's cache key so cuts match a normal GPU run.
+    """
+    ffmpeg = require_tool("ffmpeg")
+    progress("probe", 1, f"{info.codec} (software decode) at {info.fps:.3f} FPS, {info.duration:.1f}s", started_at)
+
+    frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
+    scores, _boundary_frames = transnet_scores(frames, threshold, batch_frames, overlap, started_at, model=model)
+
+    progress("scenes", 96, "Building scene list...", started_at)
+    cuts = boundary_frames_to_seconds(scores >= threshold, scores, info.fps, info.duration, min_clip_seconds)
+    scenes = scenes_from_cuts(input_path, cuts, info.duration)
+    return scenes, cuts
+
+
 def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at):
-    if info.codec not in {"h264", "hevc", "av1"}:
+    if info.codec not in GPU_DECODABLE_CODECS:
         raise RuntimeError(f"Unsupported codec for RTX clip extraction: {info.codec!r}. Expected h264, hevc, or av1.")
     ffmpeg = require_tool("ffmpeg")
     progress("probe", 1, f"{info.codec} at {info.fps:.3f} FPS, {info.duration:.1f}s", started_at)
@@ -569,18 +596,29 @@ def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_
 
     def run_detection(current_model=None):
         if mode == "gpu":
-            try:
-                import torch
-                import nelux
-                from transnetv2_pytorch import TransNetV2
-                
-                # Use provided model or load one
-                active_model = current_model
-                if active_model is None:
-                    device = torch.device("cuda")
-                    active_model = TransNetV2(device=device)
-                    active_model.eval()
+            import torch
+            from transnetv2_pytorch import TransNetV2
 
+            # Use provided model or load one. The model is shared by the
+            # hardware (nelux/NVDEC) and software-decode GPU paths, so load it
+            # once up front regardless of which decode route we take.
+            active_model = current_model
+            if active_model is None:
+                device = torch.device("cuda")
+                active_model = TransNetV2(device=device)
+                active_model.eval()
+
+            # Codecs NVDEC/nelux can't decode go STRAIGHT to software decode ->
+            # TransNetV2. We must not attempt the nelux path on these files at
+            # all: nelux can hang in native C++ on unsupported codecs and only
+            # a process kill recovers. mode stays "gpu" so the cache key and
+            # detected cuts match a normal GPU run.
+            if info.codec not in GPU_DECODABLE_CODECS:
+                emit({"type": "log", "message": f"Codec {info.codec!r} is not NVDEC-decodable; using software decode -> TransNetV2 (GPU)."})
+                return extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
+
+            try:
+                import nelux  # noqa: F401  (import-presence check before the native call)
                 return extract_gpu_nelux_with_model(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, active_model)
             except Exception as e:
                 emit({"type": "log", "message": f"Nelux failed, falling back to legacy NVDEC: {e}"})

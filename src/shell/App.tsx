@@ -8,6 +8,7 @@ import {
   Download,
   Film,
   FolderKanban,
+  Library,
   Music2,
   ScrollText,
   Settings,
@@ -32,6 +33,7 @@ import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
+import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
 import { SidebarButton } from "./SidebarButton";
 import { WindowChrome } from "./WindowChrome";
 
@@ -39,6 +41,7 @@ const primaryItems: NavItem[] = [
   { id: "audio-extraction", label: "Vocal Separation", short: "Vocals", icon: AudioLines },
   { id: "clip-hunting", label: "Scene Splitter", short: "Splitter", icon: Compass },
   { id: "downloader", label: "Downloader", short: "Download", icon: Download },
+  { id: "tsukyio", label: "Tsukyio Vault", short: "Vault", icon: Library },
   { id: "bg-removal", label: "BG Remover", short: "Matting", icon: Sparkles },
   { id: "audio-conversion", label: "Audio Conversion", short: "Audio", icon: Music2 },
   { id: "video-conversion", label: "Video Conversion", short: "Video", icon: Film },
@@ -54,6 +57,11 @@ const panelMeta: Record<SectionId, { kicker: string; title: string; stats: strin
     kicker: "Download",
     title: "Downloader",
     stats: ["Anime", "YouTube", "Queue"],
+  },
+  tsukyio: {
+    kicker: "Vault",
+    title: "Tsukyio Vault",
+    stats: ["Browse", "Preview", "Download"],
   },
   "audio-extraction": {
     kicker: "Separation",
@@ -104,6 +112,7 @@ export function App() {
   const isAudioExtraction = active === "audio-extraction";
   const isClipHunting = active === "clip-hunting";
   const isDownloader = active === "downloader";
+  const isTsukyio = active === "tsukyio";
   const isAudioConversion = active === "audio-conversion";
   const isVideoConversion = active === "video-conversion";
   const isBgRemoval = active === "bg-removal";
@@ -182,7 +191,9 @@ export function App() {
             ] as const)
             : isClipHunting
               ? ([{ id: "extractor", label: "Scene splitter" }] as const)
-              : isAudioConversion || isVideoConversion
+              : isTsukyio
+                ? ([{ id: "vault", label: "Vault" }] as const)
+                : isAudioConversion || isVideoConversion
                 ? ([{ id: "convert", label: "Convert" }] as const)
                 : ([
                   { id: "media", label: "Media browser" },
@@ -318,7 +329,10 @@ export function App() {
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
                   <BgRemovePanel activeTab={bgRemoveTab} />
                 </div>
-                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && (
+                <div className={`panel-view spring-motion ${isTsukyio ? "is-active" : "is-hidden"}`} aria-hidden={!isTsukyio}>
+                  <TsukyioPanel active={isTsukyio} onOpenSettings={() => setActive("settings")} />
+                </div>
+                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && (
                   <div className="panel-view is-active spring-motion">
                     {isAudioConversion ? <MediaToAudioPanel />
                       : isVideoConversion ? <VideoToVideoPanel />

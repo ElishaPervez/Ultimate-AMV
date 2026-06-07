@@ -87,4 +87,12 @@ export type ClipAudioSettings = {
   volume: number;
 };
 
-export type ClipExportFormat = "gpu-intra" | "prores-lt" | "prores-hq" | "h264-nvenc" | "av1-nvenc" | "h264-cpu" | "hevc-cpu";
+export type ClipExportFormat =
+  | "gpu-intra"
+  | "prores-lt"
+  | "prores-hq"
+  | "h264-nvenc"
+  | "av1-nvenc"
+  | "h264-cpu"
+  | "hevc-cpu"
+  | "lossless-cut";
