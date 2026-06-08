@@ -1,0 +1,8 @@
+{
+  "id": "ultimate-amv",
+  "name": "Ultimate-AMV",
+  "description": "The new default direction — deeper indigo glass, softer panels, refreshed accent and a cleaner audio panel. This is the example migration for theme authors.",
+  "author": "Ultimate AMV",
+  "version": "1.0.0",
+  "entry": "theme.css"
+}

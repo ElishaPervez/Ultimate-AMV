@@ -17,6 +17,7 @@ import {
   Upload,
   Zap,
 } from "lucide-react";
+import { setAudioBusy } from "../../lib/audioBusy";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, normalizeSelectedPaths } from "../../lib/paths";
@@ -35,7 +36,10 @@ import { ResultCard } from "./ResultCard";
 import { SelectFileButton } from "./SelectFileButton";
 import { SetupRunningCard } from "./SetupRunningCard";
 import { StemMixerCard } from "./StemMixerCard";
-import "../../styles/new-audio.css";
+// new-audio.css is loaded via the layered `base` bundle in src/styles.css
+// (see the theme engine layer wiring). Importing it directly here would land
+// it UNLAYERED, letting it outrank every engine theme override — so it stays
+// out of this file on purpose.
 
 const AUDIO_INPUT_EXTENSIONS = ["wav", "mp3", "flac", "m4a", "mp4", "mkv", "avi", "webm", "mov"];
 const audioInputAccept = extensionAccept(AUDIO_INPUT_EXTENSIONS);
@@ -63,7 +67,14 @@ export function NewAudioExtractionPanel() {
 
   React.useEffect(() => {
     setDiscordJob("Extracting vocals", extracting);
-    return () => setDiscordJob("Extracting vocals", false);
+    // Publish busy state so App defers any theme-driven audio-panel swap until
+    // the extraction finishes — swapping mid-job would unmount this panel and
+    // orphan the running audio_extract (the result would land with no listener).
+    setAudioBusy(extracting);
+    return () => {
+      setDiscordJob("Extracting vocals", false);
+      setAudioBusy(false);
+    };
   }, [extracting]);
 
   React.useEffect(() => {

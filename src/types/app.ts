@@ -31,6 +31,8 @@ export type AppConfig = {
   theme: AppThemeId;
   theme_color_a: string;
   theme_color_b: string;
+  /** Active engine (CSS) theme id — separate axis from the accent `theme`. */
+  ui_theme: string;
   background_image: string;
   background_scale: number;
   background_offset_x: number;
