@@ -15,6 +15,7 @@ mod logging;
 mod preview;
 mod python_env;
 mod sniffer;
+mod themes;
 mod tools;
 mod tsukyio;
 mod video_cmds;
@@ -405,6 +406,8 @@ pub fn run() {
             clips::scene_clip_render,
             config::get_config,
             config::set_config,
+            themes::list_themes,
+            themes::read_theme_css,
             background_img::save_background_image,
             background_img::clear_background_image,
             wallpaper::wallpaper_transcode,

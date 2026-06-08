@@ -1,0 +1,8 @@
+{
+  "id": "midnight-neon",
+  "name": "Midnight Neon",
+  "description": "A loud cyberpunk reskin — magenta/cyan neon on near-black glass, with a tiled background asset. Example drop-in theme.",
+  "author": "Your Name Here",
+  "version": "1.0.0",
+  "entry": "theme.css"
+}

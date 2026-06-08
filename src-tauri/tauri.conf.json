@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https: data: blob:; media-src 'self' asset: http://asset.localhost blob: tsukyio: http://tsukyio.localhost https://*.googlevideo.com https://tsukyio.com; connect-src 'self' asset: http://asset.localhost tsukyio: http://tsukyio.localhost https://api.jikan.moe https://tsukyio.com",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https: data: blob:; font-src 'self' asset: http://asset.localhost data: https://fonts.gstatic.com; media-src 'self' asset: http://asset.localhost blob: tsukyio: http://tsukyio.localhost https://*.googlevideo.com https://tsukyio.com; connect-src 'self' asset: http://asset.localhost tsukyio: http://tsukyio.localhost https://api.jikan.moe https://tsukyio.com",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPDATA/**", "$RESOURCE/**", "$HOME/**"]

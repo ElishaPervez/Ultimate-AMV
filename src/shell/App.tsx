@@ -20,15 +20,17 @@ import {
   Sparkles,
   Tv,
 } from "lucide-react";
+import { isAudioBusy, onAudioBusyChange } from "../lib/audioBusy";
 import { readBackgroundState } from "../lib/background";
 import { APP_THEMES, DEFAULT_BG_STATE } from "../lib/constants";
 import { setDiscordPanel } from "../lib/discord";
 import { logFrontend, safeLogValue } from "../lib/log";
-import { applyAppTheme, isHexColor, readThemeColors } from "../lib/theme";
+import { applyAppTheme, hasExplicitAccent, isHexColor, readThemeColors } from "../lib/theme";
 import { parseBridgePayload } from "../utils/bridge";
 import type { AppConfig, BackgroundState, NavItem, SectionId } from "../types/app";
 import type { DownloaderTab } from "../types/download";
 import { NewAudioExtractionPanel } from "../features/audio/NewAudioExtractionPanel";
+import { AudioExtractionPanel } from "../features/audio/AudioExtractionPanel";
 import { MediaToAudioPanel } from "../features/audio/MediaToAudioPanel";
 import { ClipExtractorPanel } from "../features/clips/ClipExtractorPanel";
 import { DownloaderPanel } from "../features/downloader/DownloaderPanel";
@@ -40,6 +42,7 @@ import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
+import { useActiveTheme } from "../themes/engine/ThemeProvider";
 import { WindowChrome } from "./WindowChrome";
 
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
@@ -116,15 +119,46 @@ export function App() {
   // SettingsPanel's refreshConfig would race the still-in-flight set_config
   // write and re-fetch the pre-change colors from disk.
   const [themeColors, setThemeColors] = React.useState(() => readThemeColors(null));
+  // Engine (CSS) theme — separate axis from the accent colors above. The
+  // sidebar Theme dropdown drives this; accent presets live in Settings ->
+  // Appearance.
+  const { themes: engineThemes, activeId: activeThemeId, switchTheme: switchEngineTheme, refresh: refreshEngineThemes } = useActiveTheme();
   const [themePickerOpen, setThemePickerOpen] = React.useState(false);
+  const themePickerOpenRef = React.useRef(false);
+  React.useEffect(() => {
+    themePickerOpenRef.current = themePickerOpen;
+  }, [themePickerOpen]);
   const themePickerRef = React.useRef<HTMLDivElement | null>(null);
   const currentThemeName = React.useMemo(() => {
-    const match = APP_THEMES.find(
-      (t) => t.colors[0] === themeColors.primary && t.colors[1] === themeColors.secondary,
-    );
-    const names: Record<string, string> = { cyan: "Cyan Spark", mint: "Mint Breeze", violet: "Violet Dream", rose: "Rose Whisper", amber: "Amber Glow" };
-    return match ? (names[match.id] ?? match.id) : "Custom";
-  }, [themeColors]);
+    const match = engineThemes.find((t) => t.id === activeThemeId);
+    return match?.name ?? activeThemeId;
+  }, [engineThemes, activeThemeId]);
+  // Documented CSS-only-rule exception: the two flagship themes are genuinely
+  // "old UI vs new UI" — when "ultimate-amv-old" is active we render the legacy
+  // AudioExtractionPanel; every other theme uses NewAudioExtractionPanel. This
+  // is the ONLY component branch keyed on the engine theme.
+  //
+  // The CSS swap is instant on theme change, but the audio *component* swap is
+  // DEFERRED while a vocal-separation extraction is in flight: unmounting the
+  // running panel would tear down its audio-progress listener and orphan the
+  // job. We hold the committed choice until the panel reports idle, then catch
+  // up to the active theme. The audio screen itself doesn't have to be visible
+  // for an extraction to be running, so this guard is theme- not nav-scoped.
+  const desiredLegacyAudioPanel = activeThemeId === "ultimate-amv-old";
+  const [useLegacyAudioPanel, setUseLegacyAudioPanel] = React.useState(desiredLegacyAudioPanel);
+  React.useEffect(() => {
+    if (!isAudioBusy()) {
+      // Idle: follow the theme immediately.
+      setUseLegacyAudioPanel(desiredLegacyAudioPanel);
+      return;
+    }
+    // Busy: hold the current panel and commit the pending choice when the
+    // in-flight extraction reports done.
+    const off = onAudioBusyChange((busy) => {
+      if (!busy) setUseLegacyAudioPanel(desiredLegacyAudioPanel);
+    });
+    return off;
+  }, [desiredLegacyAudioPanel]);
   const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({
     media: true,
     downloads: false,
@@ -167,7 +201,15 @@ export function App() {
         const payload = parseBridgePayload<AppConfig>(raw);
         const colors = readThemeColors(payload);
         setThemeColors(colors);
-        applyAppTheme(colors);
+        // The accent color is an orthogonal sub-axis applied on top of whichever
+        // engine theme is active. Only push the inline `:root` override when the
+        // user has DELIBERATELY picked an accent (preset or custom) through
+        // Settings -> Appearance — inline styles beat any cascade layer, so on a
+        // fresh/legacy config we leave them off and let the active engine theme's
+        // own accent (defined in its theme.css `theme` layer) show.
+        if (hasExplicitAccent(payload)) {
+          applyAppTheme(colors);
+        }
         setBgState(readBackgroundState(payload));
       })
       .catch((error) => {
@@ -212,22 +254,31 @@ export function App() {
     };
   }, [themePickerOpen]);
 
-  const switchTheme = React.useCallback(async (themeId: string, colors: readonly [string, string]) => {
-    const nextColors = { primary: colors[0], secondary: colors[1] };
-    setThemeColors(nextColors);
-    applyAppTheme(nextColors);
-    setThemePickerOpen(false);
-    window.dispatchEvent(new CustomEvent("theme-changed", { detail: nextColors }));
-    try {
-      await invoke("set_config", { key: "theme", value: themeId });
-      await invoke("set_config", { key: "theme_color_a", value: colors[0] });
-      await invoke("set_config", { key: "theme_color_b", value: colors[1] });
-    } catch (error) {
-      logFrontend("warn", "frontend.theme.sidebar.error", "Could not save theme", {
-        error: safeLogValue(error),
-      });
-    }
-  }, []);
+  const handleToggleThemePicker = React.useCallback(() => {
+    setThemePickerOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        // Re-scan disk on open so external drop-in themes added while the app is
+        // running show up without a restart. Fire-and-forget: refresh() swallows
+        // scan errors and never disturbs the current selection; the guard drops
+        // the result if the picker was closed again before the scan resolved.
+        void refreshEngineThemes(() => themePickerOpenRef.current);
+      }
+      return next;
+    });
+  }, [refreshEngineThemes]);
+
+  const handleSelectEngineTheme = React.useCallback(
+    (id: string) => {
+      setThemePickerOpen(false);
+      // Engine (CSS) theme and accent color are orthogonal axes: switching the
+      // engine theme must not touch the accent. An explicit custom accent
+      // persists across themes (and still wins over the theme); if the user
+      // never set one, each theme's own `theme.css` accent shows through.
+      void switchEngineTheme(id);
+    },
+    [switchEngineTheme],
+  );
 
   const modeTabs = isAudioExtraction
     ? ([{ id: "extract", label: "Extract" }] as const)
@@ -414,7 +465,7 @@ export function App() {
               <button
                 type="button"
                 className="sidebar-theme-select"
-                onClick={() => setThemePickerOpen((p) => !p)}
+                onClick={handleToggleThemePicker}
               >
                 <span className="sidebar-theme-dot" />
                 <span className="sidebar-theme-name">{currentThemeName}</span>
@@ -422,20 +473,22 @@ export function App() {
               </button>
               {themePickerOpen && (
                 <div className="sidebar-theme-dropdown">
-                  {APP_THEMES.map((preset) => {
-                    const names: Record<string, string> = { cyan: "Cyan Spark", mint: "Mint Breeze", violet: "Violet Dream", rose: "Rose Whisper", amber: "Amber Glow" };
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        className={`sidebar-theme-option ${preset.colors[0] === themeColors.primary && preset.colors[1] === themeColors.secondary ? "is-active" : ""}`}
-                        onClick={() => switchTheme(preset.id, preset.colors)}
-                      >
-                        <span className="sidebar-theme-swatch" style={{ background: `linear-gradient(135deg, ${preset.colors[0]}, ${preset.colors[1]})` }} />
-                        <span>{names[preset.id] ?? preset.id}</span>
-                      </button>
-                    );
-                  })}
+                  {engineThemes.map((theme) => (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      className={`sidebar-theme-option ${theme.id === activeThemeId ? "is-active" : ""}`}
+                      onClick={() => handleSelectEngineTheme(theme.id)}
+                      title={theme.description ?? theme.name}
+                    >
+                      <span
+                        className="sidebar-theme-swatch"
+                        style={{ background: "var(--accent-gradient)" }}
+                      />
+                      <span className="sidebar-theme-name-text">{theme.name}</span>
+                      {!theme.builtin && <span className="sidebar-theme-tag">drop-in</span>}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
@@ -529,7 +582,7 @@ export function App() {
                   <DownloaderPanel active={isDownloader} activeTab={downloaderTab} sidebarExpanded={expanded} />
                 </div>
                 <div className={`panel-view spring-motion ${isAudioExtraction ? "is-active" : "is-hidden"}`} aria-hidden={!isAudioExtraction}>
-                  <NewAudioExtractionPanel />
+                  {useLegacyAudioPanel ? <AudioExtractionPanel /> : <NewAudioExtractionPanel />}
                 </div>
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
                   <BgRemovePanel activeTab={bgRemoveTab} />

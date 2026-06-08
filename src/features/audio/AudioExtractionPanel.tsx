@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { CheckCircle2, Upload } from "lucide-react";
+import { setAudioBusy } from "../../lib/audioBusy";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, normalizeSelectedPaths } from "../../lib/paths";
@@ -48,7 +49,14 @@ export function AudioExtractionPanel() {
 
   React.useEffect(() => {
     setDiscordJob("Extracting vocals", extracting);
-    return () => setDiscordJob("Extracting vocals", false);
+    // Publish busy state so App defers any theme-driven audio-panel swap until
+    // the extraction finishes — swapping mid-job would unmount this panel and
+    // orphan the running audio_extract (the result would land with no listener).
+    setAudioBusy(extracting);
+    return () => {
+      setDiscordJob("Extracting vocals", false);
+      setAudioBusy(false);
+    };
   }, [extracting]);
 
   React.useEffect(() => {

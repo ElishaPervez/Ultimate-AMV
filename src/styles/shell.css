@@ -1492,6 +1492,28 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+.sidebar-theme-name-text {
+  flex: 1;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-theme-tag {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: rgb(var(--theme-accent-rgb));
+  background: rgb(var(--theme-accent-rgb) / 0.12);
+  border: 1px solid rgb(var(--theme-accent-rgb) / 0.25);
+}
+
 .sidebar-theme-dot {
   width: 8px;
   height: 8px;
