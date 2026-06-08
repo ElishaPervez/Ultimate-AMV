@@ -1,18 +1,24 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AudioLines,
-  ChevronsLeft,
-  ChevronsRight,
+  Clapperboard,
+  ChevronDown,
   Compass,
   Download,
   Film,
   FolderKanban,
+  Github,
+  Home,
+  Layers,
   Library,
+  MessageCircle,
   Music2,
   ScrollText,
   Settings,
   Sparkles,
+  Tv,
 } from "lucide-react";
 import { readBackgroundState } from "../lib/background";
 import { APP_THEMES, DEFAULT_BG_STATE } from "../lib/constants";
@@ -22,7 +28,7 @@ import { applyAppTheme, isHexColor, readThemeColors } from "../lib/theme";
 import { parseBridgePayload } from "../utils/bridge";
 import type { AppConfig, BackgroundState, NavItem, SectionId } from "../types/app";
 import type { DownloaderTab } from "../types/download";
-import { AudioExtractionPanel } from "../features/audio/AudioExtractionPanel";
+import { NewAudioExtractionPanel } from "../features/audio/NewAudioExtractionPanel";
 import { MediaToAudioPanel } from "../features/audio/MediaToAudioPanel";
 import { ClipExtractorPanel } from "../features/clips/ClipExtractorPanel";
 import { DownloaderPanel } from "../features/downloader/DownloaderPanel";
@@ -34,8 +40,10 @@ import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
-import { SidebarButton } from "./SidebarButton";
 import { WindowChrome } from "./WindowChrome";
+
+const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
+const GITHUB_ISSUES_URL = "https://github.com/ElishaPervez/Ultimate-AMV/issues";
 
 const primaryItems: NavItem[] = [
   { id: "audio-extraction", label: "Vocal Separation", short: "Vocals", icon: AudioLines },
@@ -108,6 +116,10 @@ export function App() {
   // SettingsPanel's refreshConfig would race the still-in-flight set_config
   // write and re-fetch the pre-change colors from disk.
   const [themeColors, setThemeColors] = React.useState(() => readThemeColors(null));
+  const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({
+    media: true,
+    downloads: false,
+  });
   const activeMeta = panelMeta[active];
   const isAudioExtraction = active === "audio-extraction";
   const isClipHunting = active === "clip-hunting";
@@ -222,60 +234,186 @@ export function App() {
         />
       )}
       <section className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
-        <aside className="sidebar glass-strong" aria-label="Primary navigation">
-          <div className="brand-strip">
-            <button
-              type="button"
-              className="icon-button collapse-button spring-motion"
-              aria-label={expanded ? "Compact sidebar" : "Expand sidebar"}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              {expanded ? <ChevronsLeft size={19} strokeWidth={2.5} /> : <ChevronsRight size={19} strokeWidth={2.5} />}
-            </button>
-            <div className="brand-cluster">
-              <div className="brand-copy">
-                <span className="brand-name">Ultimate AMV</span>
-                <span className="brand-subtitle">Toolkit</span>
-              </div>
-            </div>
+        <aside className="sidebar" aria-label="Primary navigation">
+          {/* Brand */}
+          <div className="sidebar-brand">
+            <span className="sidebar-brand-text">Ultimate AMV</span>
+            <span className="sidebar-brand-badge">v0.12</span>
           </div>
 
-          <nav className="nav-list">
-            {primaryItems.map((item) => (
-              <SidebarButton
-                key={item.id}
-                item={item}
-                active={active === item.id}
-                expanded={expanded}
-                onClick={() => setActive(item.id)}
-              />
-            ))}
-          </nav>
+          {/* Home */}
+          <button
+            type="button"
+            className={`sidebar-home ${active === "clip-hunting" ? "is-active" : ""}`}
+            onClick={() => setActive("clip-hunting")}
+          >
+            <Home size={18} strokeWidth={2} />
+            <span>Home</span>
+          </button>
 
-          <div className="sidebar-footer">
+          {/* Main Section */}
+          <div className="sidebar-section-label">Main</div>
+
+          {/* Media Group */}
+          <div className="sidebar-group">
             <button
               type="button"
-              className={`settings-button spring-motion ${active === "logs" ? "is-active" : ""}`}
-              aria-label="Logs"
-              onClick={() => setActive("logs")}
+              className={`sidebar-group-header ${["audio-extraction", "clip-hunting", "bg-removal", "audio-conversion", "video-conversion"].includes(active) ? "is-active" : ""}`}
+              onClick={() => setOpenGroups((g) => ({ ...g, media: !g.media }))}
             >
-              <ScrollText size={21} strokeWidth={2.05} />
-              <span>Logs</span>
+              <Layers size={18} strokeWidth={2} />
+              <span>Media</span>
+              <ChevronDown size={14} className={`sidebar-chevron ${openGroups.media ? "is-open" : ""}`} />
             </button>
+            {openGroups.media && (
+              <div className="sidebar-subnav">
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "audio-extraction" ? "is-active" : ""}`}
+                  onClick={() => setActive("audio-extraction")}
+                >
+                  <AudioLines size={14} />
+                  <span>Vocal Separation</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "clip-hunting" ? "is-active" : ""}`}
+                  onClick={() => setActive("clip-hunting")}
+                >
+                  <Clapperboard size={14} />
+                  <span>Scene Splitter</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "bg-removal" ? "is-active" : ""}`}
+                  onClick={() => setActive("bg-removal")}
+                >
+                  <Sparkles size={14} />
+                  <span>BG Remover</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "audio-conversion" ? "is-active" : ""}`}
+                  onClick={() => setActive("audio-conversion")}
+                >
+                  <Music2 size={14} />
+                  <span>Audio Conversion</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "video-conversion" ? "is-active" : ""}`}
+                  onClick={() => setActive("video-conversion")}
+                >
+                  <Film size={14} />
+                  <span>Video Conversion</span>
+                </button>
+              </div>
+            )}
+          </div>
 
+          {/* Downloads Group */}
+          <div className="sidebar-group">
             <button
               type="button"
-              className={`settings-button spring-motion ${active === "settings" ? "is-active" : ""}`}
-              aria-label="Settings"
-              onClick={() => setActive("settings")}
+              className={`sidebar-group-header ${["downloader", "tsukyio"].includes(active) ? "is-active" : ""}`}
+              onClick={() => setOpenGroups((g) => ({ ...g, downloads: !g.downloads }))}
             >
-              <Settings size={22} strokeWidth={2.15} />
-              <span>Settings</span>
+              <Download size={18} strokeWidth={2} />
+              <span>Downloads</span>
+              <ChevronDown size={14} className={`sidebar-chevron ${openGroups.downloads ? "is-open" : ""}`} />
             </button>
+            {openGroups.downloads && (
+              <div className="sidebar-subnav">
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "downloader" ? "is-active" : ""}`}
+                  onClick={() => setActive("downloader")}
+                >
+                  <Tv size={14} />
+                  <span>Downloader</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "tsukyio" ? "is-active" : ""}`}
+                  onClick={() => setActive("tsukyio")}
+                >
+                  <Library size={14} />
+                  <span>Tsukyio Vault</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="sidebar-footer-static">
+            <div className="sidebar-footer-actions">
+              <button
+                type="button"
+                className={`sidebar-footer-btn ${active === "settings" ? "is-active" : ""}`}
+                onClick={() => setActive("settings")}
+              >
+                <Settings size={16} />
+                <span>Settings</span>
+              </button>
+              <button
+                type="button"
+                className={`sidebar-footer-btn ${active === "logs" ? "is-active" : ""}`}
+                onClick={() => setActive("logs")}
+              >
+                <ScrollText size={16} />
+                <span>Logs</span>
+              </button>
+            </div>
+
+            <div className="sidebar-theme-row">
+              <span className="sidebar-theme-label">Theme</span>
+              <div className="sidebar-theme-select">
+                <span className="sidebar-theme-dot" />
+                <span>Ultimate-AMV Modern</span>
+              </div>
+            </div>
+
+            <div className="sidebar-help-card">
+              <div className="sidebar-help-title">Need help?</div>
+              <div className="sidebar-help-text">24/7 assistance available</div>
+              <div className="sidebar-help-actions">
+                <button
+                  type="button"
+                  className="sidebar-help-btn"
+                  onClick={() => {
+                    void openUrl(DISCORD_INVITE_URL).catch((error) => {
+                      logFrontend("warn", "frontend.discord.invite.open.error", "Could not open Discord invite", {
+                        error: safeLogValue(error),
+                      });
+                    });
+                  }}
+                >
+                  <MessageCircle size={14} />
+                  <span>Discord Server</span>
+                </button>
+                <button
+                  type="button"
+                  className="sidebar-help-btn is-secondary"
+                  onClick={() => {
+                    void openUrl(GITHUB_ISSUES_URL).catch((error) => {
+                      logFrontend("warn", "frontend.github.open.error", "Could not open GitHub issues", {
+                        error: safeLogValue(error),
+                      });
+                    });
+                  }}
+                >
+                  <Github size={14} />
+                  <span>GitHub Issues</span>
+                </button>
+              </div>
+            </div>
           </div>
         </aside>
 
         <section className="workspace">
+          <div className="workspace-header">
+            <h1>{activeMeta.title}</h1>
+          </div>
           <div className="canvas">
             <div className="canvas-grid" aria-hidden="true" />
             <div className="focus-panel glass">
@@ -324,7 +462,7 @@ export function App() {
                   <DownloaderPanel active={isDownloader} activeTab={downloaderTab} sidebarExpanded={expanded} />
                 </div>
                 <div className={`panel-view spring-motion ${isAudioExtraction ? "is-active" : "is-hidden"}`} aria-hidden={!isAudioExtraction}>
-                  <AudioExtractionPanel />
+                  <NewAudioExtractionPanel />
                 </div>
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
                   <BgRemovePanel activeTab={bgRemoveTab} />

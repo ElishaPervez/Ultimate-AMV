@@ -1,0 +1,439 @@
+/* ============================================================
+   VOCAL SEPARATION DASHBOARD (matches reference image style)
+   ============================================================ */
+
+.new-audio-panel {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 24px;
+  padding: 28px clamp(24px, 3vw, 48px);
+  height: 100%;
+  overflow: auto;
+}
+
+/* ── Drop zone ── */
+.drop-zone {
+  position: relative;
+}
+
+.drop-zone-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+  border-radius: 18px;
+  background: rgba(9, 11, 13, 0.92);
+  border: 2px dashed rgb(var(--theme-accent-rgb) / 0.45);
+  color: #e7edf2;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.drop-zone-overlay small {
+  color: #8896a3;
+  font-size: 12px;
+}
+
+.drop-zone.is-drop-target .drop-zone-overlay {
+  display: flex;
+}
+
+/* ── Top dashboard row ── */
+.dash-top-row {
+  display: grid;
+  grid-template-columns: minmax(300px, 1.1fr) minmax(0, 1.6fr);
+  gap: 24px;
+  align-items: start;
+}
+
+/* Hero card */
+.dash-hero-card {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px;
+  border-radius: 18px;
+  background: rgba(20, 22, 26, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(12px);
+}
+
+.dash-hero-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dash-hero-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dash-hero-title {
+  margin: 0;
+  font-size: clamp(26px, 3vw, 40px);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  color: #ffffff;
+}
+
+.dash-hero-desc {
+  margin: 0;
+  font-size: 13px;
+  color: #9ca3af;
+  line-height: 1.55;
+  max-width: 400px;
+}
+
+.dash-hero-status-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.dash-hero-status-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.dash-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+
+.dash-status-dot.is-optimal {
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.45);
+}
+
+.dash-status-dot.is-warning {
+  background: #fbbf24;
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.45);
+}
+
+.dash-status-dot.is-neutral {
+  background: #6b7280;
+  box-shadow: 0 0 6px rgba(107, 114, 128, 0.35);
+}
+
+.dash-status-dot.is-error {
+  background: #fb7185;
+  box-shadow: 0 0 6px rgba(251, 113, 133, 0.45);
+}
+
+.dash-status-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dash-status-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.dash-hero-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, rgb(var(--theme-accent-rgb)), rgb(var(--theme-accent-2-rgb)));
+  color: var(--theme-accent-contrast);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: filter 160ms ease, transform 120ms ease;
+}
+
+.dash-hero-cta:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.dash-hero-cta:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.dash-hero-cta:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Stats grid */
+.dash-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+.dash-stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 16px;
+  background: rgba(20, 22, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+}
+
+.dash-stat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.dash-stat-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  margin-bottom: 6px;
+}
+
+.dash-stat-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.dash-stat-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #9ca3af;
+}
+
+.dash-stat-meta {
+  font-size: 11px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.dash-stat-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.dash-stat-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgb(var(--theme-accent-rgb)), rgb(var(--theme-accent-2-rgb)));
+  transition: width 500ms ease;
+}
+
+/* ── Main stage ── */
+.dash-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(260px, 0.55fr);
+  gap: 24px;
+  align-items: start;
+  min-height: 0;
+}
+
+.dash-stage-main {
+  min-width: 0;
+  min-height: 0;
+}
+
+.dash-stage-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.dash-side-card {
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(20, 22, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+}
+
+.dash-side-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dash-side-header svg {
+  color: rgb(var(--theme-accent-rgb));
+}
+
+.dash-side-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dash-side-text {
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+
+.dash-side-text.is-success {
+  color: #34d399;
+}
+
+.dash-side-text.is-error {
+  color: #fb7185;
+}
+
+.dash-side-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dash-side-tag {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #9ca3af;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dash-tip-card {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.08), rgba(20, 184, 166, 0.04));
+  border: 1px solid rgba(52, 211, 153, 0.15);
+}
+
+.dash-tip-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: #34d399;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dash-tip-text {
+  margin: 0;
+  font-size: 12px;
+  color: #9ca3af;
+  line-height: 1.5;
+}
+
+/* ── Stage content wrappers ── */
+.dash-stage-main > .extract-vocals-button {
+  width: 100%;
+  min-height: 280px;
+  border-radius: 18px;
+  background: rgba(20, 22, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+  padding: 40px;
+}
+
+.dash-stage-main > .audio-card,
+.dash-stage-main > .stem-mixer {
+  width: 100%;
+  border-radius: 18px;
+  background: rgba(20, 22, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+  padding: 24px;
+}
+
+/* ── Batch status overrides inside side card ── */
+.dash-stage-side .batch-status-list {
+  width: 100%;
+  margin: 0;
+}
+
+.dash-stage-side .batch-status-row {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+/* ── Responsive ── */
+@media (max-width: 1100px) {
+  .dash-top-row {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-stage-side {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .dash-side-card,
+  .dash-tip-card {
+    flex: 1 1 260px;
+    min-width: 260px;
+  }
+}
+
+@media (max-width: 720px) {
+  .new-audio-panel {
+    padding: 20px 16px;
+    gap: 18px;
+  }
+
+  .dash-hero-card {
+    padding: 18px;
+  }
+
+  .dash-hero-status-list {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-stage-side {
+    flex-direction: column;
+  }
+}
