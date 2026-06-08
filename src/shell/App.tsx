@@ -116,6 +116,15 @@ export function App() {
   // SettingsPanel's refreshConfig would race the still-in-flight set_config
   // write and re-fetch the pre-change colors from disk.
   const [themeColors, setThemeColors] = React.useState(() => readThemeColors(null));
+  const [themePickerOpen, setThemePickerOpen] = React.useState(false);
+  const themePickerRef = React.useRef<HTMLDivElement | null>(null);
+  const currentThemeName = React.useMemo(() => {
+    const match = APP_THEMES.find(
+      (t) => t.colors[0] === themeColors.primary && t.colors[1] === themeColors.secondary,
+    );
+    const names: Record<string, string> = { cyan: "Cyan Spark", mint: "Mint Breeze", violet: "Violet Dream", rose: "Rose Whisper", amber: "Amber Glow" };
+    return match ? (names[match.id] ?? match.id) : "Custom";
+  }, [themeColors]);
   const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({
     media: true,
     downloads: false,
@@ -183,6 +192,41 @@ export function App() {
       window.removeEventListener("theme-changed", onThemeChanged);
       window.removeEventListener("bg-customize-open", onBgOpen);
     };
+  }, []);
+
+  React.useEffect(() => {
+    if (!themePickerOpen) return;
+    const handler = (event: MouseEvent) => {
+      if (themePickerRef.current && !themePickerRef.current.contains(event.target as Node)) {
+        setThemePickerOpen(false);
+      }
+    };
+    const escapeHandler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setThemePickerOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", escapeHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", escapeHandler);
+    };
+  }, [themePickerOpen]);
+
+  const switchTheme = React.useCallback(async (themeId: string, colors: readonly [string, string]) => {
+    const nextColors = { primary: colors[0], secondary: colors[1] };
+    setThemeColors(nextColors);
+    applyAppTheme(nextColors);
+    setThemePickerOpen(false);
+    window.dispatchEvent(new CustomEvent("theme-changed", { detail: nextColors }));
+    try {
+      await invoke("set_config", { key: "theme", value: themeId });
+      await invoke("set_config", { key: "theme_color_a", value: colors[0] });
+      await invoke("set_config", { key: "theme_color_b", value: colors[1] });
+    } catch (error) {
+      logFrontend("warn", "frontend.theme.sidebar.error", "Could not save theme", {
+        error: safeLogValue(error),
+      });
+    }
   }, []);
 
   const modeTabs = isAudioExtraction
@@ -365,12 +409,35 @@ export function App() {
               </button>
             </div>
 
-            <div className="sidebar-theme-row">
+            <div className="sidebar-theme-row" ref={themePickerRef}>
               <span className="sidebar-theme-label">Theme</span>
-              <div className="sidebar-theme-select">
+              <button
+                type="button"
+                className="sidebar-theme-select"
+                onClick={() => setThemePickerOpen((p) => !p)}
+              >
                 <span className="sidebar-theme-dot" />
-                <span>Ultimate-AMV Modern</span>
-              </div>
+                <span className="sidebar-theme-name">{currentThemeName}</span>
+                <ChevronDown size={12} className={`sidebar-theme-chevron ${themePickerOpen ? "is-open" : ""}`} />
+              </button>
+              {themePickerOpen && (
+                <div className="sidebar-theme-dropdown">
+                  {APP_THEMES.map((preset) => {
+                    const names: Record<string, string> = { cyan: "Cyan Spark", mint: "Mint Breeze", violet: "Violet Dream", rose: "Rose Whisper", amber: "Amber Glow" };
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        className={`sidebar-theme-option ${preset.colors[0] === themeColors.primary && preset.colors[1] === themeColors.secondary ? "is-active" : ""}`}
+                        onClick={() => switchTheme(preset.id, preset.colors)}
+                      >
+                        <span className="sidebar-theme-swatch" style={{ background: `linear-gradient(135deg, ${preset.colors[0]}, ${preset.colors[1]})` }} />
+                        <span>{names[preset.id] ?? preset.id}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <div className="sidebar-help-card">
