@@ -1,5 +1,4 @@
 import os
-from rembg import new_session
 
 # Map human-readable model keys to rembg model names.
 # Categories: "anime", "general", "portrait"
@@ -78,6 +77,10 @@ def create_session(model_key: str, force_cpu: bool = False):
     """
     Creates and returns a rembg session with the appropriate model and execution providers.
     """
+    # Deferred: rembg is installed on first use by ensure_feature_dependencies;
+    # importing it at module top would crash the CLI before the repair can run.
+    from rembg import new_session
+
     model_info = MODELS.get(model_key)
     if not model_info:
         raise ValueError(f"Unknown background removal model: {model_key}")

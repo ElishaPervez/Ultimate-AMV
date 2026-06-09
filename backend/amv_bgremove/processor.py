@@ -2,13 +2,13 @@ import os
 import sys
 import time
 import subprocess
-import cv2
-import numpy as np
 from pathlib import Path
-from PIL import Image
-from rembg import remove
 
 from .models import create_session
+
+# cv2, PIL and rembg are imported inside the functions that need them: they
+# are installed on first use by ensure_feature_dependencies, and a module-top
+# import would crash bgremove_cli before that repair can run.
 
 def require_tool(name):
     env_dir = os.environ.get("ULTIMATE_AMV_TOOLS_DIR")
@@ -44,10 +44,14 @@ def remove_background_video(
     Processes video frame-by-frame, removes background with the selected model,
     and encodes the output as WebM with alpha or a PNG sequence.
     """
+    import cv2
+    from PIL import Image
+    from rembg import remove
+
     input_file = Path(input_path).resolve()
     if not input_file.exists():
         raise FileNotFoundError(f"Input video file not found: {input_path}")
-        
+
     cap = cv2.VideoCapture(str(input_file))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open input video file: {input_path}")
@@ -168,6 +172,8 @@ def extract_single_frame(video_path: str, output_path: str, frame_index: int):
     Extracts a single frame from the video at frame_index and saves it as an image.
     Uses cv2 for absolute precision and speed.
     """
+    import cv2
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open input video file: {video_path}")
@@ -200,6 +206,9 @@ def remove_background_frame(
     """
     Runs background removal on a single image frame using the selected model.
     """
+    from PIL import Image
+    from rembg import remove
+
     session = create_session(model_key, force_cpu=force_cpu)
     img = Image.open(input_image_path)
     out_img = remove(img, session=session)

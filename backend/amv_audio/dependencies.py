@@ -35,6 +35,9 @@ FEATURE_REQUIREMENTS = {
         "modules": [
             ("typing_extensions", "typing_extensions"),
             ("numpy", "numpy"),
+            # cv2 listed explicitly: processor.py needs it for video decode and
+            # rembg >= 2.0.7x no longer depends on opencv itself.
+            ("cv2", "opencv-python"),
             ("rembg", "rembg>=2.0.50"),
         ],
         "packages": [],
@@ -43,6 +46,7 @@ FEATURE_REQUIREMENTS = {
         "modules": [
             ("typing_extensions", "typing_extensions"),
             ("numpy", "numpy"),
+            ("cv2", "opencv-python"),
             ("rembg", "rembg[gpu]>=2.0.50"),
         ],
         "packages": [],
@@ -68,6 +72,7 @@ KNOWN_MODULE_PACKAGES = {
     "packaging": "packaging",
     "PIL": "pillow",
     "pydub": "pydub",
+    "rembg": "rembg>=2.0.50",
     "yaml": "pyyaml",
     "requests": "requests",
     "resampy": "resampy",
