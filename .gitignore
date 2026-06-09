@@ -11,6 +11,7 @@ Tsukyio-AE-Extension-development/
 .vscode/
 .idea/
 .codex
+.antigravitycli/
 CLAUDE.md
 AGENTS.md
 docs/agent/
@@ -60,6 +61,8 @@ src-tauri/target/
 src-tauri/gen/
 
 # App-generated media and model artifacts.
+cache/
+extra/
 downloads/
 output/
 outputs/
@@ -105,4 +108,6 @@ graphify-out/
 experiments/*.png
 experiments/*.jpg
 experiments/*.jpeg
+experiments/*.webp
 experiments/debug_*/
+experiments/_scratch_*/
