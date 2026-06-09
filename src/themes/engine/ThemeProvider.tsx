@@ -46,9 +46,32 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     (async () => {
-      // Resolve which theme should be active, then apply it before listing so
-      // the first paint already carries the right skin.
+      // Apply the persisted (or default) theme FIRST so the first paint
+      // already carries the right skin. Built-in CSS is bundled (no IPC
+      // needed), and applyTheme resolves external ids by scanning disk on
+      // demand — the picker list is not a prerequisite. A persisted id that
+      // no longer exists (deleted external theme) makes applyTheme throw,
+      // which falls back to the default rather than leaving the app unstyled.
       const persistedId = await readActiveThemeId();
+      let appliedId = persistedId;
+      try {
+        await applyTheme(persistedId);
+      } catch (error) {
+        logFrontend("warn", "frontend.theme.engine.apply.error", "Could not apply engine theme", {
+          themeId: persistedId,
+          error: safeLogValue(error),
+        });
+        appliedId = DEFAULT_THEME_ID;
+        if (persistedId !== DEFAULT_THEME_ID) {
+          try {
+            await applyTheme(DEFAULT_THEME_ID);
+          } catch {
+            /* base layer still renders; nothing more to do */
+          }
+        }
+      }
+
+      // Then load the picker list (built-in + external drop-ins).
       let available: ThemeEntry[] = [];
       try {
         available = await listThemes();
@@ -59,31 +82,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       }
       if (cancelled) return;
 
-      // If the persisted id no longer exists (deleted external theme), fall
-      // back to the default rather than leaving the app unstyled.
-      const exists = available.some((t) => t.id === persistedId);
-      const idToApply = exists || available.length === 0 ? persistedId : DEFAULT_THEME_ID;
-
-      try {
-        await applyTheme(idToApply);
-      } catch (error) {
-        logFrontend("warn", "frontend.theme.engine.apply.error", "Could not apply engine theme", {
-          themeId: idToApply,
-          error: safeLogValue(error),
-        });
-        // Last resort: try the default so the screen isn't unstyled.
-        if (idToApply !== DEFAULT_THEME_ID) {
-          try {
-            await applyTheme(DEFAULT_THEME_ID);
-          } catch {
-            /* base layer still renders; nothing more to do */
-          }
-        }
-      }
-      if (cancelled) return;
-
       setThemes(available);
-      setActiveId(idToApply);
+      setActiveId(appliedId);
     })();
 
     return () => {

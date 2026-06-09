@@ -39,18 +39,20 @@ export function readThemeColors(config: Partial<Pick<AppConfig, "theme" | "theme
  * `theme.css`) should show — so the inline `:root` override must be skipped,
  * since inline styles beat any cascade layer.
  *
- * Detection rule: picking a preset swatch OR a custom color in
- * AppearanceSettings always persists `theme_color_a`/`theme_color_b`, and the
- * backend (`set_config`) flips `theme` to `"custom"` whenever those are
- * written. So `theme === "custom"` is the reliable "user chose an accent"
- * signal. A fresh install (`theme: "cyan"`) or any legacy config that merely
- * carries a named preset is treated as "not explicitly chosen", so the engine
- * theme's accent wins.
+ * Detection rule: in the current UI, picking a preset swatch OR a custom
+ * color in AppearanceSettings persists `theme_color_a`/`theme_color_b` and
+ * the backend (`set_config`) flips `theme` to `"custom"`. Older app versions
+ * instead stored the picked preset as a named id ("mint", "violet", …)
+ * without flipping — that was still a deliberate choice, so any named preset
+ * other than the factory default also counts. Only a fresh/default config
+ * (`theme: "cyan"`) defers to the engine theme's own accent.
  */
 export function hasExplicitAccent(
   config: Partial<Pick<AppConfig, "theme">> | null | undefined,
 ): boolean {
-  return config?.theme === "custom";
+  const theme = config?.theme;
+  if (theme === "custom") return true;
+  return typeof theme === "string" && theme !== APP_THEMES[0].id;
 }
 
 export function applyAppTheme(colors: { primary: string; secondary: string }) {
@@ -59,18 +61,4 @@ export function applyAppTheme(colors: { primary: string; secondary: string }) {
   root.style.setProperty("--theme-accent-rgb", hexToRgbParts(colors.primary));
   root.style.setProperty("--theme-accent-2-rgb", hexToRgbParts(colors.secondary));
   root.style.setProperty("--theme-accent-contrast", getReadableContrast(colors.primary));
-}
-
-/**
- * Drop the inline `:root` accent override so the active engine theme's own
- * accent (from its `theme.css`, in the `theme` cascade layer) takes back over.
- * Used to return to the "theme default" accent — e.g. when switching engine
- * themes from the sidebar picker.
- */
-export function clearAppTheme() {
-  const root = document.documentElement;
-  delete root.dataset.theme;
-  root.style.removeProperty("--theme-accent-rgb");
-  root.style.removeProperty("--theme-accent-2-rgb");
-  root.style.removeProperty("--theme-accent-contrast");
 }
