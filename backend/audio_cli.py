@@ -193,6 +193,7 @@ def set_config(key, value):
         if (
             not normalized
             or len(normalized) > 128
+            or normalized in {".", ".."}
             or "/" in normalized
             or "\\" in normalized
             or "\0" in normalized

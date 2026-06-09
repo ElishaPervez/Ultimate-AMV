@@ -666,3 +666,47 @@ class TestSetConfigUnknownKey:
         set_config("nonexistent_key", "anything")
         saved = mock_save.call_args[0][0]
         assert "nonexistent_key" not in saved
+
+
+# ---------------------------------------------------------------------------
+# set_config — ui_theme (engine CSS theme id)
+# ---------------------------------------------------------------------------
+
+class TestSetConfigUiTheme:
+    def test_ui_theme_default_is_ultimate_amv(self):
+        from audio_cli import _config_payload
+        assert _config_payload({})["ui_theme"] == "ultimate-amv"
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_ui_theme_valid_id_saved(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("ui_theme", "midnight-neon")
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["ui_theme"] == "midnight-neon"
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_ui_theme_strips_whitespace(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        set_config("ui_theme", "  ultimate-amv  ")
+        saved = mock_save.call_args[0][0]
+        assert saved["ui_theme"] == "ultimate-amv"
+
+    @pytest.mark.parametrize("bad_value", ["", "   ", ".", "..", "a/b", "a\\b", "a\0b", "x" * 129])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_ui_theme_rejects_unsafe_values(self, mock_load, mock_save, mock_emit, bad_value):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("ui_theme", bad_value)
+        assert result == 1
+        mock_save.assert_not_called()
+        payload = mock_emit.call_args[0][0]
+        assert payload["type"] == "error"
