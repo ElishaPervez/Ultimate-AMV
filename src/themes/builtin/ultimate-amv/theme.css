@@ -84,16 +84,11 @@
   border: 1px solid rgb(var(--theme-accent-rgb) / 0.12);
 }
 
-/* Workspace title: gradient accent text to headline the new look. */
-:root[data-theme-id="ultimate-amv"] .workspace-header h1 {
-  background: linear-gradient(
-    100deg,
-    rgb(var(--theme-accent-rgb)),
-    rgb(var(--theme-accent-2-rgb))
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+/* Settings surfaces keep their tight base corners: radius-xl sweeps far
+   past the small-radius pills/rows nested inside and reads misaligned. */
+:root[data-theme-id="ultimate-amv"] .settings-tab-bar.glass,
+:root[data-theme-id="ultimate-amv"] .settings-group.glass {
+  border-radius: 12px;
 }
 
 /* Active mode tab: filled accent pill rather than the classic outline. */

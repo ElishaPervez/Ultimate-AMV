@@ -200,11 +200,9 @@ function compareStreamQualities(left: StreamQuality, right: StreamQuality): numb
 
 export function AnikaiBrowser({
   active,
-  sidebarExpanded,
   enqueueDownload,
 }: {
   active: boolean;
-  sidebarExpanded: boolean;
   enqueueDownload: (item: Omit<DownloadQueueItem, "id" | "status" | "createdAt">) => string;
 }) {
   const frameRef = React.useRef<HTMLDivElement | null>(null);
@@ -396,7 +394,7 @@ export function AnikaiBrowser({
       timers.forEach(window.clearTimeout);
       window.clearTimeout(nudgeTimer);
     };
-  }, [active, sidebarExpanded, labelModalState, nudgeWebviewViewport, syncWebviewBounds]);
+  }, [active, labelModalState, nudgeWebviewViewport, syncWebviewBounds]);
 
   function resetCaptureState(nextMessage = "Stream detector armed. Start playback to catch the media URL.") {
     inspectRunRef.current += 1;

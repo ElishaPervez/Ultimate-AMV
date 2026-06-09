@@ -19,11 +19,9 @@ import { YoutubeDownloaderPanel } from "./YoutubeDownloaderPanel";
 export function DownloaderPanel({
   active,
   activeTab,
-  sidebarExpanded,
 }: {
   active: boolean;
   activeTab: DownloaderTab;
-  sidebarExpanded: boolean;
 }) {
   const [queue, setQueue] = React.useState<DownloadQueueItem[]>([]);
   const [history, setHistory] = React.useState<DownloadHistoryItem[]>([]);
@@ -203,7 +201,7 @@ export function DownloaderPanel({
   return (
     <section className="downloader-workspace">
       <div className={`downloader-panel ${activeTab === "anime" ? "is-active" : "is-hidden"}`}>
-        <AnikaiBrowser active={active && activeTab === "anime"} sidebarExpanded={sidebarExpanded} enqueueDownload={enqueueDownload} />
+        <AnikaiBrowser active={active && activeTab === "anime"} enqueueDownload={enqueueDownload} />
       </div>
       <div className={`downloader-panel ${activeTab === "youtube" ? "is-active" : "is-hidden"}`}>
         <YoutubeDownloaderPanel enqueueDownload={enqueueDownload} history={history} onRedownload={redownload} />

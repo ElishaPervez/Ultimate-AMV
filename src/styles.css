@@ -25,6 +25,7 @@
 /* Split CSS files - imported in dependency order, all into the `base` layer */
 @import "./styles/base.css" layer(base);
 @import "./styles/shell.css" layer(base);
+@import "./styles/home.css" layer(base);
 @import "./styles/downloader.css" layer(base);
 @import "./styles/anime.css" layer(base);
 @import "./styles/clips.css" layer(base);

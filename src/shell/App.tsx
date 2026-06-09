@@ -5,7 +5,6 @@ import {
   AudioLines,
   Clapperboard,
   ChevronDown,
-  Compass,
   Download,
   Film,
   FolderKanban,
@@ -27,7 +26,7 @@ import { setDiscordPanel } from "../lib/discord";
 import { logFrontend, safeLogValue } from "../lib/log";
 import { applyAppTheme, hasExplicitAccent, isHexColor, readThemeColors } from "../lib/theme";
 import { parseBridgePayload } from "../utils/bridge";
-import type { AppConfig, BackgroundState, NavItem, SectionId } from "../types/app";
+import type { AppConfig, BackgroundState, SectionId } from "../types/app";
 import type { DownloaderTab } from "../types/download";
 import { NewAudioExtractionPanel } from "../features/audio/NewAudioExtractionPanel";
 import { AudioExtractionPanel } from "../features/audio/AudioExtractionPanel";
@@ -41,6 +40,7 @@ import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
+import { HomePanel } from "../features/home/HomePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
 import { useActiveTheme } from "../themes/engine/ThemeProvider";
 import { WindowChrome } from "./WindowChrome";
@@ -48,17 +48,12 @@ import { WindowChrome } from "./WindowChrome";
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
 const GITHUB_ISSUES_URL = "https://github.com/ElishaPervez/Ultimate-AMV/issues";
 
-const primaryItems: NavItem[] = [
-  { id: "audio-extraction", label: "Vocal Separation", short: "Vocals", icon: AudioLines },
-  { id: "clip-hunting", label: "Scene Splitter", short: "Splitter", icon: Compass },
-  { id: "downloader", label: "Downloader", short: "Download", icon: Download },
-  { id: "tsukyio", label: "Tsukyio Vault", short: "Vault", icon: Library },
-  { id: "bg-removal", label: "BG Remover", short: "Matting", icon: Sparkles },
-  { id: "audio-conversion", label: "Audio Conversion", short: "Audio", icon: Music2 },
-  { id: "video-conversion", label: "Video Conversion", short: "Video", icon: Film },
-];
-
 const panelMeta: Record<SectionId, { kicker: string; title: string; stats: string[] }> = {
+  home: {
+    kicker: "Start",
+    title: "Home",
+    stats: ["Overview", "Tools", "Shortcuts"],
+  },
   "clip-hunting": {
     kicker: "Splitter",
     title: "Scene Splitter",
@@ -107,8 +102,7 @@ const panelMeta: Record<SectionId, { kicker: string; title: string; stats: strin
 };
 
 export function App() {
-  const [expanded, setExpanded] = React.useState(true);
-  const [active, setActive] = React.useState<SectionId>("clip-hunting");
+  const [active, setActive] = React.useState<SectionId>("home");
   const [downloaderTab, setDownloaderTab] = React.useState<DownloaderTab>("anime");
   const [bgRemoveTab, setBgRemoveTab] = React.useState<"video" | "image">("video");
   const [bgState, setBgState] = React.useState<BackgroundState>(DEFAULT_BG_STATE);
@@ -163,7 +157,18 @@ export function App() {
     media: true,
     downloads: false,
   });
+  // Home-card jumps also expand the sidebar group containing the target, so
+  // the active subitem is visible instead of hidden behind a collapsed group.
+  const handleHomeNavigate = React.useCallback((id: SectionId) => {
+    setActive(id);
+    if (id === "downloader" || id === "tsukyio") {
+      setOpenGroups((g) => ({ ...g, downloads: true }));
+    } else if (id !== "settings" && id !== "logs" && id !== "home") {
+      setOpenGroups((g) => ({ ...g, media: true }));
+    }
+  }, []);
   const activeMeta = panelMeta[active];
+  const isHome = active === "home";
   const isAudioExtraction = active === "audio-extraction";
   const isClipHunting = active === "clip-hunting";
   const isDownloader = active === "downloader";
@@ -280,7 +285,9 @@ export function App() {
     [switchEngineTheme],
   );
 
-  const modeTabs = isAudioExtraction
+  const modeTabs = isHome
+    ? ([{ id: "home", label: "Home" }] as const)
+    : isAudioExtraction
     ? ([{ id: "extract", label: "Extract" }] as const)
     : isBgRemoval
       ? ([
@@ -328,19 +335,19 @@ export function App() {
           }}
         />
       )}
-      <section className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
+      <section className="app-shell">
         <aside className="sidebar" aria-label="Primary navigation">
           {/* Brand */}
           <div className="sidebar-brand">
             <span className="sidebar-brand-text">Ultimate AMV</span>
-            <span className="sidebar-brand-badge">v0.12</span>
+            <span className="sidebar-brand-badge">{`v${__APP_VERSION__}`}</span>
           </div>
 
           {/* Home */}
           <button
             type="button"
-            className={`sidebar-home ${active === "clip-hunting" ? "is-active" : ""}`}
-            onClick={() => setActive("clip-hunting")}
+            className={`sidebar-home ${active === "home" ? "is-active" : ""}`}
+            onClick={() => setActive("home")}
           >
             <Home size={18} strokeWidth={2} />
             <span>Home</span>
@@ -360,7 +367,7 @@ export function App() {
               <span>Media</span>
               <ChevronDown size={14} className={`sidebar-chevron ${openGroups.media ? "is-open" : ""}`} />
             </button>
-            {openGroups.media && (
+            <div className={`sidebar-subnav-wrap ${openGroups.media ? "is-open" : ""}`}>
               <div className="sidebar-subnav">
                 <button
                   type="button"
@@ -403,7 +410,7 @@ export function App() {
                   <span>Video Conversion</span>
                 </button>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Downloads Group */}
@@ -417,7 +424,7 @@ export function App() {
               <span>Downloads</span>
               <ChevronDown size={14} className={`sidebar-chevron ${openGroups.downloads ? "is-open" : ""}`} />
             </button>
-            {openGroups.downloads && (
+            <div className={`sidebar-subnav-wrap ${openGroups.downloads ? "is-open" : ""}`}>
               <div className="sidebar-subnav">
                 <button
                   type="button"
@@ -436,7 +443,7 @@ export function App() {
                   <span>Tsukyio Vault</span>
                 </button>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Footer */}
@@ -461,7 +468,7 @@ export function App() {
             </div>
 
             <div className="sidebar-theme-row" ref={themePickerRef}>
-              <span className="sidebar-theme-label">Theme</span>
+              <span className="sidebar-theme-label">GUI System</span>
               <button
                 type="button"
                 className="sidebar-theme-select"
@@ -495,7 +502,7 @@ export function App() {
 
             <div className="sidebar-help-card">
               <div className="sidebar-help-title">Need help?</div>
-              <div className="sidebar-help-text">24/7 assistance available</div>
+              <div className="sidebar-help-text">Get support or report a bug</div>
               <div className="sidebar-help-actions">
                 <button
                   type="button"
@@ -531,9 +538,6 @@ export function App() {
         </aside>
 
         <section className="workspace">
-          <div className="workspace-header">
-            <h1>{activeMeta.title}</h1>
-          </div>
           <div className="canvas">
             <div className="canvas-grid" aria-hidden="true" />
             <div className="focus-panel glass">
@@ -579,7 +583,7 @@ export function App() {
                   <ClipExtractorPanel active={isClipHunting} />
                 </div>
                 <div className={`panel-view spring-motion ${isDownloader ? "is-active" : "is-hidden"}`} aria-hidden={!isDownloader}>
-                  <DownloaderPanel active={isDownloader} activeTab={downloaderTab} sidebarExpanded={expanded} />
+                  <DownloaderPanel active={isDownloader} activeTab={downloaderTab} />
                 </div>
                 <div className={`panel-view spring-motion ${isAudioExtraction ? "is-active" : "is-hidden"}`} aria-hidden={!isAudioExtraction}>
                   {useLegacyAudioPanel ? <AudioExtractionPanel /> : <NewAudioExtractionPanel />}
@@ -592,7 +596,8 @@ export function App() {
                 </div>
                 {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && (
                   <div className="panel-view is-active spring-motion">
-                    {isAudioConversion ? <MediaToAudioPanel />
+                    {isHome ? <HomePanel onNavigate={handleHomeNavigate} />
+                      : isAudioConversion ? <MediaToAudioPanel />
                       : isVideoConversion ? <VideoToVideoPanel />
                         : isLogs ? <LogsPanel />
                           : isSettings ? <SettingsPanel themeColors={themeColors} />

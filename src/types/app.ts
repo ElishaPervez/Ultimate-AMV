@@ -1,6 +1,5 @@
-import React from "react";
-
 export type SectionId =
+  | "home"
   | "clip-hunting"
   | "downloader"
   | "tsukyio"
@@ -10,13 +9,6 @@ export type SectionId =
   | "bg-removal"
   | "logs"
   | "settings";
-
-export type NavItem = {
-  id: SectionId;
-  label: string;
-  short: string;
-  icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
-};
 
 export type AppThemeId = "cyan" | "mint" | "violet" | "rose" | "amber" | "custom";
 

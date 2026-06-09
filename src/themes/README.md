@@ -167,13 +167,12 @@ Derived tokens (`--accent`, `--accent-gradient`, `--accent-glow`,
 two RGB tokens cascades to all of them automatically.
 
 There are also layout tokens you can nudge:
-`--sidebar-expanded-width`, `--sidebar-compact-width`, `--sidebar-label-width`,
-`--sidebar-gap`, and `--spring-easing` (the spring transition curve).
+`--sidebar-expanded-width` and `--spring-easing` (the spring transition curve).
 
 After the broad token pass, add **targeted selector overrides** for anything you
 want to polish further (the `ultimate-amv` built-in theme is the worked example
 — see `builtin/ultimate-amv/theme.css`). Useful structural classes to target:
-`.sidebar`, `.workspace-header h1`, `.focus-panel`, `.glass` / `.glass-strong`,
+`.sidebar`, `.focus-panel`, `.glass` / `.glass-strong`,
 `.mode-tab.is-active`, `.sidebar-home.is-active`, `.sidebar-subitem.is-active`.
 
 ---

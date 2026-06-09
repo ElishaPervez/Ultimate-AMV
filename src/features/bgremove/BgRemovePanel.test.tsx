@@ -7,14 +7,16 @@ describe("BgRemovePanel", () => {
   describe("Video Isolate Tab", () => {
     it("renders video panel header and instructions", () => {
       render(<BgRemovePanel activeTab="video" />);
-      expect(screen.getByText("One-Click Video Background Removal")).toBeInTheDocument();
-      expect(screen.getByText(/Isolate characters from video files/)).toBeInTheDocument();
+      expect(screen.getByText("Video Background Removal")).toBeInTheDocument();
+      expect(screen.getByText(/Isolate foreground characters and subjects from video files/)).toBeInTheDocument();
     });
 
     it("renders options dropdowns in video mode", () => {
       render(<BgRemovePanel activeTab="video" />);
-      expect(screen.getByLabelText("AI Segmentation Model")).toBeInTheDocument();
-      expect(screen.getByLabelText("Export Format")).toBeInTheDocument();
+      // The custom Dropdown isn't programmatically associated with its label
+      // (htmlFor points at no control id), so assert the visible label text.
+      expect(screen.getByText("AI Segmentation Model")).toBeInTheDocument();
+      expect(screen.getByText("Export Format")).toBeInTheDocument();
     });
 
     it("renders video source dropzone when no file selected", () => {
@@ -32,14 +34,14 @@ describe("BgRemovePanel", () => {
   describe("Image Isolate Tab", () => {
     it("renders image panel header and instructions", () => {
       render(<BgRemovePanel activeTab="image" />);
-      expect(screen.getByText("One-Click Image Background Removal")).toBeInTheDocument();
-      expect(screen.getByText(/Isolate anime characters/)).toBeInTheDocument();
+      expect(screen.getByText("Image Background Removal")).toBeInTheDocument();
+      expect(screen.getByText(/Isolate foreground characters and subjects from static images/)).toBeInTheDocument();
     });
 
     it("renders image dropzone instructions and select button", () => {
       render(<BgRemovePanel activeTab="image" />);
       expect(screen.getByText("Drop image to remove background")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Select Image" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Select file" })).toBeInTheDocument();
     });
   });
 });

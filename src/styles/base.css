@@ -48,24 +48,6 @@
    1. VARIABLES, THEME TOKENS & UTILITIES
    ============================================================ */
 
-@property --sidebar-width {
-  syntax: "<length>";
-  inherits: true;
-  initial-value: 226px;
-}
-
-@property --sidebar-label-width {
-  syntax: "<length>";
-  inherits: true;
-  initial-value: 146px;
-}
-
-@property --sidebar-gap {
-  syntax: "<length>";
-  inherits: true;
-  initial-value: 10px;
-}
-
 :root {
   font-family: 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
   color: #eef3f8;
@@ -95,10 +77,7 @@
   --rose: #fb7185;
   --amber: #fbbf24;
   --sidebar-expanded-width: 240px;
-  --sidebar-compact-width: 72px;
   --sidebar-width: var(--sidebar-expanded-width);
-  --sidebar-label-width: 156px;
-  --sidebar-gap: 12px;
   --radius-xl: 18px;
   --radius-lg: 14px;
   --radius-md: 10px;

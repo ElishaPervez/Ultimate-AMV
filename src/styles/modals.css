@@ -108,7 +108,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  color: var(--muted);
+  color: var(--ink);
   font-size: 12px;
   font-weight: 720;
 }
@@ -130,6 +130,15 @@
   gap: 12px;
 }
 
+/* Settings surfaces get a dark scrim on top of the theme's glass tint:
+   the bare 5%-alpha glass washes out over bright wallpapers. */
+.settings-tab-bar.glass,
+.settings-group.glass {
+  background:
+    linear-gradient(rgba(8, 10, 18, 0.45), rgba(8, 10, 18, 0.45)),
+    var(--glass);
+}
+
 .settings-group.glass .settings-group-header {
   margin-bottom: 0;
 }
@@ -139,7 +148,9 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  color: rgba(255, 255, 255, 0.35);
+  /* Full-strength muted ink, not low-alpha white: these headers sit over
+     the user's wallpaper and 35% white turns to mud on bright images. */
+  color: var(--muted);
   margin-bottom: 8px;
   padding: 0 2px;
 }
