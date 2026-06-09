@@ -17,6 +17,7 @@ class TestSetConfig(unittest.TestCase):
             "theme": "cyan",
             "theme_color_a": "#48d7ff",
             "theme_color_b": "#63e6a2",
+            "ui_theme": "ultimate-amv",
             "background_image": "",
             "background_scale": 1.0,
             "background_offset_x": 50.0,
@@ -28,6 +29,7 @@ class TestSetConfig(unittest.TestCase):
             "background_video_fps": 30,
             "audio_output_format": "wav",
             "clip_hover_preview": False,
+            "tsukyio_api_key": "",
         }
         payload.update(overrides)
         mock_emit.assert_called_once_with(payload)
