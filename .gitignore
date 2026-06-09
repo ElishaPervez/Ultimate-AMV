@@ -5,13 +5,15 @@ reference/
 # document the vault API — reference only. MUST NOT be committed to the public repo.
 Tsukyio-AE-Extension-development/
 
-# Local agent/editor state.
+# Local agent/editor state. docs/agent/ holds the workflow rules split
+# out of CLAUDE.md — same privacy as CLAUDE.md itself, keep local-only.
 .claude/
 .vscode/
 .idea/
 .codex
 CLAUDE.md
 AGENTS.md
+docs/agent/
 
 # OS files.
 .DS_Store
