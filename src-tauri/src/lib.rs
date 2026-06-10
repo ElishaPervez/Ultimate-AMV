@@ -100,8 +100,14 @@ fn reveal_in_folder(#[allow(unused_variables)] app: tauri::AppHandle, path: Stri
     let result: Result<(), String> = {
         #[cfg(target_os = "windows")]
         {
+            use std::os::windows::process::CommandExt;
+            // raw_arg: Command::arg would quote the whole thing when the path
+            // has spaces (`"/select,C:\..."`), which explorer can't parse — it
+            // silently opens Documents instead. Explorer also rejects forward
+            // slashes in the /select target.
+            let native = path.replace('/', "\\");
             cmd("explorer")
-                .arg(format!("/select,{}", path))
+                .raw_arg(format!("/select,\"{}\"", native))
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| e.to_string())
