@@ -36,6 +36,8 @@ use tauri::{Emitter, Manager, UriSchemeContext, UriSchemeResponder, Window, Wry}
 use crate::{log_error, log_info, log_warn, sanitize_path_segment};
 
 const TSUKYIO_BASE: &str = "https://tsukyio.com/api";
+/// Bare public origin, for proxied non-API resources (thumbnails).
+const TSUKYIO_ORIGIN: &str = "https://tsukyio.com";
 const USER_AGENT: &str = "UltimateAMV-Tsukyio/1.0";
 
 /// Custom URI scheme the preview media loads from. On Windows the webview maps
@@ -56,6 +58,11 @@ const PROXY_CHUNK_CAP: u64 = 4 * 1024 * 1024;
 /// must buffer the whole thing — but refuse outright if upstream advertises a
 /// `Content-Length` larger than this so a pathological body can't OOM us.
 const PROXY_MAX_FULL_BODY: u64 = 256 * 1024 * 1024;
+
+/// Hard ceiling for a proxied thumbnail body. Real vault thumbnails are a few
+/// hundred KB; anything past this is not a thumbnail and gets refused rather
+/// than buffered.
+const THUMB_MAX_BODY: usize = 20 * 1024 * 1024;
 
 /// Holds the current Tsukyio Bearer key for the proxy protocol handler. The
 /// frontend pushes the key here via `tsukyio_set_session_key` whenever it loads
@@ -587,6 +594,32 @@ fn asset_id_from_uri(uri: &str) -> Option<String> {
     Some(percent_decode(segment))
 }
 
+/// Extracts the upstream thumbnail path from a `<scheme>/thumb/<segment>`
+/// request URI (same shape variants as `asset_id_from_uri`). The frontend packs
+/// the whole upstream path (itself per-segment percent-encoded, slashes intact)
+/// into ONE encoded segment, so a single decode here yields a splice-ready
+/// upstream path like `/api/v/links/Precuts/My%20Folder/clip.jpg`.
+fn thumb_path_from_uri(uri: &str) -> Option<String> {
+    let after_scheme = uri.splitn(2, "://").nth(1).unwrap_or(uri);
+    let no_query = after_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let mut segments = no_query.split('/').filter(|s| !s.is_empty());
+    let mut path: Option<&str> = None;
+    while let Some(seg) = segments.next() {
+        if seg == "thumb" {
+            path = segments.next();
+            break;
+        }
+    }
+    let segment = path?;
+    if segment.is_empty() {
+        return None;
+    }
+    Some(percent_decode(segment))
+}
+
 /// Minimal percent-decoder for a single path segment (we only need to undo the
 /// encoding the webview applies to the id). Invalid escapes are passed through.
 fn percent_decode(input: &str) -> String {
@@ -633,6 +666,36 @@ pub(crate) fn handle_stream_protocol(
     let app = ctx.app_handle().clone();
 
     let uri = request.uri().to_string();
+
+    // Thumbnail proxy route (`<scheme>/thumb/<encoded upstream path>`). Some
+    // vault thumbnails are served from API routes whose responses carry
+    // `Cross-Origin-Resource-Policy: same-origin` — WebView2 enforces CORP on
+    // cross-origin `<img>` loads, so the bytes arrive (200) but are never
+    // painted and the card renders a black box. Re-serving them from this
+    // app-trusted origin sidesteps CORP exactly like the stream proxy
+    // sidesteps the missing-CORS stream responses. Unlike streams this does
+    // NOT require a key (the thumbnails are public); the key is attached when
+    // present in case the vault tightens auth later.
+    if let Some(thumb_path) = thumb_path_from_uri(&uri) {
+        let key = app.state::<TsukyioSession>().get();
+        tauri::async_runtime::spawn(async move {
+            let response = proxy_thumbnail(key.as_deref(), &thumb_path).await;
+            let response = match response {
+                Ok(response) => response,
+                Err((status, message)) => {
+                    log_warn(
+                        "tsukyio.thumb.error",
+                        "Tsukyio thumbnail proxy failed",
+                        json!({ "path": &thumb_path, "status": status, "error": &message }),
+                    );
+                    proxy_error(status)
+                }
+            };
+            responder.respond(response);
+        });
+        return;
+    }
+
     let asset_id = match asset_id_from_uri(&uri) {
         Some(id) => id,
         None => {
@@ -838,6 +901,87 @@ async fn proxy_stream(
         .map_err(|e| (500u16, format!("Could not build stream response: {e}")))
 }
 
+/// Fetches a vault thumbnail upstream and relays it to the webview. `encoded_path`
+/// is the upstream path with its segments already percent-encoded (spaces etc.)
+/// and slashes intact — splice-ready. Bounded by `THUMB_MAX_BODY`; upstream's
+/// long-lived Cache-Control is passed through so the webview caches the image
+/// instead of re-proxying it on every grid render.
+async fn proxy_thumbnail(
+    api_key: Option<&str>,
+    encoded_path: &str,
+) -> Result<tauri::http::Response<Vec<u8>>, (u16, String)> {
+    // Only the two routes vault thumbnails actually live under, no traversal
+    // (checked on the fully-decoded form so a double-encoded `..` can't slip
+    // through to upstream). The origin is pinned, so this can never proxy
+    // anything but tsukyio.com regardless.
+    let fully_decoded = percent_decode(encoded_path);
+    if !(encoded_path.starts_with("/api/") || encoded_path.starts_with("/files/"))
+        || fully_decoded.contains("..")
+    {
+        return Err((400u16, format!("Invalid thumbnail path: {encoded_path}")));
+    }
+
+    let client = match api_key {
+        Some(key) => build_client(key).map_err(|e| (401u16, e))?,
+        None => reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .map_err(|e| (500u16, format!("Could not build Tsukyio HTTP client: {e}")))?,
+    };
+
+    let response = client
+        .get(format!("{TSUKYIO_ORIGIN}{encoded_path}"))
+        // Image endpoint; override build_client's JSON Accept default.
+        .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8")
+        .send()
+        .await
+        .map_err(|e| (502u16, format!("Could not reach Tsukyio thumbnail: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err((status.as_u16(), format!("Upstream thumbnail returned {status}")));
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string());
+    let cache_control = response
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "public, max-age=86400".to_string());
+
+    if let Some(len) = response.content_length() {
+        if len > THUMB_MAX_BODY as u64 {
+            return Err((502u16, format!("Thumbnail too large ({len} bytes)")));
+        }
+    }
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| (502u16, format!("Could not read Tsukyio thumbnail body: {e}")))?;
+        if body.len() + chunk.len() > THUMB_MAX_BODY {
+            // A truncated image is useless — refuse instead of serving junk.
+            return Err((502u16, "Thumbnail exceeded the size ceiling".to_string()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let body_len = body.len();
+    tauri::http::Response::builder()
+        .status(200)
+        .header(tauri::http::header::CONTENT_TYPE, content_type)
+        .header(tauri::http::header::CACHE_CONTROL, cache_control)
+        .header(tauri::http::header::CONTENT_LENGTH, body_len.to_string())
+        .body(body)
+        .map_err(|e| (500u16, format!("Could not build thumbnail response: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +1050,30 @@ mod tests {
         // No /stream/ segment → None.
         assert_eq!(asset_id_from_uri("tsukyio://other/abc"), None);
         assert_eq!(asset_id_from_uri("tsukyio://stream/"), None);
+    }
+
+    #[test]
+    fn thumb_path_parsed_from_various_uri_shapes() {
+        // The whole upstream path arrives as ONE encoded segment; a single
+        // decode yields the splice-ready (still per-segment-encoded) path.
+        assert_eq!(
+            thumb_path_from_uri("tsukyio://thumb/%2Fapi%2Fv%2Flinks%2FPrecuts%2FMy%2520Folder%2Fclip.jpg")
+                .as_deref(),
+            Some("/api/v/links/Precuts/My%20Folder/clip.jpg")
+        );
+        assert_eq!(
+            thumb_path_from_uri("http://tsukyio.localhost/thumb/%2Ffiles%2Fthumbnails%2Fa.jpg")
+                .as_deref(),
+            Some("/files/thumbnails/a.jpg")
+        );
+        // Query strings and fragments are stripped.
+        assert_eq!(
+            thumb_path_from_uri("http://tsukyio.localhost/thumb/%2Fapi%2Fx.jpg?t=1#y").as_deref(),
+            Some("/api/x.jpg")
+        );
+        // A stream URI is not a thumb URI.
+        assert_eq!(thumb_path_from_uri("tsukyio://stream/abc123"), None);
+        assert_eq!(thumb_path_from_uri("tsukyio://thumb/"), None);
     }
 
     #[test]

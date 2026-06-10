@@ -137,25 +137,56 @@ function encodeThumbnailPath(path: string): string {
     .join("/");
 }
 
+// Local-proxy URL for a vault thumbnail path that the webview cannot load
+// directly. The per-segment-encoded path is packed into ONE URI segment
+// (slashes included) so the Rust handler (`thumb_path_from_uri`) recovers it
+// with a single decode. Same per-platform scheme branch as `streamUrl` below.
+function thumbProxyUrl(encodedPath: string): string {
+  const segment = encodeURIComponent(encodedPath);
+  const isWindows = navigator.userAgent.includes("Windows");
+  return isWindows
+    ? `http://tsukyio.localhost/thumb/${segment}`
+    : `tsukyio://thumb/${segment}`;
+}
+
+// Route a vault thumbnail path (e.g. `/files/thumbnails/...` or
+// `/api/v/links/...`) to a URL the webview will actually PAINT:
+//
+// - `/files/...` is public static with no cross-origin restrictions — load it
+//   straight from the public origin (no proxy hop).
+// - `/api/...` responses carry `Cross-Origin-Resource-Policy: same-origin`.
+//   WebView2 enforces CORP on cross-origin <img> loads, so the request
+//   succeeds (200) but the bytes are never handed to the renderer — the card
+//   shows a black box. Serve those through the app-trusted `tsukyio://` proxy
+//   (same trick as stream playback), which fetches upstream from Rust where
+//   CORP doesn't apply.
+function routeVaultThumbnail(path: string): string {
+  const encoded = encodeThumbnailPath(path);
+  if (path.startsWith("/api/")) return thumbProxyUrl(encoded);
+  return TSUKYIO_ORIGIN + encoded;
+}
+
 // Normalize a thumbnail URL into something the webview can actually load.
 //
 // Clip thumbnails come back glued to the vault's PRIVATE dev host
-// (`https://localhost:3133/files/thumbnails/...`), and the asset-detail endpoint
+// (`https://localhost:3133/files/thumbnails/...` or
+// `https://localhost:3133/api/v/links/...`), and the asset-detail endpoint
 // returns the same path RELATIVE (`/files/thumbnails/...`). The path itself is
 // real and publicly served from `https://tsukyio.com`, so rather than discard
 // these (which left every clip card iconless), rewrite them onto the public
-// origin. Folder / search thumbnails are already real MAL CDN URLs and pass
-// through untouched.
+// origin (or through the local proxy when CORP blocks a direct load — see
+// `routeVaultThumbnail`). Folder / search thumbnails are already real MAL CDN
+// URLs and pass through untouched.
 function usableThumbnail(url: string | null | undefined): string | null {
   if (!url || typeof url !== "string") return null;
   const trimmed = url.trim();
   if (!trimmed) return null;
-  // Relative path → serve from the public origin.
-  if (trimmed.startsWith("/")) return TSUKYIO_ORIGIN + encodeThumbnailPath(trimmed);
-  // Any localhost host (the dev box, any port) → swap to the public origin,
-  // keep and encode the path.
+  // Relative path → serve from the public origin / proxy.
+  if (trimmed.startsWith("/")) return routeVaultThumbnail(trimmed);
+  // Any localhost host (the dev box, any port) → swap to the public origin /
+  // proxy, keep and encode the path.
   const localhost = trimmed.match(/^https?:\/\/localhost(?::\d+)?(\/.*)$/i);
-  if (localhost) return TSUKYIO_ORIGIN + encodeThumbnailPath(localhost[1]);
+  if (localhost) return routeVaultThumbnail(localhost[1]);
   // Already a real absolute http(s) URL (e.g. MAL CDN) → use as-is.
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return null;
