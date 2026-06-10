@@ -183,7 +183,7 @@
   color: var(--ink);
 }
 
-/* On the discovery home the search bar is the primary affordance — give it
+/* On the discovery home the search bar is the primary affordance â€” give it
    more presence than the in-browse toolbar. */
 .tsukyio-toolbar.is-home .tsukyio-search input {
   padding: 13px 14px 13px 40px;
@@ -583,10 +583,13 @@
   gap: 10px;
 }
 
-/* The dock: fixed width, full height of the results region, its own scroll. */
+/* The dock: full height of the results region, its own scroll. Width scales
+   with the window (~a third of it) so the preview is meaningfully larger than
+   the grid thumbnails â€” a fixed 380px made the preview the same size as a
+   card, which defeated the point of previewing. */
 .tsukyio-dock {
-  flex: 0 0 380px;
-  width: 380px;
+  flex: 0 0 clamp(380px, 32vw, 640px);
+  width: clamp(380px, 32vw, 640px);
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -659,7 +662,7 @@
   border-radius: 999px;
 }
 
-/* Media wrapper — positions the fullscreen expand button over the video. */
+/* Media wrapper â€” positions the fullscreen expand button over the video. */
 .tsukyio-dock-media {
   position: relative;
   border-radius: 10px;
@@ -686,6 +689,34 @@
   display: block;
   object-fit: contain;
   background: #000;
+  /* Clicking the picture toggles playback. */
+  cursor: pointer;
+}
+
+/* ---- Custom video controls (overlay bar) ----
+   Replaces native <video controls> with the app's .scene-viewer-controls bar
+   (play/pause, time, scrub, volume) so the preview matches the rest of the
+   app. Hidden during playback; revealed on hover, while paused, mid-scrub
+   (the pointer can leave the stage during a drag), or while a control inside
+   it holds keyboard focus. pointer-events is gated with visibility so the
+   invisible bar can't swallow clicks meant for the video. */
+.tsukyio-video-controls {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.tsukyio-player-stage:hover .tsukyio-video-controls,
+.tsukyio-player-stage.is-paused .tsukyio-video-controls,
+.tsukyio-player-stage.is-scrubbing .tsukyio-video-controls,
+.tsukyio-video-controls:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The dock bar is narrower than the modal the volume slider was sized for. */
+.tsukyio-video-controls .tsukyio-player-vol-slider {
+  width: 64px;
 }
 
 /* The spinner / error overlay centered on top of the media box. */
@@ -841,10 +872,10 @@
   }
 }
 
-/* Audio assets don't need a 16:9 black letterbox — collapse the stage to a
+/* Audio assets don't need a 16:9 black letterbox â€” collapse the stage to a
    compact bar that hosts the custom player, still centered. */
 .scene-viewer-stage.is-audio {
-  /* Audio has no picture — don't render the big black 16:9 video box. Make the
+  /* Audio has no picture â€” don't render the big black 16:9 video box. Make the
      stage transparent and let the player card below be the whole visible
      element, so there's no surrounding black void. */
   aspect-ratio: auto;
@@ -875,14 +906,14 @@
 }
 
 .tsukyio-audio-player {
-  /* No card chrome — the player lives DIRECTLY in the modal body, not in a
+  /* No card chrome â€” the player lives DIRECTLY in the modal body, not in a
      nested bordered/gradient box. The modal is already the container; the only
      remaining "box" is the small equalizer artwork tile (the player's art). */
   display: flex;
   align-items: center;
   gap: 18px;
   width: 100%;
-  /* Sit lower in the modal — give clear separation from the title/metadata
+  /* Sit lower in the modal â€” give clear separation from the title/metadata
      above instead of crowding up against it. */
   padding: 34px 2px 14px;
 }
@@ -904,7 +935,7 @@
   min-width: 0;
 }
 
-/* Filled accent play/pause — the focal control of the bar. Higher specificity
+/* Filled accent play/pause â€” the focal control of the bar. Higher specificity
    so it overrides the shared .scene-viewer-button ghost styling. */
 .tsukyio-audio-player .tsukyio-audio-play {
   flex-shrink: 0;
@@ -935,20 +966,21 @@
 }
 
 /* The scrub slider reuses .scene-viewer-scrub* for the track/fill; just give
-   it the accent focus ring and a disabled appearance. */
-.tsukyio-audio-scrub:focus-visible {
+   it the accent focus ring and a disabled appearance. Shared by the audio
+   player and the video overlay bar. */
+.tsukyio-player-scrub:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
   border-radius: 4px;
 }
 
-.tsukyio-audio-scrub.is-disabled {
+.tsukyio-player-scrub.is-disabled {
   cursor: default;
   opacity: 0.55;
 }
 
-/* ---- Volume cluster ---- */
-.tsukyio-audio-volume {
+/* ---- Volume cluster (shared: audio player + video overlay bar) ---- */
+.tsukyio-player-volume {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -957,7 +989,7 @@
 
 /* Native range input styled to match the accent. Compact so it sits inline
    with the mute button without crowding the scrub bar. */
-.tsukyio-audio-vol-slider {
+.tsukyio-player-vol-slider {
   width: 90px;
   height: 4px;
   appearance: none;
@@ -968,12 +1000,12 @@
   outline: none;
 }
 
-.tsukyio-audio-vol-slider:disabled {
+.tsukyio-player-vol-slider:disabled {
   cursor: default;
   opacity: 0.5;
 }
 
-.tsukyio-audio-vol-slider::-webkit-slider-thumb {
+.tsukyio-player-vol-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 12px;
@@ -985,7 +1017,7 @@
   cursor: pointer;
 }
 
-.tsukyio-audio-vol-slider::-moz-range-thumb {
+.tsukyio-player-vol-slider::-moz-range-thumb {
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -995,12 +1027,12 @@
   cursor: pointer;
 }
 
-.tsukyio-audio-vol-slider:focus-visible::-webkit-slider-thumb {
+.tsukyio-player-vol-slider:focus-visible::-webkit-slider-thumb {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.tsukyio-audio-vol-slider:focus-visible::-moz-range-thumb {
+.tsukyio-player-vol-slider:focus-visible::-moz-range-thumb {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1029,17 +1061,17 @@
   gap: 10px 12px;
 }
 
-.tsukyio-player-stage.is-audio .tsukyio-audio-scrub {
+.tsukyio-player-stage.is-audio .tsukyio-player-scrub {
   order: 3;
   flex-basis: 100%;
   width: 100%;
 }
 
-.tsukyio-player-stage.is-audio .tsukyio-audio-volume {
+.tsukyio-player-stage.is-audio .tsukyio-player-volume {
   margin-left: auto;
 }
 
-.tsukyio-player-stage.is-audio .tsukyio-audio-vol-slider {
+.tsukyio-player-stage.is-audio .tsukyio-player-vol-slider {
   width: 72px;
 }
 
@@ -1138,7 +1170,7 @@
   color: var(--muted);
 }
 
-/* Category accents — pure CSS, no remote images. */
+/* Category accents â€” pure CSS, no remote images. */
 .tsukyio-tile.accent-precuts { --tile-a: #6366f1; --tile-b: #8b5cf6; }
 .tsukyio-tile.accent-raw { --tile-a: #0ea5e9; --tile-b: #2563eb; }
 .tsukyio-tile.accent-flow { --tile-a: #06b6d4; --tile-b: #14b8a6; }
