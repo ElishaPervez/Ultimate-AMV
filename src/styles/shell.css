@@ -1301,3 +1301,199 @@
   filter: none;
 }
 
+/* ============================================================
+   8b. COLLAPSIBLE SIDEBAR (compact icon rail)
+   The shell column animates between the expanded and rail widths
+   via --sidebar-width (the .app-shell grid transition already
+   covers it). Collapsed, the grouped nav is swapped for a flat
+   one-click icon rail with hover tooltips; both directions get a
+   staggered slide/fade so the swap reads as one fluid motion.
+   ============================================================ */
+
+.app-shell.is-sidebar-collapsed {
+  --sidebar-width: var(--sidebar-rail-width);
+}
+
+/* Tooltips poke out past the rail into the workspace: the sidebar must paint
+   above its sibling and never clip. Expanded, clipping is back ON so labels
+   can't spill while the width is still animating open. */
+.sidebar {
+  z-index: 5;
+}
+
+.sidebar:not(.is-collapsed) {
+  overflow: hidden;
+}
+
+.sidebar-collapse-btn {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.sidebar-collapse-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #e5e7eb;
+}
+
+.sidebar.is-collapsed {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.sidebar.is-collapsed .sidebar-brand {
+  justify-content: center;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.sidebar.is-collapsed .sidebar-collapse-btn {
+  margin-left: 0;
+  width: 38px;
+  height: 32px;
+}
+
+.sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+}
+
+.sidebar-rail > * {
+  animation: sidebar-rail-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.sidebar-rail-spacer {
+  flex: 1;
+  animation: none;
+}
+
+.sidebar-rail-divider {
+  flex: 0 0 1px;
+  width: 24px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 5px 0;
+}
+
+.sidebar-rail-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 40px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.sidebar-rail-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e5e7eb;
+}
+
+.sidebar-rail-btn.is-active {
+  background: #1f2328;
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* Accent edge marking the active rail icon (sits in the sidebar padding). */
+.sidebar-rail-btn.is-active::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow);
+}
+
+/* App-styled hover/focus tooltip to the right of a rail icon. */
+.sidebar-rail-tip {
+  position: absolute;
+  left: calc(100% + 14px);
+  top: 50%;
+  transform: translate(-6px, -50%);
+  padding: 5px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(16, 18, 22, 0.96);
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 60;
+}
+
+.sidebar-rail-btn:hover .sidebar-rail-tip,
+.sidebar-rail-btn:focus-visible .sidebar-rail-tip {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+@keyframes sidebar-rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Re-entry choreography for the expanded nav: each block fades/slides in with
+   a slight cascade (also plays once on app launch, which reads as intended
+   polish). Labels stay on one line so nothing wraps mid-width-animation. */
+.sidebar:not(.is-collapsed) > .sidebar-home,
+.sidebar:not(.is-collapsed) > .sidebar-section-label,
+.sidebar:not(.is-collapsed) > .sidebar-group,
+.sidebar:not(.is-collapsed) > .sidebar-footer-static {
+  animation: sidebar-expand-in 240ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.sidebar:not(.is-collapsed) > .sidebar-home { animation-delay: 30ms; }
+.sidebar:not(.is-collapsed) > .sidebar-section-label { animation-delay: 55ms; }
+.sidebar:not(.is-collapsed) > .sidebar-group { animation-delay: 80ms; }
+.sidebar:not(.is-collapsed) > .sidebar-group + .sidebar-group { animation-delay: 105ms; }
+.sidebar:not(.is-collapsed) > .sidebar-footer-static { animation-delay: 130ms; }
+
+.sidebar-home span,
+.sidebar-group-header span,
+.sidebar-subitem span,
+.sidebar-footer-btn span {
+  white-space: nowrap;
+}
+
+@keyframes sidebar-expand-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+

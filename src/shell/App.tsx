@@ -14,6 +14,8 @@ import {
   Library,
   MessageCircle,
   Music2,
+  PanelLeftClose,
+  PanelLeftOpen,
   ScrollText,
   Settings,
   Sparkles,
@@ -47,6 +49,101 @@ import { WindowChrome } from "./WindowChrome";
 
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
 const GITHUB_ISSUES_URL = "https://github.com/ElishaPervez/Ultimate-AMV/issues";
+
+// localStorage key for the persisted sidebar collapsed state. Survives across
+// sessions so the user's compact-rail choice sticks.
+const SIDEBAR_COLLAPSED_KEY = "ui.sidebar.collapsed";
+
+function loadSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Ignore storage failures; the in-memory state still drives the UI.
+  }
+}
+
+type RailItem = {
+  id: SectionId;
+  label: string;
+  Icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
+};
+
+type RailEntry =
+  | { kind: "item"; item: RailItem }
+  | { kind: "divider" }
+  | { kind: "spacer" };
+
+// The collapsed sidebar is a FLAT icon rail: every destination is one click,
+// with the grouped hierarchy reserved for the expanded sidebar (a collapsed
+// group tree would force two clicks per navigation through flyouts). Order
+// mirrors the expanded nav: Home, the Media group, the Downloads group, then
+// Settings/Logs pinned to the bottom past a flexible spacer.
+const RAIL_ENTRIES: RailEntry[] = (() => {
+  const groups: RailItem[][] = [
+    [{ id: "home", label: "Home", Icon: Home }],
+    [
+      { id: "audio-extraction", label: "Vocal Separation", Icon: AudioLines },
+      { id: "clip-hunting", label: "Scene Splitter", Icon: Clapperboard },
+      { id: "bg-removal", label: "BG Remover", Icon: Sparkles },
+      { id: "audio-conversion", label: "Audio Conversion", Icon: Music2 },
+      { id: "video-conversion", label: "Video Conversion", Icon: Film },
+    ],
+    [
+      { id: "downloader", label: "Downloader", Icon: Tv },
+      { id: "tsukyio", label: "Tsukyio Vault", Icon: Library },
+    ],
+  ];
+  const footer: RailItem[] = [
+    { id: "settings", label: "Settings", Icon: Settings },
+    { id: "logs", label: "Logs", Icon: ScrollText },
+  ];
+  const entries: RailEntry[] = [];
+  groups.forEach((group, gi) => {
+    if (gi > 0) entries.push({ kind: "divider" });
+    group.forEach((item) => entries.push({ kind: "item", item }));
+  });
+  entries.push({ kind: "spacer" });
+  footer.forEach((item) => entries.push({ kind: "item", item }));
+  return entries;
+})();
+
+// One icon button of the collapsed rail. The label lives in a hover/focus
+// tooltip (the rail has no room for text); the stagger delay drives the
+// cascading slide-in when the rail mounts.
+function RailButton({
+  item,
+  delayMs,
+  active,
+  onSelect,
+}: {
+  item: RailItem;
+  delayMs: number;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`sidebar-rail-btn ${active ? "is-active" : ""}`}
+      style={{ animationDelay: `${delayMs}ms` }}
+      onClick={onSelect}
+      aria-label={item.label}
+    >
+      <item.Icon size={17} strokeWidth={2} />
+      <span className="sidebar-rail-tip" role="tooltip">
+        {item.label}
+      </span>
+    </button>
+  );
+}
 
 const panelMeta: Record<SectionId, { kicker: string; title: string; stats: string[] }> = {
   home: {
@@ -157,6 +254,30 @@ export function App() {
     media: true,
     downloads: false,
   });
+  // Whether the sidebar is collapsed to the compact icon rail. Persisted so
+  // it sticks across sessions.
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(loadSidebarCollapsed);
+  const toggleSidebar = React.useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      saveSidebarCollapsed(next);
+      return next;
+    });
+  }, []);
+  // When EXPANDING, pre-open the group that owns the active section so the
+  // highlighted item is visible instead of hidden behind a collapsed group
+  // (rail navigation can land anywhere without touching openGroups).
+  React.useEffect(() => {
+    if (sidebarCollapsed) return;
+    if (active === "downloader" || active === "tsukyio") {
+      setOpenGroups((g) => (g.downloads ? g : { ...g, downloads: true }));
+    } else if (active !== "settings" && active !== "logs" && active !== "home") {
+      setOpenGroups((g) => (g.media ? g : { ...g, media: true }));
+    }
+    // Only when the collapsed state flips, not on every navigation — keeping
+    // groups closed while browsing the expanded sidebar stays the user's call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarCollapsed]);
   // Home-card jumps also expand the sidebar group containing the target, so
   // the active subitem is visible instead of hidden behind a collapsed group.
   const handleHomeNavigate = React.useCallback((id: SectionId) => {
@@ -335,14 +456,57 @@ export function App() {
           }}
         />
       )}
-      <section className="app-shell">
-        <aside className="sidebar" aria-label="Primary navigation">
-          {/* Brand */}
+      <section className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
+        <aside
+          className={`sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}
+          aria-label="Primary navigation"
+        >
+          {/* Brand + collapse toggle */}
           <div className="sidebar-brand">
-            <span className="sidebar-brand-text">Ultimate AMV</span>
-            <span className="sidebar-brand-badge">{`v${__APP_VERSION__}`}</span>
+            {!sidebarCollapsed && (
+              <>
+                <span className="sidebar-brand-text">Ultimate AMV</span>
+                <span className="sidebar-brand-badge">{`v${__APP_VERSION__}`}</span>
+              </>
+            )}
+            <button
+              type="button"
+              className="sidebar-collapse-btn"
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!sidebarCollapsed}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            </button>
           </div>
 
+          {sidebarCollapsed ? (
+            /* Compact icon rail: flat one-click nav, labels in tooltips. */
+            <nav className="sidebar-rail" aria-label="Primary navigation (compact)">
+              {RAIL_ENTRIES.map((entry, i) =>
+                entry.kind === "divider" ? (
+                  <span
+                    key={`divider-${i}`}
+                    className="sidebar-rail-divider"
+                    aria-hidden="true"
+                    style={{ animationDelay: `${i * 16}ms` }}
+                  />
+                ) : entry.kind === "spacer" ? (
+                  <span key="spacer" className="sidebar-rail-spacer" aria-hidden="true" />
+                ) : (
+                  <RailButton
+                    key={entry.item.id}
+                    item={entry.item}
+                    delayMs={i * 16}
+                    active={active === entry.item.id}
+                    onSelect={() => setActive(entry.item.id)}
+                  />
+                ),
+              )}
+            </nav>
+          ) : (
+            <>
           {/* Home */}
           <button
             type="button"
@@ -535,6 +699,8 @@ export function App() {
               </div>
             </div>
           </div>
+            </>
+          )}
         </aside>
 
         <section className="workspace">
