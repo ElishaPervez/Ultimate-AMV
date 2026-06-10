@@ -1330,12 +1330,16 @@
 /* The toggle's position and size are IDENTICAL in both sidebar states (same
    left offset, same box) so rapid repeated clicks never need re-aiming — the
    left edge is the only part of the sidebar that doesn't move while the width
-   animates. Only the icon glyph changes. */
+   animates. Only the icon glyph changes.
+
+   Width matches .sidebar-rail-btn exactly: the live sidebar rule is
+   `.app-shell .sidebar` (flex, 14px side padding → a 36px content box in the
+   64px rail), so a 36px box flush at the content edge is what keeps this
+   pixel-aligned with the rail icons below it. */
 .sidebar-collapse-btn {
-  margin-left: 3px;
   display: grid;
   place-items: center;
-  width: 38px;
+  width: 36px;
   height: 32px;
   flex-shrink: 0;
   border-radius: 8px;
@@ -1352,20 +1356,20 @@
   color: #e5e7eb;
 }
 
-.sidebar.is-collapsed {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
 .sidebar.is-collapsed .sidebar-brand {
   justify-content: flex-start;
   margin-bottom: 4px;
 }
 
+/* flex: 1 — the sidebar is a flex column (`.app-shell .sidebar`), so the rail
+   must grow to fill the remaining height for its spacer to pin Settings/Logs
+   to the bottom. */
 .sidebar-rail {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
+  flex: 1;
   min-height: 0;
 }
 
@@ -1385,11 +1389,14 @@
   margin: 5px 0;
 }
 
+/* 36px = the sidebar's content width (64px rail minus 14px padding each
+   side), so the button fills the box exactly — same left edge as the collapse
+   toggle above, no overflow, no centering math to drift. */
 .sidebar-rail-btn {
   position: relative;
   display: grid;
   place-items: center;
-  width: 42px;
+  width: 36px;
   height: 40px;
   border-radius: 10px;
   border: none;
