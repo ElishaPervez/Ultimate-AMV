@@ -884,7 +884,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 6px;
+  /* No horizontal padding: the collapse toggle leads this row and must sit at
+     the exact same x-offset as in the collapsed rail (see 8b). */
+  padding: 0;
   margin-bottom: 12px;
 }
 
@@ -1325,12 +1327,16 @@
   overflow: hidden;
 }
 
+/* The toggle's position and size are IDENTICAL in both sidebar states (same
+   left offset, same box) so rapid repeated clicks never need re-aiming — the
+   left edge is the only part of the sidebar that doesn't move while the width
+   animates. Only the icon glyph changes. */
 .sidebar-collapse-btn {
-  margin-left: auto;
+  margin-left: 3px;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 38px;
+  height: 32px;
   flex-shrink: 0;
   border-radius: 8px;
   border: 1px solid transparent;
@@ -1351,15 +1357,8 @@
 }
 
 .sidebar.is-collapsed .sidebar-brand {
-  justify-content: center;
-  padding: 0;
+  justify-content: flex-start;
   margin-bottom: 4px;
-}
-
-.sidebar.is-collapsed .sidebar-collapse-btn {
-  margin-left: 0;
-  width: 38px;
-  height: 32px;
 }
 
 .sidebar-rail {

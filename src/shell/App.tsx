@@ -461,14 +461,12 @@ export function App() {
           className={`sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}
           aria-label="Primary navigation"
         >
-          {/* Brand + collapse toggle */}
+          {/* Brand + collapse toggle. The toggle leads the row, pinned to the
+              LEFT edge with identical geometry in both states — the left edge
+              is the only part of the sidebar that doesn't move during the
+              width animation, so the button stays under the cursor and can be
+              clicked repeatedly without re-aiming. */}
           <div className="sidebar-brand">
-            {!sidebarCollapsed && (
-              <>
-                <span className="sidebar-brand-text">Ultimate AMV</span>
-                <span className="sidebar-brand-badge">{`v${__APP_VERSION__}`}</span>
-              </>
-            )}
             <button
               type="button"
               className="sidebar-collapse-btn"
@@ -479,6 +477,12 @@ export function App() {
             >
               {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
             </button>
+            {!sidebarCollapsed && (
+              <>
+                <span className="sidebar-brand-text">Ultimate AMV</span>
+                <span className="sidebar-brand-badge">{`v${__APP_VERSION__}`}</span>
+              </>
+            )}
           </div>
 
           {sidebarCollapsed ? (
