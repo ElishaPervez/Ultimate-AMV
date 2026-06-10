@@ -61,6 +61,9 @@ function renderCustomizer(overrides: {
 
 describe('BackgroundCustomizer', () => {
   beforeEach(() => {
+    // Every render stamps the legibility-notice snooze timestamp; clear it so
+    // each test starts from the "notice shows" state.
+    window.localStorage.clear()
     mockInvoke('set_config', () => '{}')
     mockInvoke('save_background_image', () => '/saved/bg.jpg')
     mockInvoke('clear_background_image', () => undefined)
@@ -200,5 +203,33 @@ describe('BackgroundCustomizer', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('stamps the snooze timestamp when the warning is shown', () => {
+    renderCustomizer()
+    const raw = window.localStorage.getItem('bg.legibilityNotice.lastShown')
+    expect(raw).toBeTruthy()
+    expect(Number(raw)).toBeGreaterThan(0)
+  })
+
+  it('skips the warning entirely when it was shown within the last 10 minutes', () => {
+    window.localStorage.setItem('bg.legibilityNotice.lastShown', String(Date.now() - 60_000))
+    renderCustomizer()
+    // No banner, no lock - reopening to tweak must not re-pay the 10s wait.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(document.querySelector('.bg-customizer.is-locked')).toBeFalsy()
+  })
+
+  it('shows the warning again once the snooze window has passed', () => {
+    window.localStorage.setItem('bg.legibilityNotice.lastShown', String(Date.now() - 11 * 60_000))
+    renderCustomizer()
+    expect(screen.getByRole('status')).toBeInTheDocument()
+    expect(document.querySelector('.bg-customizer.is-locked')).toBeTruthy()
+  })
+
+  it('shows the warning when the stored timestamp is garbage', () => {
+    window.localStorage.setItem('bg.legibilityNotice.lastShown', 'not-a-number')
+    renderCustomizer()
+    expect(screen.getByRole('status')).toBeInTheDocument()
   })
 })

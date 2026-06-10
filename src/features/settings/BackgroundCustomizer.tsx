@@ -34,6 +34,36 @@ const LEGIBILITY_NOTICE_TEXT =
 const LEGIBILITY_NOTICE_TYPING_MS = 34;
 const LEGIBILITY_NOTICE_UNLOCK_MS = 10000;
 const LEGIBILITY_NOTICE_LEAVE_MS = 700;
+// The notice (and its 10s lock) is shown at most once per this window, so
+// reopening the modal to tweak dim/blur/fps doesn't re-pay the wait every
+// time. Tracked via a localStorage timestamp.
+const LEGIBILITY_NOTICE_SNOOZE_MS = 10 * 60 * 1000;
+const LEGIBILITY_NOTICE_SEEN_KEY = "bg.legibilityNotice.lastShown";
+
+// True when the notice was shown within the snooze window. A missing/garbage
+// timestamp or a storage failure means "show it" (the safe default); a
+// timestamp in the future (clock moved back) also shows it rather than
+// suppressing indefinitely.
+function legibilityNoticeRecentlyShown(): boolean {
+  try {
+    const raw = window.localStorage.getItem(LEGIBILITY_NOTICE_SEEN_KEY);
+    if (!raw) return false;
+    const last = Number(raw);
+    if (!Number.isFinite(last)) return false;
+    const age = Date.now() - last;
+    return age >= 0 && age < LEGIBILITY_NOTICE_SNOOZE_MS;
+  } catch {
+    return false;
+  }
+}
+
+function markLegibilityNoticeShown(): void {
+  try {
+    window.localStorage.setItem(LEGIBILITY_NOTICE_SEEN_KEY, String(Date.now()));
+  } catch {
+    // Ignore storage failures; the notice just shows again next time.
+  }
+}
 
 type TabId = "image" | "video";
 
@@ -61,12 +91,21 @@ export function BackgroundCustomizer({
   const [sourceFps, setSourceFps] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [transcodeProgress, setTranscodeProgress] = React.useState<WallpaperProgress | null>(null);
-  const [legibilityPhase, setLegibilityPhase] = React.useState<"counting" | "ready" | "leaving" | "gone">("counting");
+  // Snoozed = the notice already ran inside the snooze window, so this mount
+  // skips it entirely (no banner, no lock). Decided once at mount.
+  const legibilitySnoozedRef = React.useRef(legibilityNoticeRecentlyShown());
+  const [legibilityPhase, setLegibilityPhase] = React.useState<"counting" | "ready" | "leaving" | "gone">(
+    legibilitySnoozedRef.current ? "gone" : "counting",
+  );
   const [typedChars, setTypedChars] = React.useState(1);
   const [unlockSecondsLeft, setUnlockSecondsLeft] = React.useState(
     Math.round(LEGIBILITY_NOTICE_UNLOCK_MS / 1000),
   );
   React.useEffect(() => {
+    if (legibilitySnoozedRef.current) return undefined;
+    // Stamp at show time (not dismiss) so closing the modal mid-countdown
+    // still counts — the user saw the warning either way.
+    markLegibilityNoticeShown();
     let idx = 1;
     const typeId = window.setInterval(() => {
       idx += 1;
