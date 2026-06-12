@@ -1,24 +1,21 @@
 /* ============================================================
-   CSS CASCADE LAYER ORDER (theme engine)
+   CSS CASCADE LAYER ORDER
    ============================================================
-   The whole app stylesheet below lives in the low-priority `base`
-   layer. The active engine theme is injected at runtime into the
-   higher-priority `theme` layer (see src/themes/engine/themeLoader.ts),
-   so theme rules win over base rules WITHOUT needing !important —
-   later layers in this declaration beat earlier ones regardless of
-   selector specificity.
+   The whole app stylesheet lives in the low-priority `base` layer.
+   The app's look (styles/theme.css) sits in the higher-priority
+   `theme` layer, so its rules win over base rules WITHOUT needing
+   !important — later layers in this declaration beat earlier ones
+   regardless of selector specificity.
 
    Order (lowest -> highest priority):
      reset  -> base  -> theme  -> user
-   `reset`/`user` are reserved for future use; the engine only writes
-   to `theme` today. Unlayered rules (none here) would still outrank
-   every layer, which is exactly why every import below is layered.
+   `reset` is reserved for future use. Unlayered rules (none here)
+   would still outrank every layer, which is exactly why every
+   import below is layered.
 
    NOTE: @property and @font-face are NOT wrapped in a layer because
    some are declared inside base.css; layering them is legal in
-   Chromium/WebView2, so they ride along inside `base` safely. Keep
-   any future global @font-face here unlayered if a theme needs it to
-   outrank base.
+   Chromium/WebView2, so they ride along inside `base` safely.
    ============================================================ */
 @layer reset, base, theme, user;
 
@@ -34,3 +31,6 @@
 @import "./styles/new-audio.css" layer(base);
 @import "./styles/modals.css" layer(base);
 @import "./styles/components.css" layer(base);
+
+/* The app's look — token redefinitions + targeted overrides on top of base. */
+@import "./styles/theme.css" layer(theme);

@@ -20,7 +20,6 @@ const baseConfig: AppConfig = {
   theme: 'cyan',
   theme_color_a: '#48d7ff',
   theme_color_b: '#63e6a2',
-  ui_theme: 'ultimate-amv',
   background_image: '',
   background_scale: 1,
   background_offset_x: 50,

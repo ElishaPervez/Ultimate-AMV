@@ -1,22 +1,20 @@
 /* ============================================================
-   Ultimate-AMV  (theme layer) — DEFAULT / headline theme
+   App look (theme layer)
    ============================================================
-   The new visual direction. This file is the WORKED EXAMPLE for
-   theme authors (see src/themes/README.md): it shows the two tools a
-   theme has — (1) redefine :root design tokens for a broad reskin,
-   and (2) override specific selectors for targeted polish.
+   The Ultimate-AMV visual direction, applied statically. Two tools:
+   (1) redefine :root design tokens for the broad reskin, and
+   (2) override specific selectors for targeted polish.
 
-   Everything here lives in the `theme` cascade layer, so it beats the
-   `base` layer without a single !important. The accent COLOUR sub-axis
-   (Settings -> Appearance) still works on top: a user's saved accent
-   is applied as inline :root styles after this theme, so it wins over
-   the --theme-accent-* defaults below.
+   Everything here lives in the `theme` cascade layer (declared in
+   src/styles.css), so it beats the `base` layer without a single
+   !important. The accent COLOUR sub-axis (Settings -> Appearance)
+   still works on top: a user's saved accent is applied as inline
+   :root styles, so it wins over the --theme-accent-* defaults below.
    ============================================================ */
 
 /* ---- 1. TOKEN REDEFINITION (broad reskin) ----------------- */
-:root[data-theme-id="ultimate-amv"] {
-  /* New accent: an electric indigo -> aqua pair, distinct from the
-     classic cyan/mint of "Old". */
+:root {
+  /* Accent: an electric indigo -> aqua pair. */
   --theme-accent-rgb: 124 130 255;
   --theme-accent-2-rgb: 86 214 230;
   --theme-accent-contrast: #0a0b18;
@@ -36,24 +34,24 @@
   --radius-md: 12px;
 }
 
-/* Deep indigo page background so the new palette reads even with no
+/* Deep indigo page background so the palette reads even with no
    wallpaper set. (Skipped when a user background image/video is active —
    .has-app-bg keeps those surfaces transparent in the base layer, and we
    don't fight it here.) */
-:root[data-theme-id="ultimate-amv"]:not(.has-app-bg) body,
-:root[data-theme-id="ultimate-amv"]:not(.has-app-bg) #root,
-:root[data-theme-id="ultimate-amv"]:not(.has-app-bg) .desktop {
+:root:not(.has-app-bg) body,
+:root:not(.has-app-bg) #root,
+:root:not(.has-app-bg) .desktop {
   background:
     radial-gradient(1200px 800px at 85% -10%, rgba(124, 130, 255, 0.10), transparent 55%),
     radial-gradient(1000px 700px at -10% 110%, rgba(86, 214, 230, 0.08), transparent 55%),
     #07070f;
 }
 
-/* ---- 2. TARGETED OVERRIDES (new-direction polish) --------- */
+/* ---- 2. TARGETED OVERRIDES (polish) ----------------------- */
 
 /* Sidebar: tinted glass + accent-tinted left edge instead of the flat
    classic panel. */
-:root[data-theme-id="ultimate-amv"] .sidebar {
+.sidebar {
   background: linear-gradient(
     180deg,
     rgba(20, 22, 42, 0.82),
@@ -62,50 +60,49 @@
   border-right: 1px solid rgb(var(--theme-accent-rgb) / 0.16);
 }
 
-:root[data-theme-id="ultimate-amv"] .sidebar-brand-badge {
+.sidebar-brand-badge {
   background: rgb(var(--theme-accent-rgb) / 0.18);
   color: rgb(var(--theme-accent-rgb));
   border: 1px solid rgb(var(--theme-accent-rgb) / 0.35);
 }
 
 /* Active nav items get a soft accent wash + accent indicator. */
-:root[data-theme-id="ultimate-amv"] .sidebar-home.is-active,
-:root[data-theme-id="ultimate-amv"] .sidebar-subitem.is-active,
-:root[data-theme-id="ultimate-amv"] .sidebar-group-header.is-active {
+.sidebar-home.is-active,
+.sidebar-subitem.is-active,
+.sidebar-group-header.is-active {
   background: rgb(var(--theme-accent-rgb) / 0.14);
   box-shadow: inset 2px 0 0 rgb(var(--theme-accent-rgb));
 }
 
 /* Focus panel / glass cards: more pronounced rounding + accent-tinted hairline. */
-:root[data-theme-id="ultimate-amv"] .focus-panel,
-:root[data-theme-id="ultimate-amv"] .glass,
-:root[data-theme-id="ultimate-amv"] .glass-strong {
+.focus-panel,
+.glass,
+.glass-strong {
   border-radius: var(--radius-xl);
   border: 1px solid rgb(var(--theme-accent-rgb) / 0.12);
 }
 
 /* Settings surfaces keep their tight base corners: radius-xl sweeps far
    past the small-radius pills/rows nested inside and reads misaligned. */
-:root[data-theme-id="ultimate-amv"] .settings-tab-bar.glass,
-:root[data-theme-id="ultimate-amv"] .settings-group.glass {
+.settings-tab-bar.glass,
+.settings-group.glass {
   border-radius: 12px;
 }
 
 /* Active mode tab: filled accent pill rather than the classic outline. */
-:root[data-theme-id="ultimate-amv"] .mode-tab.is-active {
+.mode-tab.is-active {
   background: rgb(var(--theme-accent-rgb) / 0.18);
   border-color: rgb(var(--theme-accent-rgb) / 0.45);
   color: var(--ink);
 }
 
-/* ---- 3. AUDIO-PANEL NEW DIRECTION ------------------------- */
-/* The new audio panel (NewAudioExtractionPanel) renders under every theme
-   except "Old". Here we nudge its cards toward the new rounded, indigo feel
-   so the headline theme's audio screen matches the rest. Selectors target
-   classes already in the base new-audio.css. */
-:root[data-theme-id="ultimate-amv"] .new-audio-card,
-:root[data-theme-id="ultimate-amv"] .na-card,
-:root[data-theme-id="ultimate-amv"] .na-panel {
+/* ---- 3. AUDIO PANEL ---------------------------------------- */
+/* Nudge the audio panel cards toward the rounded, indigo feel so the
+   audio screen matches the rest. Selectors target classes already in
+   the base new-audio.css. */
+.new-audio-card,
+.na-card,
+.na-panel {
   border-radius: var(--radius-lg);
   border: 1px solid rgb(var(--theme-accent-rgb) / 0.14);
   background: rgba(18, 20, 38, 0.6);

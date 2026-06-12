@@ -34,10 +34,9 @@ export function readThemeColors(config: Partial<Pick<AppConfig, "theme" | "theme
 /**
  * Did the user deliberately pick an accent through the UI?
  *
- * The accent axis is orthogonal to the engine (CSS) theme. When it's NOT
- * explicitly chosen, the active engine theme's own accent (defined in its
- * `theme.css`) should show — so the inline `:root` override must be skipped,
- * since inline styles beat any cascade layer.
+ * When the accent is NOT explicitly chosen, the theme stylesheet's own accent
+ * (defined in styles/theme.css) should show — so the inline `:root` override
+ * must be skipped, since inline styles beat any cascade layer.
  *
  * Detection rule: in the current UI, picking a preset swatch OR a custom
  * color in AppearanceSettings persists `theme_color_a`/`theme_color_b` and
@@ -45,7 +44,7 @@ export function readThemeColors(config: Partial<Pick<AppConfig, "theme" | "theme
  * instead stored the picked preset as a named id ("mint", "violet", …)
  * without flipping — that was still a deliberate choice, so any named preset
  * other than the factory default also counts. Only a fresh/default config
- * (`theme: "cyan"`) defers to the engine theme's own accent.
+ * (`theme: "cyan"`) defers to the theme stylesheet's own accent.
  */
 export function hasExplicitAccent(
   config: Partial<Pick<AppConfig, "theme">> | null | undefined,

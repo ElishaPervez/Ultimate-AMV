@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
 import { logFrontend, safeLogValue } from "./lib/log";
-import { ThemeProvider } from "./themes/engine/ThemeProvider";
 import { Root } from "./shell/Root";
 
 function installFrontendLogHandlers() {
@@ -26,8 +25,6 @@ installFrontendLogHandlers();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ThemeProvider>
-      <Root />
-    </ThemeProvider>
+    <Root />
   </React.StrictMode>
 );

@@ -42,7 +42,6 @@ import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
 import { HomePanel } from "../features/home/HomePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
-import { useActiveTheme } from "../themes/engine/ThemeProvider";
 import { WindowChrome } from "./WindowChrome";
 
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
@@ -208,20 +207,6 @@ export function App() {
   // SettingsPanel's refreshConfig would race the still-in-flight set_config
   // write and re-fetch the pre-change colors from disk.
   const [themeColors, setThemeColors] = React.useState(() => readThemeColors(null));
-  // Engine (CSS) theme — separate axis from the accent colors above. The
-  // sidebar Theme dropdown drives this; accent presets live in Settings ->
-  // Appearance.
-  const { themes: engineThemes, activeId: activeThemeId, switchTheme: switchEngineTheme, refresh: refreshEngineThemes } = useActiveTheme();
-  const [themePickerOpen, setThemePickerOpen] = React.useState(false);
-  const themePickerOpenRef = React.useRef(false);
-  React.useEffect(() => {
-    themePickerOpenRef.current = themePickerOpen;
-  }, [themePickerOpen]);
-  const themePickerRef = React.useRef<HTMLDivElement | null>(null);
-  const currentThemeName = React.useMemo(() => {
-    const match = engineThemes.find((t) => t.id === activeThemeId);
-    return match?.name ?? activeThemeId;
-  }, [engineThemes, activeThemeId]);
   const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({
     media: true,
     downloads: false,
@@ -299,12 +284,11 @@ export function App() {
         const payload = parseBridgePayload<AppConfig>(raw);
         const colors = readThemeColors(payload);
         setThemeColors(colors);
-        // The accent color is an orthogonal sub-axis applied on top of whichever
-        // engine theme is active. Only push the inline `:root` override when the
-        // user has DELIBERATELY picked an accent (preset or custom) through
-        // Settings -> Appearance — inline styles beat any cascade layer, so on a
-        // fresh/legacy config we leave them off and let the active engine theme's
-        // own accent (defined in its theme.css `theme` layer) show.
+        // The accent color is a sub-axis applied on top of the app's look. Only
+        // push the inline `:root` override when the user has DELIBERATELY picked
+        // an accent (preset or custom) through Settings -> Appearance — inline
+        // styles beat any cascade layer, so on a fresh/legacy config we leave
+        // them off and let the theme stylesheet's own accent show.
         if (hasExplicitAccent(payload)) {
           applyAppTheme(colors);
         }
@@ -333,50 +317,6 @@ export function App() {
       window.removeEventListener("bg-customize-open", onBgOpen);
     };
   }, []);
-
-  React.useEffect(() => {
-    if (!themePickerOpen) return;
-    const handler = (event: MouseEvent) => {
-      if (themePickerRef.current && !themePickerRef.current.contains(event.target as Node)) {
-        setThemePickerOpen(false);
-      }
-    };
-    const escapeHandler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setThemePickerOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", escapeHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", escapeHandler);
-    };
-  }, [themePickerOpen]);
-
-  const handleToggleThemePicker = React.useCallback(() => {
-    setThemePickerOpen((prev) => {
-      const next = !prev;
-      if (next) {
-        // Re-scan disk on open so external drop-in themes added while the app is
-        // running show up without a restart. Fire-and-forget: refresh() swallows
-        // scan errors and never disturbs the current selection; the guard drops
-        // the result if the picker was closed again before the scan resolved.
-        void refreshEngineThemes(() => themePickerOpenRef.current);
-      }
-      return next;
-    });
-  }, [refreshEngineThemes]);
-
-  const handleSelectEngineTheme = React.useCallback(
-    (id: string) => {
-      setThemePickerOpen(false);
-      // Engine (CSS) theme and accent color are orthogonal axes: switching the
-      // engine theme must not touch the accent. An explicit custom accent
-      // persists across themes (and still wins over the theme); if the user
-      // never set one, each theme's own `theme.css` accent shows through.
-      void switchEngineTheme(id);
-    },
-    [switchEngineTheme],
-  );
 
   const modeTabs = isHome
     ? ([{ id: "home", label: "Home" }] as const)
@@ -605,39 +545,6 @@ export function App() {
                 <ScrollText size={16} />
                 <span>Logs</span>
               </button>
-            </div>
-
-            <div className="sidebar-theme-row" ref={themePickerRef}>
-              <span className="sidebar-theme-label">GUI System</span>
-              <button
-                type="button"
-                className="sidebar-theme-select"
-                onClick={handleToggleThemePicker}
-              >
-                <span className="sidebar-theme-dot" />
-                <span className="sidebar-theme-name">{currentThemeName}</span>
-                <ChevronDown size={12} className={`sidebar-theme-chevron ${themePickerOpen ? "is-open" : ""}`} />
-              </button>
-              {themePickerOpen && (
-                <div className="sidebar-theme-dropdown">
-                  {engineThemes.map((theme) => (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      className={`sidebar-theme-option ${theme.id === activeThemeId ? "is-active" : ""}`}
-                      onClick={() => handleSelectEngineTheme(theme.id)}
-                      title={theme.description ?? theme.name}
-                    >
-                      <span
-                        className="sidebar-theme-swatch"
-                        style={{ background: "var(--accent-gradient)" }}
-                      />
-                      <span className="sidebar-theme-name-text">{theme.name}</span>
-                      {!theme.builtin && <span className="sidebar-theme-tag">drop-in</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div className="sidebar-help-card">
