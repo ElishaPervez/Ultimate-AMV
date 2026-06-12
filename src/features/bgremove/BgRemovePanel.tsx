@@ -2,7 +2,7 @@ import React from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Cpu, Film, Sparkles, Upload, Video, Eye, RefreshCw, Sliders, Columns, AlertTriangle, CheckCircle2, Image } from "lucide-react";
+import { Cpu, Film, Sparkles, Upload, Video, Eye, RefreshCw, Sliders, Columns, AlertTriangle, CheckCircle2, ChevronDown, Image } from "lucide-react";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, normalizeSelectedPaths } from "../../lib/paths";
@@ -91,6 +91,7 @@ export function BgRemovePanel({
   const [forceCpu, setForceCpu] = React.useState<boolean>(false);
   const [progress, setProgress] = React.useState<BgRemoveProgress | null>(null);
   const [fileTypeWarning, setFileTypeWarning] = React.useState<string | null>(null);
+  const [showTips, setShowTips] = React.useState(false);
   const [processing, setProcessing] = React.useState(false);
   const [resultMessage, setResultMessage] = React.useState<string | null>(null);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -664,51 +665,6 @@ export function BgRemovePanel({
             />
           )}
 
-          {/* Tips Card */}
-          <div
-            className="glass"
-            style={{
-              padding: "20px",
-              borderRadius: "12px",
-              border: "1px solid rgba(255,255,255,0.06)",
-              background: "linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%)",
-            }}
-          >
-            <h4 style={{ margin: "0 0 10px 0", fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-              <Sparkles size={16} style={{ color: "var(--accent-a)" }} />
-              Workflow Tips
-            </h4>
-            <ul style={{ paddingLeft: "18px", margin: 0, fontSize: "13px", lineHeight: "1.7" }} className="dim-text">
-              {isImageTab ? (
-                <>
-                  <li>
-                    <strong>Instant Cutout Preview:</strong> Selecting an image automatically generates a transparency preview with side-by-side and interactive slider comparison modes.
-                  </li>
-                  <li>
-                    <strong>Fast Saving:</strong> Once a preview is generated, saving copies the cached preview file without repeating the AI segmentation process.
-                  </li>
-                  <li>
-                    <strong>Model Options:</strong> Choose lightweight models for fast processing, or detailed models for precise edge boundaries.
-                  </li>
-                </>
-              ) : (
-                <>
-                  <li>
-                    <strong>ProRes 4444 + Alpha:</strong> The transparent video format editors import natively (Premiere, After Effects, DaVinci Resolve). Use WebM only for OBS overlays and web pages.
-                  </li>
-                  <li>
-                    <strong>Frame Check:</strong> Generate an AI preview, then drag the &quot;Check frame&quot; slider to re-test the isolation on any frame of the video.
-                  </li>
-                  <li>
-                    <strong>Anime Characters:</strong> The Anime Character (isnet-anime) model is optimized specifically for cel-shaded boundary outlines.
-                  </li>
-                  <li>
-                    <strong>Hardware Acceleration:</strong> CUDA (GPU) acceleration is recommended to minimize frame processing times.
-                  </li>
-                </>
-              )}
-            </ul>
-          </div>
         </div>
 
         {/* Right Side: Options / Action */}
@@ -829,6 +785,103 @@ export function BgRemovePanel({
                 >
                   CPU Mode
                 </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Tips Card — fills the gap between the settings and the action
+              buttons; collapsed by default so the Video tab (which carries the
+              extra Export Format + preview controls) still fits one page */}
+          <div
+            className="glass"
+            style={{
+              padding: showTips ? "20px" : "12px 20px",
+              borderRadius: "12px",
+              border: "1px solid rgba(255,255,255,0.06)",
+              background: "linear-gradient(135deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.01) 100%)",
+              transition: "padding 380ms cubic-bezier(0.22, 1, 0.36, 1)",
+              marginTop: isImageTab ? "24px" : "16px",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setShowTips((open) => !open)}
+              aria-expanded={showTips}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: 0,
+                margin: 0,
+                border: "none",
+                background: "none",
+                color: "inherit",
+                font: "inherit",
+                fontSize: "14px",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              <Sparkles size={16} style={{ color: "var(--accent-a)" }} />
+              Workflow Tips
+              <ChevronDown
+                size={15}
+                style={{
+                  marginLeft: "auto",
+                  opacity: 0.65,
+                  transform: showTips ? "rotate(180deg)" : "none",
+                  transition: "transform 380ms cubic-bezier(0.22, 1, 0.36, 1)",
+                }}
+              />
+            </button>
+            {/* 0fr -> 1fr grid row: animates open to auto content height
+                without measuring; the inner overflow:hidden does the clip */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateRows: showTips ? "1fr" : "0fr",
+                transition: "grid-template-rows 380ms cubic-bezier(0.22, 1, 0.36, 1)",
+              }}
+            >
+              <div
+                style={{
+                  minHeight: 0,
+                  overflow: "hidden",
+                  opacity: showTips ? 1 : 0,
+                  transition: "opacity 300ms ease",
+                }}
+              >
+                <ul style={{ paddingLeft: "18px", margin: "10px 0 0", fontSize: "13px", lineHeight: "1.7" }} className="dim-text">
+                  {isImageTab ? (
+                    <>
+                      <li>
+                        <strong>Instant Cutout Preview:</strong> Selecting an image automatically generates a transparency preview with side-by-side and interactive slider comparison modes.
+                      </li>
+                      <li>
+                        <strong>Fast Saving:</strong> Once a preview is generated, saving copies the cached preview file without repeating the AI segmentation process.
+                      </li>
+                      <li>
+                        <strong>Model Options:</strong> Choose lightweight models for fast processing, or detailed models for precise edge boundaries.
+                      </li>
+                    </>
+                  ) : (
+                    <>
+                      <li>
+                        <strong>ProRes 4444 + Alpha:</strong> The transparent video format editors import natively (Premiere, After Effects, DaVinci Resolve). Use WebM only for OBS overlays and web pages.
+                      </li>
+                      <li>
+                        <strong>Frame Check:</strong> Generate an AI preview, then drag the &quot;Check frame&quot; slider to re-test the isolation on any frame of the video.
+                      </li>
+                      <li>
+                        <strong>Anime Characters:</strong> The Anime Character (isnet-anime) model is optimized specifically for cel-shaded boundary outlines.
+                      </li>
+                      <li>
+                        <strong>Hardware Acceleration:</strong> CUDA (GPU) acceleration is recommended to minimize frame processing times.
+                      </li>
+                    </>
+                  )}
+                </ul>
               </div>
             </div>
           </div>
