@@ -139,9 +139,15 @@ export function BgRemovePanel({
     void generatePreview();
   }, [selectedFile, model, forceCpu, otherTabBusy, isPreviewing, processing]);
 
+  // The status CLI imports torch and probes CUDA — too heavy to spawn for
+  // two permanently-mounted instances at app start, so defer the fetch to
+  // the first time this tab is shown.
+  const statusFetchedRef = React.useRef(false);
   React.useEffect(() => {
+    if (!active || statusFetchedRef.current) return;
+    statusFetchedRef.current = true;
     void refreshStatus();
-  }, []);
+  }, [active]);
 
   React.useEffect(() => {
     setDiscordJob("Isolating background", processing);
@@ -456,9 +462,11 @@ export function BgRemovePanel({
       }>(raw);
 
       if (payload.type === "preview_done") {
+        // The preview PNGs are rewritten at fixed paths each run; the query
+        // param defeats the webview's cache of the previous ones.
         setPreviewData({
-          original: convertFileSrc(payload.original),
-          isolated: convertFileSrc(payload.isolated),
+          original: `${convertFileSrc(payload.original)}?v=${Date.now()}`,
+          isolated: `${convertFileSrc(payload.isolated)}?v=${Date.now()}`,
           frame: payload.frame,
           totalFrames: payload.totalFrames ?? 1,
           elapsedSeconds: payload.elapsedSeconds,

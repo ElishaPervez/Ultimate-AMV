@@ -643,8 +643,8 @@ export function App() {
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
                   {/* Both isolate tabs stay mounted so switching tabs never
                       discards an in-flight job or generated preview. */}
-                  <BgRemovePanel mode="video" active={bgRemoveTab === "video"} onRequestTab={setBgRemoveTab} />
-                  <BgRemovePanel mode="image" active={bgRemoveTab === "image"} onRequestTab={setBgRemoveTab} />
+                  <BgRemovePanel mode="video" active={isBgRemoval && bgRemoveTab === "video"} onRequestTab={setBgRemoveTab} />
+                  <BgRemovePanel mode="image" active={isBgRemoval && bgRemoveTab === "image"} onRequestTab={setBgRemoveTab} />
                 </div>
                 <div className={`panel-view spring-motion ${isTsukyio ? "is-active" : "is-hidden"}`} aria-hidden={!isTsukyio}>
                   <TsukyioPanel active={isTsukyio} onOpenSettings={() => setActive("settings")} />
