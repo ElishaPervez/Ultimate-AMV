@@ -199,6 +199,23 @@ fn clamp_quality(quality: Option<i32>, min: i32, max: i32, default: i32) -> i32 
     }
 }
 
+// Corrected (start, duration) for a clip cut. The 1.5/fps offset guarantees we
+// skip the last frame of the previous clip, which is often included due to
+// exact-boundary floating-point rounding; non-trivial durations are trimmed by
+// 15ms for the same reason at the tail.
+fn padded_clip_range(clip: &ExportClip) -> (f64, f64) {
+    let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
+    let offset = 1.5 / fps;
+    let start = clip.start + offset;
+    let raw_duration = (clip.end - start).max(0.0);
+    let duration = if raw_duration > 0.05 {
+        raw_duration - 0.015
+    } else {
+        raw_duration
+    };
+    (start, duration)
+}
+
 fn run_clip_export(
     window: tauri::Window,
     clips: Vec<ExportClip>,
@@ -237,17 +254,7 @@ fn run_clip_export(
             "-nostdin".to_string(),
         ];
 
-        let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
-        let offset = 1.5 / fps;
-        // The offset guarantees we skip the last frame of the previous clip
-        // which is often included due to exact-boundary floating-point rounding.
-        let export_start = clip.start + offset;
-        let raw_duration = (clip.end - export_start).max(0.0);
-        let export_duration = if raw_duration > 0.05 {
-            raw_duration - 0.015
-        } else {
-            raw_duration
-        };
+        let (export_start, export_duration) = padded_clip_range(clip);
 
         let input_args = vec![
             "-ss".to_string(),
@@ -651,11 +658,7 @@ fn run_clip_export_merged(
     let mut total_duration = 0.0_f64;
     for (i, clip) in clips.iter().enumerate() {
         let input_idx = input_index_for_clip[i];
-        let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
-        let offset = 1.5 / fps;
-        let start = clip.start + offset;
-        let raw_duration = (clip.end - start).max(0.0);
-        let duration = if raw_duration > 0.05 { raw_duration - 0.015 } else { raw_duration };
+        let (start, duration) = padded_clip_range(clip);
         total_duration += duration;
         filter_parts.push(format!(
             "[{input_idx}:v]trim=start={start:.3}:duration={duration:.3},setpts=PTS-STARTPTS[v{i}]"
@@ -930,11 +933,7 @@ fn run_lossless_cut_merge(
 
     for (i, clip) in clips.iter().enumerate() {
         let input = &input_paths[input_index_for_clip[i]];
-        let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
-        let offset = 1.5 / fps;
-        let start = clip.start + offset;
-        let raw_duration = (clip.end - start).max(0.0);
-        let duration = if raw_duration > 0.05 { raw_duration - 0.015 } else { raw_duration };
+        let (start, duration) = padded_clip_range(clip);
         total_duration += duration;
 
         let segment = temp_dir.join(format!("seg_{i:04}.mkv"));
@@ -2187,11 +2186,7 @@ fn run_clip_preview_merge(
     if output.metadata().map(|m| m.len() > 1024).unwrap_or(false) {
         let mut total_duration = 0.0_f64;
         for clip in &clips {
-            let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
-            let offset = 1.5 / fps;
-            let start = clip.start + offset;
-            let raw_duration = (clip.end - start).max(0.0);
-            let duration = if raw_duration > 0.05 { raw_duration - 0.015 } else { raw_duration };
+            let (_, duration) = padded_clip_range(clip);
             total_duration += duration;
         }
         return serialize_clip_preview_done("merged-preview".to_string(), output, total_duration, true);
@@ -2237,11 +2232,7 @@ fn run_clip_preview_merge(
     let mut total_duration = 0.0_f64;
     for (i, clip) in clips.iter().enumerate() {
         let input_idx = input_index_for_clip[i];
-        let fps = clip.fps.filter(|f| *f > 0.0).unwrap_or(24.0);
-        let offset = 1.5 / fps;
-        let start = clip.start + offset;
-        let raw_duration = (clip.end - start).max(0.0);
-        let duration = if raw_duration > 0.05 { raw_duration - 0.015 } else { raw_duration };
+        let (start, duration) = padded_clip_range(clip);
         total_duration += duration;
         filter_parts.push(format!(
             "[{input_idx}:v]trim=start={start:.3}:duration={duration:.3},setpts=PTS-STARTPTS[v{i}]"
@@ -2288,7 +2279,50 @@ fn run_clip_preview_merge(
     let use_nvenc = *H264_NVENC_AVAILABLE
         .get_or_init(|| ffmpeg_listing(&ffmpeg, "-encoders").contains("h264_nvenc"));
 
-    let encode_args: Vec<String> = if use_nvenc {
+    let primary_result = run_preview_merge_encode(
+        &ffmpeg,
+        &args,
+        preview_merge_encode_args(use_nvenc),
+        any_has_audio,
+        &temp_output,
+    );
+    if let Err(primary_error) = primary_result {
+        if use_nvenc && primary_error != PREVIEW_MERGE_CANCELLED {
+            log_warn(
+                "clip.preview_merge.fallback",
+                "Preview merge NVENC failed; retrying with libx264 software encoder",
+                json!({ "error": &primary_error }),
+            );
+            run_preview_merge_encode(
+                &ffmpeg,
+                &args,
+                preview_merge_encode_args(false),
+                any_has_audio,
+                &temp_output,
+            )?;
+        } else {
+            return Err(primary_error);
+        }
+    }
+
+    if !temp_output.metadata().map(|m| m.len() > 1024).unwrap_or(false) {
+        let _ = fs::remove_file(&temp_output);
+        return Err("FFmpeg did not create a valid merged preview file.".to_string());
+    }
+
+    if output.exists() {
+        let _ = fs::remove_file(&output);
+    }
+    fs::rename(&temp_output, &output)
+        .map_err(|error| format!("Could not finalize merged preview: {error}"))?;
+
+    serialize_clip_preview_done("merged-preview".to_string(), output, total_duration, false)
+}
+
+const PREVIEW_MERGE_CANCELLED: &str = "Preview merge cancelled.";
+
+fn preview_merge_encode_args(use_nvenc: bool) -> Vec<String> {
+    if use_nvenc {
         vec![
             "-c:v".to_string(),
             "h264_nvenc".to_string(),
@@ -2310,9 +2344,17 @@ fn run_clip_preview_merge(
             "-pix_fmt".to_string(),
             "yuv420p".to_string(),
         ]
-    };
+    }
+}
 
-    let mut final_args = args.clone();
+fn run_preview_merge_encode(
+    ffmpeg: &Path,
+    base_args: &[String],
+    encode_args: Vec<String>,
+    any_has_audio: bool,
+    temp_output: &Path,
+) -> Result<(), String> {
+    let mut final_args = base_args.to_vec();
     final_args.extend(encode_args);
     if any_has_audio {
         final_args.extend([
@@ -2332,33 +2374,31 @@ fn run_clip_preview_merge(
         temp_output.to_string_lossy().to_string(),
     ]);
 
-    let _ = fs::remove_file(&temp_output);
-    let result = cmd(&ffmpeg)
+    let _ = fs::remove_file(temp_output);
+    let child = cmd(ffmpeg)
         .args(final_args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("Could not start ffmpeg for preview merge: {error}"))?;
+    store_child_pid(&CLIP_CHILD_PID, child.id());
+    let wait_result = child.wait_with_output();
+    clear_child_pid(&CLIP_CHILD_PID);
+    let result =
+        wait_result.map_err(|error| format!("Could not run ffmpeg for preview merge: {error}"))?;
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        let _ = fs::remove_file(&temp_output);
+        let _ = fs::remove_file(temp_output);
+        if result.status.code().is_none() || result.status.code() == Some(1) && stderr.is_empty() {
+            return Err(PREVIEW_MERGE_CANCELLED.to_string());
+        }
         return Err(if stderr.is_empty() {
             format!("FFmpeg exited with code {}", result.status.code().unwrap_or(-1))
         } else {
             stderr
         });
     }
-
-    if !temp_output.metadata().map(|m| m.len() > 1024).unwrap_or(false) {
-        let _ = fs::remove_file(&temp_output);
-        return Err("FFmpeg did not create a valid merged preview file.".to_string());
-    }
-
-    if output.exists() {
-        let _ = fs::remove_file(&output);
-    }
-    fs::rename(&temp_output, &output)
-        .map_err(|error| format!("Could not finalize merged preview: {error}"))?;
-
-    serialize_clip_preview_done("merged-preview".to_string(), output, total_duration, false)
+    Ok(())
 }
 

@@ -646,10 +646,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
   }, [activeGridClipIds, clipMode, clips, gridPreview, hasClips, previewStates]);
 
-  async function startExtraction(overrideVideos?: string[], options?: { force?: boolean }) {
+  async function startExtraction(overrideVideos?: string[], options?: { force?: boolean; proxies?: Record<string, string> }) {
     const videos = overrideVideos ?? selectedVideos;
     if (videos.length === 0 || isExtracting) return;
     const force = options?.force ?? false;
+    const proxies = options?.proxies ?? detectorProxies;
 
     // GPU mode no longer blocks on a codec preflight. The Python backend
     // routes any codec NVDEC/nelux can't decode straight to software decode ->
@@ -715,7 +716,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         const rawPath = videos[index];
         // Feed the detector the proxy if one exists for this raw (manual
         // last-resort convert), but everything user-facing stays on the raw.
-        const detectInput = detectorProxies[rawPath] ?? rawPath;
+        const detectInput = proxies[rawPath] ?? rawPath;
         const inputPath = detectInput;
         clipBatchProgressRef.current = {
           activeIndex: index,
@@ -817,13 +818,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       // the detector, but scene sources are rewritten back to the raw so
       // preview/export never touch the lossy proxy. The badge keys off the
       // raw path so the user still sees the "converted for detection" marker.
+      const nextProxies = { ...detectorProxies, [failedPath]: convertedPath };
       setConvertedSources((current) => ({ ...current, [failedPath]: originalName }));
-      setDetectorProxies((current) => ({ ...current, [failedPath]: convertedPath }));
+      setDetectorProxies(nextProxies);
       setCompatModal(null);
       setConvertMessage(null);
       setIsConverting(false);
       // selectedVideos already holds the raw at failedIndex; just re-run.
-      void startExtraction(selectedVideos, { force: true });
+      void startExtraction(selectedVideos, { force: true, proxies: nextProxies });
     } catch (convertError) {
       const errorText = readBridgeError(convertError);
       setError(errorText);
