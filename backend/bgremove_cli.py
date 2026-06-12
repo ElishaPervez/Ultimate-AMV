@@ -106,9 +106,10 @@ def process(input_file, output_file, model_key, export_format, force_cpu, showca
         # Execute background removal
         fps = None
         showcase_file = None
+        cpu_fallback = None
         try:
             if is_image:
-                remove_background_frame(
+                cpu_fallback = remove_background_frame(
                     input_image_path=str(input_path),
                     output_image_path=str(output_path),
                     model_key=model_key,
@@ -116,7 +117,7 @@ def process(input_file, output_file, model_key, export_format, force_cpu, showca
                 )
                 total_frames = 1
             else:
-                total_frames, fps, showcase_file = remove_background_video(
+                total_frames, fps, showcase_file, cpu_fallback = remove_background_video(
                     input_path=str(input_path),
                     output_path=str(output_path),
                     model_key=model_key,
@@ -131,7 +132,7 @@ def process(input_file, output_file, model_key, export_format, force_cpu, showca
                 raise
             on_progress("dependencies", -1, "Retrying process after dependency repair...")
             if is_image:
-                remove_background_frame(
+                cpu_fallback = remove_background_frame(
                     input_image_path=str(input_path),
                     output_image_path=str(output_path),
                     model_key=model_key,
@@ -139,7 +140,7 @@ def process(input_file, output_file, model_key, export_format, force_cpu, showca
                 )
                 total_frames = 1
             else:
-                total_frames, fps, showcase_file = remove_background_video(
+                total_frames, fps, showcase_file, cpu_fallback = remove_background_video(
                     input_path=str(input_path),
                     output_path=str(output_path),
                     model_key=model_key,
@@ -150,12 +151,19 @@ def process(input_file, output_file, model_key, export_format, force_cpu, showca
                 )
             
         elapsed = time.perf_counter() - started_at
+        if cpu_fallback:
+            add_log(
+                "bgremove.gpu_fallback",
+                cpu_fallback,
+                level="warning",
+                details={"input": str(input_path)}
+            )
         add_log(
             "bgremove.complete",
             f"Background removal complete for {input_path.name}",
             details={"input": str(input_path), "output": str(output_path), "frames": total_frames}
         )
-        
+
         emit({
             "type": "done",
             "input": str(input_path),
@@ -163,6 +171,7 @@ def process(input_file, output_file, model_key, export_format, force_cpu, showca
             "frames": total_frames,
             "fps": fps,
             "showcase": showcase_file,
+            "cpuFallback": bool(cpu_fallback),
             "elapsedSeconds": round(elapsed, 2)
         })
         return 0
@@ -228,8 +237,16 @@ def preview(input_file, output_dir, model_key, frame_index, force_cpu):
             extract_single_frame(str(input_path), str(orig_path), frame_to_use)
         
         on_progress("preview-isolate", 60, "Running AI character isolation on frame...")
-        remove_background_frame(str(orig_path), str(isolated_path), model_key, force_cpu=force_cpu)
-        
+        cpu_fallback = remove_background_frame(str(orig_path), str(isolated_path), model_key, force_cpu=force_cpu)
+
+        if cpu_fallback:
+            add_log(
+                "bgremove.gpu_fallback",
+                cpu_fallback,
+                level="warning",
+                details={"input": str(input_path)}
+            )
+
         elapsed = time.perf_counter() - started_at
         emit({
             "type": "preview_done",
@@ -237,6 +254,7 @@ def preview(input_file, output_dir, model_key, frame_index, force_cpu):
             "isolated": str(isolated_path),
             "frame": frame_to_use,
             "totalFrames": total_frames,
+            "cpuFallback": bool(cpu_fallback),
             "elapsedSeconds": round(elapsed, 2)
         })
         return 0

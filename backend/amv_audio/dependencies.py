@@ -89,8 +89,8 @@ KNOWN_MODULE_PACKAGES = {
     "typing_extensions": "typing_extensions",
 }
 
-# GPU runtimes need extras-form installs: the plain package would drag the
-# CPU onnxruntime chain in next to onnxruntime-gpu and break the CUDA provider.
+# GPU runtimes need extras-form installs: recent rembg ships onnxruntime only
+# behind its extras, so [gpu] is what guarantees onnxruntime-gpu lands with it.
 GPU_MODULE_PACKAGES = {
     "rembg": "rembg[gpu]>=2.0.50",
 }
@@ -186,6 +186,35 @@ def _run_pip_install(args, progress_callback=None):
         raise RuntimeError(summary)
 
 
+def _run_pip_uninstall(packages, progress_callback=None):
+    _ensure_pip(progress_callback)
+    cmd = [sys.executable, "-I", "-m", "pip", "uninstall", "-y", *packages]
+    append_terminal_log(f"$ {' '.join(cmd)}")
+    add_log("deps.repair.step", "Removing conflicting packages", details={"command": cmd})
+    if progress_callback:
+        progress_callback("dependency-repair", -1, f"Removing {' '.join(packages)}...")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        encoding="utf-8",
+        errors="replace",
+    )
+    output_lines = [
+        line.rstrip()
+        for line in ((result.stdout or "") + (result.stderr or "")).splitlines()
+        if line.strip()
+    ]
+    for line in output_lines:
+        append_terminal_log(line)
+    if result.returncode != 0:
+        summary = _summarize_command_error(output_lines, result.returncode)
+        add_log("deps.repair.step.error", "Package removal failed", level="error", details={"error": summary})
+        raise RuntimeError(summary)
+
+
 def _ensure_pip(progress_callback=None):
     try:
         result = subprocess.run(
@@ -276,17 +305,51 @@ def _onnxruntime_import_error():
         return f"{type(exc).__name__}: {exc}"
 
 
-def _runtime_ready(gpu):
-    if gpu and not _package_exists("onnxruntime-gpu"):
+def _ort_cuda_probe():
+    # Probe in a subprocess: importing onnxruntime here would pin its DLLs in
+    # this process, and Windows would then block the pip uninstall/reinstall a
+    # failed probe leads to.
+    code = (
+        "import sys, onnxruntime; "
+        "sys.exit(0 if 'CUDAExecutionProvider' in onnxruntime.get_available_providers() else 1)"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", code],
+            capture_output=True,
+            timeout=120,
+        )
+        return result.returncode == 0
+    except Exception:
         return False
-    return _onnxruntime_import_error() is None
 
 
-def _install_runtime(gpu, progress_callback=None, force=False):
-    args = ["onnxruntime-gpu" if gpu else "onnxruntime"]
-    if force:
-        args.extend(["--upgrade", "--force-reinstall"])
-    _run_pip_install(args, progress_callback)
+def _runtime_ready(gpu):
+    if not gpu:
+        return _onnxruntime_import_error() is None
+    if not _package_exists("onnxruntime-gpu"):
+        return False
+    if _package_exists("onnxruntime"):
+        # Both runtime dists registered: they ship the same onnxruntime module
+        # directory, so whichever installed last owns the files and pip's
+        # metadata is stale. Treat as broken so the repair reinstalls cleanly.
+        return False
+    # Dist metadata alone can lie (a CPU build may have clobbered the files),
+    # so ask the installed module which providers its build actually has.
+    return _ort_cuda_probe()
+
+
+def _install_runtime(gpu, progress_callback=None):
+    # onnxruntime and onnxruntime-gpu ship the same module directory, so
+    # installing one next to the other leaves two dists claiming the same
+    # files and the loser's metadata lying about what is on disk. Remove
+    # whatever runtime dists exist before installing the wanted one.
+    installed = [
+        name for name in ("onnxruntime", "onnxruntime-gpu") if _package_exists(name)
+    ]
+    if installed:
+        _run_pip_uninstall(installed, progress_callback)
+    _run_pip_install(["onnxruntime-gpu" if gpu else "onnxruntime"], progress_callback)
 
 
 def missing_feature_dependencies(feature, gpu=False):
@@ -341,7 +404,7 @@ def ensure_feature_dependencies(feature, gpu=False, progress_callback=None):
         _install_torch(gpu, progress_callback, force=_module_exists("torch"))
 
     if any(module == "onnxruntime" for module, _package in missing):
-        _install_runtime(gpu, progress_callback, force=_module_exists("onnxruntime"))
+        _install_runtime(gpu, progress_callback)
 
     pip_packages = []
     for module_name, package_name in missing:

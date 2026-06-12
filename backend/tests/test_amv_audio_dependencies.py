@@ -221,6 +221,66 @@ def test_repair_missing_module_rembg_cpu_installs_plain_package(mocker):
 
 
 # ---------------------------------------------------------------------------
+# _install_runtime — onnxruntime and onnxruntime-gpu may never coexist
+# ---------------------------------------------------------------------------
+
+
+def test_install_runtime_uninstalls_existing_dists_first(mocker):
+    """Both runtime dists ship the same module path; installing one over the
+    other corrupts pip's view of what is on disk. The repair must wipe both
+    before installing the wanted variant."""
+    mock_uninstall = mocker.patch("amv_audio.dependencies._run_pip_uninstall")
+    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mocker.patch("amv_audio.dependencies._package_exists", return_value=True)
+
+    deps_mod._install_runtime(gpu=True)
+
+    assert mock_uninstall.call_args[0][0] == ["onnxruntime", "onnxruntime-gpu"]
+    assert mock_pip.call_args[0][0] == ["onnxruntime-gpu"]
+
+
+def test_install_runtime_skips_uninstall_when_nothing_installed(mocker):
+    mock_uninstall = mocker.patch("amv_audio.dependencies._run_pip_uninstall")
+    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mocker.patch("amv_audio.dependencies._package_exists", return_value=False)
+
+    deps_mod._install_runtime(gpu=False)
+
+    mock_uninstall.assert_not_called()
+    assert mock_pip.call_args[0][0] == ["onnxruntime"]
+
+
+# ---------------------------------------------------------------------------
+# _runtime_ready(gpu=True) — must not trust stale dist metadata
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_ready_gpu_false_when_gpu_package_missing(mocker):
+    mocker.patch("amv_audio.dependencies._package_exists", return_value=False)
+    assert deps_mod._runtime_ready(True) is False
+
+
+def test_runtime_ready_gpu_false_when_both_dists_registered(mocker):
+    """A CPU onnxruntime next to onnxruntime-gpu means one clobbered the
+    other's files; readiness must report broken so the repair re-fires."""
+    mocker.patch("amv_audio.dependencies._package_exists", return_value=True)
+    probe = mocker.patch("amv_audio.dependencies._ort_cuda_probe")
+    assert deps_mod._runtime_ready(True) is False
+    probe.assert_not_called()
+
+
+def test_runtime_ready_gpu_consults_cuda_probe_when_clean(mocker):
+    def fake_package_exists(name):
+        return name == "onnxruntime-gpu"
+    mocker.patch("amv_audio.dependencies._package_exists", side_effect=fake_package_exists)
+    mocker.patch("amv_audio.dependencies._ort_cuda_probe", return_value=False)
+    assert deps_mod._runtime_ready(True) is False
+
+    mocker.patch("amv_audio.dependencies._ort_cuda_probe", return_value=True)
+    assert deps_mod._runtime_ready(True) is True
+
+
+# ---------------------------------------------------------------------------
 # KNOWN_MODULE_PACKAGES completeness spot-check
 # ---------------------------------------------------------------------------
 

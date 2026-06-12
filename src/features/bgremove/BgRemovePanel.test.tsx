@@ -48,6 +48,38 @@ describe("BgRemovePanel", () => {
       const btn = screen.getByRole("button", { name: "Remove Background" });
       expect(btn).toBeDisabled();
     });
+
+    // NOTE: must run before any test resolves a status fetch — the panel
+    // module caches the status promise, so a later test would see the cached
+    // resolved status instead of the pending state this asserts on.
+    it("locks GPU mode and the run actions until the hardware status arrives", async () => {
+      let resolveStatus!: (value: string) => void;
+      mockInvoke(
+        "bgremove_status",
+        () => new Promise<string>((resolve) => { resolveStatus = resolve; }),
+      );
+      openMock.mockResolvedValue("C:\\clips\\drift.mp4");
+      render(<BgRemovePanel mode="video" active />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Select file" }));
+      expect(await screen.findByText("drift.mp4")).toBeInTheDocument();
+
+      // Hardware still unknown: GPU toggle and both run actions stay locked.
+      expect(screen.getByText("Detecting hardware capabilities...")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "GPU (CUDA)" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Generate AI Preview" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Remove Background" })).toBeDisabled();
+
+      await act(async () => {
+        resolveStatus(JSON.stringify({ type: "status", hardware: { hasCuda: true } }));
+      });
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Remove Background" })).toBeEnabled(),
+      );
+      expect(screen.getByRole("button", { name: "GPU (CUDA)" })).toBeEnabled();
+      expect(screen.queryByText("Detecting hardware capabilities...")).not.toBeInTheDocument();
+    });
   });
 
   describe("Image Isolate Tab", () => {
@@ -209,6 +241,30 @@ describe("BgRemovePanel", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
       expect(screen.queryByText("Background isolation complete")).not.toBeInTheDocument();
+    });
+
+    it("flags a silent CPU fallback in the completion banner", async () => {
+      mockStatus();
+      openMock.mockResolvedValue("C:\\clips\\drift.mp4");
+      saveMock.mockResolvedValue("C:\\out\\drift_transparent.webm");
+      mockInvoke("bgremove_process", () =>
+        JSON.stringify({
+          type: "done",
+          output: "C:\\out\\drift_transparent.webm",
+          frames: 281,
+          cpuFallback: true,
+          elapsedSeconds: 56.7,
+        }),
+      );
+      render(<BgRemovePanel mode="video" active />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Select file" }));
+      expect(await screen.findByText("drift.mp4")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Remove Background" }));
+
+      expect(
+        await screen.findByText(/GPU was unavailable, so this ran on the CPU/),
+      ).toBeInTheDocument();
     });
 
     it("shows the synced result comparison player when the backend provides a showcase", async () => {

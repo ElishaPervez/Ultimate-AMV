@@ -5,7 +5,7 @@ import threading
 import subprocess
 from pathlib import Path
 
-from .models import create_session
+from .models import create_session, cuda_fallback_message
 
 # cv2, PIL and rembg are imported inside the functions that need them: they
 # are installed on first use by ensure_feature_dependencies, and a module-top
@@ -46,10 +46,11 @@ def remove_background_video(
     Processes video frame-by-frame, removes background with the selected model,
     and encodes the output as ProRes MOV / WebM with alpha or a PNG sequence.
 
-    Returns (frames, fps, showcase): when showcase_path is given, a compact
-    VP9+alpha preview of the finished export is encoded there for in-app
-    comparison playback (WebView2 can't decode ProRes and a PNG sequence
+    Returns (frames, fps, showcase, cpu_fallback): when showcase_path is given,
+    a compact VP9+alpha preview of the finished export is encoded there for
+    in-app comparison playback (WebView2 can't decode ProRes and a PNG sequence
     isn't a video). Showcase failure is non-fatal — showcase is None then.
+    cpu_fallback is a warning string when GPU mode silently ran on CPU.
     """
     import cv2
     from PIL import Image
@@ -75,7 +76,11 @@ def remove_background_video(
         progress_callback("model-init", 5, f"Initializing background removal model ({model_key})...")
         
     session = create_session(model_key, force_cpu=force_cpu)
-    
+
+    cpu_fallback = cuda_fallback_message(session, force_cpu)
+    if cpu_fallback and progress_callback:
+        progress_callback("processing", 8, cpu_fallback)
+
     if progress_callback:
         progress_callback("processing", 10, f"Model initialized. Processing {total_frames} frames...")
         
@@ -210,7 +215,7 @@ def remove_background_video(
             progress_callback("showcase", 99, "Encoding comparison preview...")
         showcase_file = _build_showcase(export_format, output_path, output_dir, fps, showcase_path)
 
-    return frame_idx, fps, showcase_file
+    return frame_idx, fps, showcase_file, cpu_fallback
 
 
 def _build_showcase(export_format, output_path, png_dir, fps, showcase_path):
@@ -286,6 +291,7 @@ def remove_background_frame(
 ):
     """
     Runs background removal on a single image frame using the selected model.
+    Returns a warning string when GPU mode silently ran on CPU, else None.
     """
     from PIL import Image
     from rembg import remove
@@ -294,3 +300,4 @@ def remove_background_frame(
     img = Image.open(input_image_path)
     out_img = remove(img, session=session)
     out_img.save(output_image_path, "PNG")
+    return cuda_fallback_message(session, force_cpu)

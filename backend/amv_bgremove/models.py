@@ -104,7 +104,43 @@ def create_session(model_key: str, force_cpu: bool = False):
         # Fall back to CPU only if CUDA provider fails to initialize
         if not force_cpu:
             try:
-                return new_session(model_name=model_name, providers=["CPUExecutionProvider"])
+                session = new_session(model_name=model_name, providers=["CPUExecutionProvider"])
             except Exception:
                 pass
+            else:
+                try:
+                    from amv_audio.logs import add_log
+
+                    add_log(
+                        "bgremove.gpu_fallback",
+                        f"CUDA session init failed; fell back to CPU: {exc}",
+                        level="warning",
+                    )
+                except Exception:
+                    pass
+                return session
         raise exc
+
+
+def _session_providers(session):
+    """Active execution providers of the underlying ORT session (rembg exposes
+    it as inner_session). Empty when the session shape is unexpected."""
+    try:
+        return list(session.inner_session.get_providers())
+    except Exception:
+        return []
+
+
+def cuda_fallback_message(session, force_cpu: bool):
+    """User-facing warning when GPU mode was requested but the session ended up
+    CPU-only (clobbered onnxruntime install, missing CUDA DLLs, provider init
+    failure). onnxruntime degrades to CPU silently, so this check is the only
+    signal that GPU mode is not actually running on the GPU."""
+    if force_cpu:
+        return None
+    if "CUDAExecutionProvider" in _session_providers(session):
+        return None
+    return (
+        "GPU (CUDA) mode was requested but the AI runtime could not use the GPU, "
+        "so this job ran on the CPU. Re-run the GPU setup or switch to CPU Mode."
+    )

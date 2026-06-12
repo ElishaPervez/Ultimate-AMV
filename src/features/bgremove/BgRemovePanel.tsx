@@ -132,13 +132,15 @@ export function BgRemovePanel({
 
   // One auto-preview attempt per (file, model, hardware) combination on the
   // image tab. Re-checks once an in-flight preview or the other tab's job
-  // finishes, so attempts deferred by either are picked up.
+  // finishes, so attempts deferred by either are picked up. Waits for the
+  // hardware status: previewing before it lands would run the GPU pipeline
+  // (and its dependency repair) on machines that need CPU mode.
   const previewAttemptRef = React.useRef<string>("");
   React.useEffect(() => {
-    if (!isImageTab || !selectedFile || otherTabBusy || isPreviewing || processing) return;
+    if (!isImageTab || !selectedFile || !status || otherTabBusy || isPreviewing || processing) return;
     if (previewAttemptRef.current === `${selectedFile}|${model}|${forceCpu}`) return;
     void generatePreview();
-  }, [selectedFile, model, forceCpu, otherTabBusy, isPreviewing, processing]);
+  }, [selectedFile, model, forceCpu, status, otherTabBusy, isPreviewing, processing]);
 
   // The status CLI imports torch and probes CUDA — too heavy to spawn for
   // two permanently-mounted instances at app start, so defer the fetch to
@@ -192,6 +194,15 @@ export function BgRemovePanel({
       }
     } catch (error) {
       setErrorMessage(readBridgeError(error));
+      // Keep the panel usable when the probe fails: assume no CUDA so the
+      // run actions unlock in (safe) CPU mode instead of staying gated.
+      setStatus({
+        type: "status",
+        hardware: { device: "CPU", hasCuda: false },
+        dependencies: { rembg_installed: false, has_onnxruntime: false },
+        models: {},
+      });
+      setForceCpu(true);
     }
   }
 
@@ -268,7 +279,7 @@ export function BgRemovePanel({
   }
 
   async function runBackgroundRemoval() {
-    if (!selectedFile) return;
+    if (!selectedFile || !status) return;
     const owner = getBusyOwner();
     if (owner !== null && owner !== mode) return;
 
@@ -376,14 +387,18 @@ export function BgRemovePanel({
         elapsedSeconds: number;
         fps?: number | null;
         showcase?: string | null;
+        cpuFallback?: boolean;
       }>(raw);
 
       if (cancellingRef.current) {
         setResultMessage("Background removal cancelled.");
       } else {
         const countText = isImage ? "image" : `${payload.frames} frames`;
+        const fallbackNote = payload.cpuFallback
+          ? " GPU was unavailable, so this ran on the CPU. Re-run the GPU setup or switch to CPU Mode."
+          : "";
         setResultMessage(
-          `Background removal complete. Processed ${countText} in ${payload.elapsedSeconds}s.`
+          `Background removal complete. Processed ${countText} in ${payload.elapsedSeconds}s.${fallbackNote}`
         );
         if (payload.showcase) {
           // The showcase WebM is rewritten at a fixed path each run; the
@@ -428,7 +443,7 @@ export function BgRemovePanel({
   async function generatePreview(frameOverride?: number) {
     // The busyOwner check below doesn't cover a job running on THIS tab, so
     // guard processing explicitly now that the panel stays interactive.
-    if (!selectedFile || processing) return;
+    if (!selectedFile || processing || !status) return;
     const owner = getBusyOwner();
     if (owner !== null && owner !== mode) return;
 
@@ -770,10 +785,13 @@ export function BgRemovePanel({
                 Hardware Accelerator
               </span>
               <div className="conversion-segment">
+                {/* GPU stays locked until the status probe confirms CUDA:
+                    hardware is unknown before it lands, and unlocked-by-default
+                    would let CPU-only machines start a GPU run. */}
                 <button
                   type="button"
                   className={!forceCpu ? "is-active" : ""}
-                  disabled={!!(status && status.hardware && !status.hardware.hasCuda)}
+                  disabled={!status || !!(status.hardware && !status.hardware.hasCuda)}
                   onClick={() => setForceCpu(false)}
                 >
                   GPU (CUDA)
@@ -888,6 +906,11 @@ export function BgRemovePanel({
 
           {/* Action Buttons */}
           <div className="conversion-run-actions" style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "24px", paddingTop: "20px", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
+            {!status && (
+              <p className="dim-text" style={{ fontSize: "12px", margin: 0 }}>
+                Detecting hardware capabilities...
+              </p>
+            )}
             {otherTabBusy && (
               <p className="dim-text" style={{ fontSize: "12px", margin: 0 }}>
                 The {isImageTab ? "Video" : "Image"} Isolate tab is processing — one isolation job runs at a time.
@@ -928,7 +951,7 @@ export function BgRemovePanel({
                       justifyContent: "center",
                       gap: "8px",
                     }}
-                    disabled={!selectedFile || isPreviewing || otherTabBusy}
+                    disabled={!selectedFile || !status || isPreviewing || otherTabBusy}
                     onClick={() => void generatePreview()}
                   >
                     <Eye size={16} />
@@ -947,7 +970,7 @@ export function BgRemovePanel({
                     justifyContent: "center",
                     gap: "8px",
                   }}
-                  disabled={!selectedFile || isPreviewing || otherTabBusy}
+                  disabled={!selectedFile || !status || isPreviewing || otherTabBusy}
                   onClick={runBackgroundRemoval}
                 >
                   <Sparkles size={16} />

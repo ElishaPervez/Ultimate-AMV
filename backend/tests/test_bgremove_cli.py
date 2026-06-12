@@ -30,7 +30,7 @@ class TestBgRemoveCli(unittest.TestCase):
     @patch("bgremove_cli.remove_background_video")
     @patch("bgremove_cli.ensure_feature_dependencies")
     def test_process_success(self, mock_ensure_deps, mock_remove_bg, mock_emit):
-        mock_remove_bg.return_value = (100, 24.0, "C:\\cache\\showcase.webm")
+        mock_remove_bg.return_value = (100, 24.0, "C:\\cache\\showcase.webm", None)
 
         result = process(
             input_file="input.mp4",
@@ -51,6 +51,26 @@ class TestBgRemoveCli(unittest.TestCase):
         self.assertEqual(done_calls[0][0][0]["frames"], 100)
         self.assertEqual(done_calls[0][0][0]["fps"], 24.0)
         self.assertEqual(done_calls[0][0][0]["showcase"], "C:\\cache\\showcase.webm")
+        self.assertEqual(done_calls[0][0][0]["cpuFallback"], False)
+
+    @patch("bgremove_cli.emit")
+    @patch("bgremove_cli.remove_background_video")
+    @patch("bgremove_cli.ensure_feature_dependencies")
+    def test_process_flags_silent_cpu_fallback(self, mock_ensure_deps, mock_remove_bg, mock_emit):
+        mock_remove_bg.return_value = (100, 24.0, None, "GPU unavailable, ran on CPU")
+
+        result = process(
+            input_file="input.mp4",
+            output_file="output.webm",
+            model_key="anime",
+            export_format="webm",
+            force_cpu=False,
+        )
+
+        self.assertEqual(result, 0)
+        done_calls = [call for call in mock_emit.call_args_list if call[0][0].get("type") == "done"]
+        self.assertEqual(len(done_calls), 1)
+        self.assertEqual(done_calls[0][0][0]["cpuFallback"], True)
 
     @patch("bgremove_cli.emit")
     @patch("bgremove_cli.remove_background_video")
@@ -78,6 +98,7 @@ class TestBgRemoveCli(unittest.TestCase):
     @patch("bgremove_cli.extract_single_frame")
     @patch("bgremove_cli.ensure_feature_dependencies")
     def test_preview_success(self, mock_ensure_deps, mock_extract, mock_remove_bg_frame, mock_emit):
+        mock_remove_bg_frame.return_value = None
         result = preview(
             input_file="input.mp4",
             output_dir="temp_dir",
@@ -119,6 +140,7 @@ class TestBgRemoveCli(unittest.TestCase):
     @patch("bgremove_cli.remove_background_frame")
     @patch("bgremove_cli.ensure_feature_dependencies")
     def test_process_image_success(self, mock_ensure_deps, mock_remove_bg_frame, mock_emit):
+        mock_remove_bg_frame.return_value = None
         result = process(
             input_file="input.png",
             output_file="output.png",
@@ -143,7 +165,8 @@ class TestBgRemoveCli(unittest.TestCase):
     def test_preview_image_success(self, mock_ensure_deps, mock_remove_bg_frame, mock_emit, mock_image_open):
         mock_img = MagicMock()
         mock_image_open.return_value = mock_img
-        
+        mock_remove_bg_frame.return_value = None
+
         result = preview(
             input_file="input.png",
             output_dir="temp_dir",
