@@ -124,7 +124,7 @@ function normalizeSampledColor(value: string): string | null {
 
 export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColorPickerProps) {
   const [isOpen, setIsOpen] = React.useState(false);
-  const popoverRef = React.useRef<HTMLDivElement | null>(null);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
   const [isSampling, setIsSampling] = React.useState(false);
   const samplingRef = React.useRef(false);
   const [overlayActive, setOverlayActive] = React.useState(false);
@@ -234,9 +234,10 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
 
   // Close popover on click outside
   React.useEffect(() => {
+    if (!isOpen) return;
     const listener = (event: MouseEvent | TouchEvent) => {
       if (samplingRef.current) return;
-      if (!popoverRef.current || popoverRef.current.contains(event.target as Node)) {
+      if (containerRef.current?.contains(event.target as Node)) {
         return;
       }
       setIsOpen(false);
@@ -248,7 +249,7 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
       document.removeEventListener("mousedown", listener);
       document.removeEventListener("touchstart", listener);
     };
-  }, [onBlur]);
+  }, [isOpen, onBlur]);
 
   // Esc cancels overlay sampling and restores the pre-sampling color
   React.useEffect(() => {
@@ -263,7 +264,7 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
   }, [overlayActive]);
 
   return (
-    <div className="custom-color-picker-container" style={{ position: "relative", display: "flex", flexDirection: "column", gap: "6px", width: "100%" }}>
+    <div ref={containerRef} className="custom-color-picker-container" style={{ position: "relative", display: "flex", flexDirection: "column", gap: "6px", width: "100%" }}>
       <span style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.5px", color: "rgba(255,255,255,0.45)" }}>{label}</span>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "6px 8px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", height: "46px" }}>
         {/* Interactive Swatch */}
@@ -325,7 +326,6 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
       {/* Popover */}
       {isOpen && (
         <div
-          ref={popoverRef}
           style={{
             position: "absolute",
             top: "calc(100% + 8px)",
