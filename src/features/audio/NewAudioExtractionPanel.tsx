@@ -179,8 +179,17 @@ export function NewAudioExtractionPanel() {
         setResultMessage(`Extraction cancelled. ${done} file${done === 1 ? "" : "s"} saved before cancel.`);
       } else {
         setOutputPaths(allOutputs);
-        const failures = completed.filter((item) => item.status === "error").length;
-        setResultMessage(`${completed.length - failures}/${filePaths.length} files extracted. ${allOutputs.length} stems saved.`);
+        const failed = completed.filter((item) => item.status === "error");
+        if (failed.length > 0 && failed.length === completed.length) {
+          const firstError = failed[0].message ?? "Extraction failed.";
+          setErrorMessage(
+            failed.length === 1
+              ? firstError
+              : `All ${failed.length} files failed to extract. First error: ${firstError}`,
+          );
+        } else {
+          setResultMessage(`${completed.length - failed.length}/${filePaths.length} files extracted. ${allOutputs.length} stems saved.`);
+        }
       }
       await refreshStatus(true);
     } catch (error) {
