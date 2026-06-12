@@ -89,6 +89,12 @@ KNOWN_MODULE_PACKAGES = {
     "typing_extensions": "typing_extensions",
 }
 
+# GPU runtimes need extras-form installs: the plain package would drag the
+# CPU onnxruntime chain in next to onnxruntime-gpu and break the CUDA provider.
+GPU_MODULE_PACKAGES = {
+    "rembg": "rembg[gpu]>=2.0.50",
+}
+
 TORCH_PACKAGES = ["torch", "torchvision", "torchaudio"]
 AUDIO_RUNTIME_MODULES = [
     ("audioop", "audioop-lts"),
@@ -373,6 +379,8 @@ def ensure_feature_dependencies(feature, gpu=False, progress_callback=None):
 
 def repair_missing_module(module_name, gpu=False, progress_callback=None):
     package_name = KNOWN_MODULE_PACKAGES.get(module_name)
+    if gpu and module_name in GPU_MODULE_PACKAGES:
+        package_name = GPU_MODULE_PACKAGES[module_name]
     if not package_name:
         return False
     if _module_exists(module_name) and module_name != "torch":

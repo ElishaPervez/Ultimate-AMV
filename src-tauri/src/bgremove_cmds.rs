@@ -310,8 +310,15 @@ pub(crate) fn run_streaming_bgremove_cli(
 
     let mut final_payload: Option<String> = None;
     let mut forwarded_events: u64 = 0;
+    let mut read_error: Option<String> = None;
     for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| error.to_string())?;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                read_error = Some(error.to_string());
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -346,6 +353,23 @@ pub(crate) fn run_streaming_bgremove_cli(
                 _ => {}
             }
         }
+    }
+
+    if let Some(error) = read_error {
+        kill_child_pid(&BGREMOVE_CHILD_PID);
+        let _ = child.wait();
+        clear_child_pid(&BGREMOVE_CHILD_PID);
+        let stderr_tail = stderr_handle.join().unwrap_or_default();
+        log_error(
+            "bgremove.streaming_bridge.error",
+            "Could not read streaming background removal output",
+            json!({
+                "args": &args,
+                "error": &error,
+                "stderr": truncate_log_text(stderr_tail.trim()),
+            }),
+        );
+        return Err(error);
     }
 
     let wait_result = child.wait();

@@ -197,6 +197,30 @@ def test_install_torch_cpu_uses_cpu_index_url(mocker):
 
 
 # ---------------------------------------------------------------------------
+# repair_missing_module — gpu-aware package resolution
+# ---------------------------------------------------------------------------
+
+
+def test_repair_missing_module_rembg_gpu_installs_gpu_extras(mocker):
+    """GPU repairs must install rembg[gpu], never plain rembg."""
+    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mocker.patch("amv_audio.dependencies._module_exists", return_value=False)
+    mocker.patch("amv_audio.dependencies.add_log")
+
+    assert deps_mod.repair_missing_module("rembg", gpu=True) is True
+    assert mock_pip.call_args[0][0] == ["rembg[gpu]>=2.0.50"]
+
+
+def test_repair_missing_module_rembg_cpu_installs_plain_package(mocker):
+    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mocker.patch("amv_audio.dependencies._module_exists", return_value=False)
+    mocker.patch("amv_audio.dependencies.add_log")
+
+    assert deps_mod.repair_missing_module("rembg", gpu=False) is True
+    assert mock_pip.call_args[0][0] == ["rembg>=2.0.50"]
+
+
+# ---------------------------------------------------------------------------
 # KNOWN_MODULE_PACKAGES completeness spot-check
 # ---------------------------------------------------------------------------
 

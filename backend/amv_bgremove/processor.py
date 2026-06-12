@@ -85,6 +85,7 @@ def remove_background_video(
 
     if export_format in ("webm", "mov"):
         ffmpeg_bin = require_tool("ffmpeg")
+        safe_fps = fps if fps and fps > 0 else 24
         # Common raw RGBA stdin pipeline; -nostats keeps the encode chatter
         # off stderr so the drain thread only carries real errors.
         cmd = [
@@ -95,7 +96,7 @@ def remove_background_video(
             "-vcodec", "rawvideo",
             "-s", f"{width}x{height}",
             "-pix_fmt", "rgba",
-            "-r", str(fps),
+            "-r", str(safe_fps),
             "-i", "-",
             "-an",
         ]
