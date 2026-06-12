@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Smoked-glass material — before / after demo</title>
+<style>
+  /* ============================================================
+     DEMO HARNESS — wallpaper + split stage + HUD
+     ============================================================ */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+    color: #f1f3fb;
+    background: #07070f;
+  }
+
+  /* ---- wallpaper layer (mimics BackgroundLayer.tsx) ---- */
+  #wall { position: fixed; inset: 0; z-index: 0; overflow: hidden; background: #020203; }
+  #wallart {
+    position: absolute; inset: -70px; /* inset bleed hides blur edge fringe */
+    background-size: cover; background-position: center;
+    will-change: filter;
+  }
+  #wallart.anim {
+    background-size: 280% 280% !important;
+    animation: drift 14s ease-in-out infinite alternate;
+  }
+  @keyframes drift {
+    0%   { background-position: 0% 30%; }
+    50%  { background-position: 70% 60%; }
+    100% { background-position: 100% 20%; }
+  }
+  #dim { position: absolute; inset: 0; }
+
+  /* ---- split stage ---- */
+  #stage { position: fixed; inset: 0; z-index: 1; }
+  .variant { position: absolute; inset: 0; }
+  /* clip-paths driven from JS */
+
+  #divider {
+    position: absolute; top: 0; bottom: 0; width: 0; left: 50%;
+    z-index: 10; pointer-events: none;
+  }
+  #divider .line {
+    position: absolute; top: 0; bottom: 0; left: -1px; width: 2px;
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+  }
+  #divider .grip {
+    position: absolute; top: 50%; left: -22px; width: 44px; height: 44px;
+    transform: translateY(-50%);
+    border-radius: 50%;
+    background: #11131f;
+    border: 2px solid rgba(255, 255, 255, 0.9);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+    display: grid; place-items: center;
+    color: #fff; font-size: 13px; letter-spacing: 2px;
+    cursor: ew-resize; pointer-events: auto; user-select: none;
+  }
+
+  .tag {
+    position: absolute; top: 14px; z-index: 9;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+    padding: 6px 12px; border-radius: 999px;
+    background: rgba(0, 0, 0, 0.62); color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    pointer-events: none;
+  }
+  .tag-l { left: 86px; }
+  .tag-r { right: 14px; }
+
+  /* ============================================================
+     SHARED MOCK UI (cloned into both variants from <template>)
+     ============================================================ */
+  .shell { display: grid; grid-template-columns: 64px 1fr; height: 100%; pointer-events: none; }
+
+  .side {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 18px; padding: 18px 0;
+  }
+  .side .dot {
+    width: 30px; height: 30px; border-radius: 9px;
+    display: grid; place-items: center; font-size: 14px;
+    color: rgba(255, 255, 255, 0.75);
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .side .dot.active {
+    background: rgb(124 130 255 / 0.18);
+    box-shadow: inset 2px 0 0 rgb(124 130 255);
+    color: rgb(160 165 255);
+  }
+
+  .work { padding: 26px 40px; overflow: hidden; }
+
+  .tabs { display: flex; gap: 10px; margin-bottom: 26px; }
+  .tab {
+    font-size: 12.5px; font-weight: 600; padding: 8px 18px; border-radius: 999px;
+    color: rgba(255, 255, 255, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .tab.active {
+    background: linear-gradient(135deg, rgb(124 130 255 / 0.85), rgb(86 214 230 / 0.7));
+    color: #0a0b18; border-color: transparent;
+  }
+
+  .hero { max-width: 760px; margin-bottom: 30px; }
+  .kicker {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.18em; color: #fff;
+    margin-bottom: 8px;
+  }
+  .hero h1 { font-size: 44px; font-weight: 800; letter-spacing: -0.01em; line-height: 1.05; }
+  .hero .sub { margin-top: 10px; font-size: 14px; color: rgba(255, 255, 255, 0.92); max-width: 640px; }
+
+  .cols { display: grid; grid-template-columns: 5fr 6fr; gap: 28px; align-items: start; }
+  .col-left { display: grid; gap: 18px; }
+
+  .card { border-radius: 22px; padding: 20px 22px; }
+
+  .input-card .label { margin-bottom: 8px; }
+  .input-card .big { font-size: 19px; font-weight: 650; margin-bottom: 14px; }
+  .label { font-size: 10.5px; font-weight: 700; letter-spacing: 0.16em; }
+
+  .ghost-btn {
+    width: 100%; padding: 11px 0; border-radius: 12px; font-size: 13px; font-weight: 600;
+    color: #e8ecf8; border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .tips-head { font-size: 14px; font-weight: 700; margin-bottom: 12px; }
+  .tips ul { list-style: none; display: grid; gap: 10px; }
+  .tips li { font-size: 12.5px; line-height: 1.5; padding-left: 14px; position: relative; }
+  .tips li::before { content: "•"; position: absolute; left: 0; }
+
+  .console { display: grid; gap: 16px; border-radius: 22px; }
+  .field { display: grid; gap: 7px; }
+  .select {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 11px 14px; border-radius: 11px; font-size: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .select span { opacity: 0.6; }
+  .seg {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px;
+    border-radius: 11px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .seg-btn {
+    padding: 10px 0; border-radius: 8px; border: none; font-size: 13px; font-weight: 600;
+    background: transparent; color: rgba(255, 255, 255, 0.75);
+  }
+  .seg-btn.active {
+    background: linear-gradient(135deg, rgba(243, 200, 205, 0.95), rgba(214, 60, 60, 0.85));
+    color: #2a0a0a;
+  }
+  .actions { display: grid; gap: 10px; margin-top: 6px; }
+  .action {
+    padding: 12px 0; border-radius: 12px; font-size: 13.5px; font-weight: 650;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.85);
+  }
+
+  /* ============================================================
+     VARIANT: CURRENT  (faithful to base.css has-app-bg behavior)
+     - surfaces transparent / 5% white-alpha glass
+     - backdrop blur COUPLED to the wallpaper blur slider
+     - legibility via text halos + forced-white micro labels
+     ============================================================ */
+  .current .side {
+    background: rgba(13, 16, 22, 0.45);
+    backdrop-filter: blur(var(--wall-blur, 0px));
+  }
+  .current .card {
+    background: rgba(140, 150, 220, 0.05);
+    border: 1px solid rgba(150, 160, 230, 0.12);
+    backdrop-filter: blur(var(--wall-blur, 0px));
+  }
+  .current .console { padding: 0; }   /* controls float bare on the wallpaper */
+  .current .kicker,
+  .current .label {
+    color: #fff;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+  }
+  .current .hero h1 { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55); }
+  .current .hero .sub,
+  .current .tips li {
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+    color: rgba(255, 255, 255, 0.92);
+  }
+  .current .action.primary {
+    background: linear-gradient(135deg, rgba(243, 200, 205, 0.5), rgba(214, 60, 60, 0.45));
+    color: rgba(255, 255, 255, 0.9); border-color: transparent;
+  }
+
+  /* ============================================================
+     VARIANT: PROPOSED  (smoked-glass material)
+     - multiplicative darkening: blur + brightness + saturate
+     - own fixed blur, decoupled from the wallpaper slider
+     - controls grouped into "console" surfaces; halos dropped inside
+     ============================================================ */
+  .proposed {
+    --m-blur: 20px;
+    --m-bright: 0.55;
+    --m-sat: 1.4;
+    --m-fill: 0.30;
+  }
+  .proposed .side {
+    background: rgba(10, 12, 24, 0.35);
+    backdrop-filter: blur(18px) brightness(0.6) saturate(1.3);
+  }
+  .proposed .card,
+  .proposed .console {
+    background: rgba(10, 12, 24, var(--m-fill));
+    backdrop-filter: blur(var(--m-blur)) brightness(var(--m-bright)) saturate(var(--m-sat));
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .proposed:not(.no-edge) .card,
+  .proposed:not(.no-edge) .console {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 12px 40px -12px rgba(0, 0, 0, 0.5);
+  }
+  .proposed .console { padding: 20px 22px; }
+
+  /* inside a material surface: no halos needed, calm ink hierarchy */
+  .proposed .card *, .proposed .console * { text-shadow: none; }
+  .proposed .card .label, .proposed .console .label { color: rgba(205, 213, 235, 0.85); }
+  .proposed .tips li { color: rgba(225, 230, 245, 0.92); }
+  .proposed .select { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.14); }
+  .proposed .seg { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.12); }
+
+  /* hero stays directly on the wallpaper — display text + optional scrim */
+  .proposed .kicker { color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55); }
+  .proposed .hero h1 { text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6); }
+  .proposed .hero .sub { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55); }
+  .proposed:not(.scrim-off) .hero {
+    background: linear-gradient(90deg, rgba(6, 8, 16, 0.45), rgba(6, 8, 16, 0) 78%);
+    border-radius: 18px; padding: 14px 18px; margin-left: -18px;
+  }
+
+  .proposed .action {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.16);
+    color: #eef2fc;
+  }
+  .proposed .action.primary {
+    background: linear-gradient(135deg, #7c82ff, #56d6e6);
+    color: #0a0b18; border-color: transparent;
+    box-shadow: 0 6px 22px -6px rgb(124 130 255 / 0.55);
+  }
+
+  /* ============================================================
+     HUD (demo controls — deliberately solid, it's meta-UI)
+     ============================================================ */
+  #hud {
+    position: fixed; right: 16px; bottom: 16px; z-index: 50;
+    width: 308px; max-height: calc(100vh - 32px); overflow-y: auto;
+    background: rgba(10, 12, 18, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 14px; padding: 14px 16px;
+    font-size: 12px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  }
+  #hud.collapsed > *:not(.hud-head) { display: none; }
+  .hud-head { display: flex; justify-content: space-between; align-items: center; }
+  .hud-head b { font-size: 13px; }
+  .hud-head button {
+    background: none; border: 1px solid rgba(255, 255, 255, 0.2); color: #fff;
+    border-radius: 7px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+  }
+  #hud h4 {
+    font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: #8b94b5; margin: 14px 0 8px;
+  }
+  .chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.05);
+    color: #dfe5f5; border-radius: 999px; padding: 5px 11px; font-size: 11.5px; cursor: pointer;
+  }
+  .chip.on { background: rgb(124 130 255 / 0.25); border-color: rgb(124 130 255 / 0.7); }
+  .row { display: grid; grid-template-columns: 86px 1fr 38px; align-items: center; gap: 8px; margin: 7px 0; }
+  .row label { color: #b9c1da; }
+  .row output { text-align: right; color: #fff; font-variant-numeric: tabular-nums; }
+  input[type="range"] { width: 100%; accent-color: #7c82ff; }
+  .checkrow { display: flex; align-items: center; gap: 8px; margin: 7px 0; color: #b9c1da; }
+  .checkrow input { accent-color: #7c82ff; }
+  #cssout {
+    margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+    background: #05060b; border: 1px solid rgba(255, 255, 255, 0.1);
+    font-family: Consolas, monospace; font-size: 10.5px; color: #9fe8c8;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .hud-note { margin-top: 10px; color: #7c849f; font-size: 11px; line-height: 1.45; }
+  #copybtn {
+    margin-top: 6px; width: 100%; padding: 6px 0; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgb(124 130 255 / 0.5); background: rgb(124 130 255 / 0.18); color: #dfe2ff;
+  }
+</style>
+</head>
+<body>
+
+<div id="wall">
+  <div id="wallart"></div>
+  <div id="dim"></div>
+</div>
+
+<div id="stage">
+  <section class="variant current" id="vCurrent"></section>
+  <section class="variant proposed" id="vProposed"></section>
+  <div id="divider"><div class="line"></div><div class="grip">⇆</div></div>
+  <div class="tag tag-l" id="tagL">CURRENT</div>
+  <div class="tag tag-r" id="tagR">PROPOSED</div>
+</div>
+
+<!-- the mock app screen, cloned into both variants so they never diverge -->
+<template id="mock">
+  <div class="shell">
+    <nav class="side">
+      <div class="dot">▦</div><div class="dot">⌂</div><div class="dot">♫</div>
+      <div class="dot active">✦</div><div class="dot">▤</div><div class="dot">⛁</div>
+    </nav>
+    <main class="work">
+      <div class="tabs"><span class="tab active">Video Isolate</span><span class="tab">Image Isolate</span></div>
+      <div class="hero">
+        <div class="kicker">CHARACTER ISOLATION</div>
+        <h1>Video Background Removal</h1>
+        <p class="sub">Isolate foreground characters and subjects from video files, exporting as transparent ProRes MOV, WebM, or PNG sequence.</p>
+      </div>
+      <div class="cols">
+        <div class="col-left">
+          <div class="card input-card">
+            <div class="label">INPUT VIDEO</div>
+            <div class="big">No file selected</div>
+            <button class="ghost-btn">⬚ &nbsp;Select file</button>
+          </div>
+          <div class="card tips">
+            <div class="tips-head">✦ Workflow Tips</div>
+            <ul>
+              <li><b>ProRes 4444 + Alpha:</b> The transparent video format editors import natively (Premiere, After Effects, DaVinci Resolve). Use WebM only for OBS overlays.</li>
+              <li><b>Frame Check:</b> Generate an AI preview, then drag the "Check frame" slider to re-test the isolation on any frame.</li>
+              <li><b>Anime Characters:</b> The isnet-anime model is optimized for cel-shaded boundary outlines.</li>
+              <li><b>Hardware Acceleration:</b> CUDA (GPU) acceleration is recommended to minimize frame processing times.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="col-right console">
+          <div class="field">
+            <div class="label">AI SEGMENTATION MODEL</div>
+            <div class="select">Anime Character (isnet-anime) <span>⌄</span></div>
+          </div>
+          <div class="field">
+            <div class="label">EXPORT FORMAT</div>
+            <div class="select">Editor Video (ProRes 4444 MOV + Alpha) <span>⌄</span></div>
+          </div>
+          <div class="field">
+            <div class="label">HARDWARE ACCELERATOR</div>
+            <div class="seg"><button class="seg-btn active">GPU (CUDA)</button><button class="seg-btn">CPU Mode</button></div>
+          </div>
+          <div class="actions">
+            <button class="action">◎ &nbsp;Generate AI Preview</button>
+            <button class="action primary">✦ &nbsp;Remove Background</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</template>
+
+<aside id="hud">
+  <div class="hud-head"><b>Material demo</b><button id="collapse">hide</button></div>
+
+  <h4>View</h4>
+  <div class="chiprow" id="modes">
+    <button class="chip" data-mode="current">Current</button>
+    <button class="chip on" data-mode="split">Split</button>
+    <button class="chip" data-mode="proposed">Proposed</button>
+  </div>
+
+  <h4>Wallpaper</h4>
+  <div class="chiprow" id="presets">
+    <button class="chip on" data-p="samurai">Samurai-ish</button>
+    <button class="chip" data-p="white">Pure white</button>
+    <button class="chip" data-p="sky">Bright sky</button>
+    <button class="chip" data-p="dark">Dark</button>
+    <button class="chip" data-p="anim">Animated</button>
+    <button class="chip" id="upload">Load image…</button>
+  </div>
+  <input type="file" id="file" accept="image/*" hidden />
+  <div class="row"><label>Blur</label><input type="range" id="wblur" min="0" max="40" value="12" /><output id="wblur-o">12</output></div>
+  <div class="row"><label>Dim</label><input type="range" id="wdim" min="0" max="80" value="0" /><output id="wdim-o">0</output></div>
+
+  <h4>Proposed material</h4>
+  <div class="row"><label>Brightness</label><input type="range" id="mbright" min="30" max="100" value="55" /><output id="mbright-o">55%</output></div>
+  <div class="row"><label>Blur</label><input type="range" id="mblur" min="0" max="40" value="20" /><output id="mblur-o">20</output></div>
+  <div class="row"><label>Saturate</label><input type="range" id="msat" min="100" max="200" value="140" /><output id="msat-o">140%</output></div>
+  <div class="row"><label>Fill alpha</label><input type="range" id="mfill" min="0" max="60" value="30" /><output id="mfill-o">.30</output></div>
+  <div class="checkrow"><input type="checkbox" id="edge" checked /><label for="edge">Edge treatment (hairline + shadow)</label></div>
+  <div class="checkrow"><input type="checkbox" id="scrim" checked /><label for="scrim">Hero text scrim (proposed)</label></div>
+
+  <div id="cssout"></div>
+  <button id="copybtn">Copy material CSS</button>
+
+  <div class="hud-note">
+    Drag the round handle to compare. Try <b>Pure white</b> (worst case) and
+    <b>Dark</b> (material is nearly invisible — dark wallpapers stay untouched).
+    <b>Animated</b> simulates a video wallpaper: the darkening is live, no JS.
+    Load your real wallpaper with <b>Load image…</b>
+  </div>
+</aside>
+
+<script>
+  // ---- clone the mock into both variants ----
+  const mock = document.getElementById("mock");
+  const vCurrent = document.getElementById("vCurrent");
+  const vProposed = document.getElementById("vProposed");
+  vCurrent.appendChild(mock.content.cloneNode(true));
+  vProposed.appendChild(mock.content.cloneNode(true));
+
+  // ---- wallpaper presets ----
+  const wallart = document.getElementById("wallart");
+  const PRESETS = {
+    samurai: `
+      radial-gradient(60% 45% at 18% 12%, rgba(255,255,255,0.95), rgba(255,255,255,0) 70%),
+      radial-gradient(10px 10px at 62% 38%, #e04a4f 0 45%, transparent 50%),
+      radial-gradient(14px 14px at 71% 62%, #d3303a 0 45%, transparent 50%),
+      radial-gradient(9px 9px at 33% 70%, #e04a4f 0 45%, transparent 50%),
+      radial-gradient(12px 12px at 84% 30%, #c92833 0 45%, transparent 50%),
+      radial-gradient(45% 40% at 78% 24%, rgba(210,60,66,0.55), transparent 70%),
+      radial-gradient(35% 30% at 86% 78%, rgba(160,20,30,0.8), transparent 70%),
+      radial-gradient(28% 24% at 8% 80%, rgba(120,10,22,0.85), transparent 70%),
+      linear-gradient(165deg, #d9d6d0 0%, #c2b4ac 22%, #b04a4a 48%, #7d2027 68%, #3a0f16 100%)`,
+    white: `linear-gradient(180deg, #ffffff 0%, #eef1f4 100%)`,
+    sky: `
+      radial-gradient(40% 26% at 28% 30%, rgba(255,255,255,0.95), rgba(255,255,255,0) 70%),
+      radial-gradient(34% 22% at 66% 18%, rgba(255,255,255,0.9), rgba(255,255,255,0) 70%),
+      radial-gradient(50% 30% at 80% 55%, rgba(255,255,255,0.7), rgba(255,255,255,0) 70%),
+      linear-gradient(180deg, #7ec3f0 0%, #b8ddf6 45%, #eaf5ff 80%, #ffffff 100%)`,
+    dark: `
+      radial-gradient(1200px 800px at 85% -10%, rgba(124,130,255,0.10), transparent 55%),
+      radial-gradient(1000px 700px at -10% 110%, rgba(86,214,230,0.08), transparent 55%),
+      linear-gradient(180deg, #0a0a16, #07070f)`,
+    anim: `linear-gradient(120deg, #eef3fa 0%, #ffd9d9 25%, #ffffff 45%, #ffe9b8 65%, #d9ecff 85%, #ffffff 100%)`,
+  };
+
+  function setPreset(name) {
+    wallart.classList.toggle("anim", name === "anim");
+    wallart.style.backgroundImage = PRESETS[name] || PRESETS.samurai;
+    document.querySelectorAll("#presets .chip[data-p]").forEach((c) =>
+      c.classList.toggle("on", c.dataset.p === name)
+    );
+  }
+  setPreset("samurai");
+
+  document.getElementById("presets").addEventListener("click", (e) => {
+    const p = e.target.dataset && e.target.dataset.p;
+    if (p) setPreset(p);
+  });
+
+  // load a real wallpaper
+  const file = document.getElementById("file");
+  document.getElementById("upload").addEventListener("click", () => file.click());
+  file.addEventListener("change", () => {
+    if (!file.files[0]) return;
+    wallart.classList.remove("anim");
+    wallart.style.backgroundImage = `url("${URL.createObjectURL(file.files[0])}")`;
+    document.querySelectorAll("#presets .chip[data-p]").forEach((c) => c.classList.remove("on"));
+  });
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f && f.type.startsWith("image/")) {
+      wallart.classList.remove("anim");
+      wallart.style.backgroundImage = `url("${URL.createObjectURL(f)}")`;
+    }
+  });
+
+  // ---- wallpaper sliders (mimic the app's blur + dim) ----
+  const wblur = document.getElementById("wblur");
+  const wdim = document.getElementById("wdim");
+  function applyWall() {
+    const b = Number(wblur.value);
+    wallart.style.filter = b > 0 ? `blur(${b}px)` : "";
+    // faithful detail: current-variant panels inherit the wallpaper blur slider
+    document.documentElement.style.setProperty("--wall-blur", b + "px");
+    document.getElementById("dim").style.background = `rgba(5,5,7,${Number(wdim.value) / 100})`;
+    document.getElementById("wblur-o").textContent = b;
+    document.getElementById("wdim-o").textContent = wdim.value;
+  }
+  wblur.addEventListener("input", applyWall);
+  wdim.addEventListener("input", applyWall);
+  applyWall();
+
+  // ---- material sliders ----
+  const mbright = document.getElementById("mbright");
+  const mblur = document.getElementById("mblur");
+  const msat = document.getElementById("msat");
+  const mfill = document.getElementById("mfill");
+  const edge = document.getElementById("edge");
+  const scrim = document.getElementById("scrim");
+
+  function applyMaterial() {
+    const br = Number(mbright.value) / 100;
+    const bl = Number(mblur.value);
+    const sa = Number(msat.value) / 100;
+    const fi = Number(mfill.value) / 100;
+    vProposed.style.setProperty("--m-bright", br);
+    vProposed.style.setProperty("--m-blur", bl + "px");
+    vProposed.style.setProperty("--m-sat", sa);
+    vProposed.style.setProperty("--m-fill", fi);
+    vProposed.classList.toggle("no-edge", !edge.checked);
+    vProposed.classList.toggle("scrim-off", !scrim.checked);
+    document.getElementById("mbright-o").textContent = mbright.value + "%";
+    document.getElementById("mblur-o").textContent = bl;
+    document.getElementById("msat-o").textContent = msat.value + "%";
+    document.getElementById("mfill-o").textContent = "." + String(mfill.value).padStart(2, "0");
+    document.getElementById("cssout").textContent =
+      `backdrop-filter: blur(${bl}px) brightness(${br}) saturate(${sa});\n` +
+      `background: rgba(10, 12, 24, ${fi});`;
+  }
+  [mbright, mblur, msat, mfill, edge, scrim].forEach((el) => el.addEventListener("input", applyMaterial));
+  applyMaterial();
+
+  document.getElementById("copybtn").addEventListener("click", () => {
+    navigator.clipboard.writeText(document.getElementById("cssout").textContent).then(() => {
+      const b = document.getElementById("copybtn");
+      b.textContent = "Copied ✓";
+      setTimeout(() => (b.textContent = "Copy material CSS"), 1200);
+    });
+  });
+
+  // ---- split divider ----
+  const divider = document.getElementById("divider");
+  const grip = divider.querySelector(".grip");
+  const tagL = document.getElementById("tagL");
+  const tagR = document.getElementById("tagR");
+  let splitX = 50;
+
+  function applySplit(x) {
+    splitX = Math.max(0, Math.min(100, x));
+    vCurrent.style.clipPath = `inset(0 ${100 - splitX}% 0 0)`;
+    vProposed.style.clipPath = `inset(0 0 0 ${splitX}%)`;
+    divider.style.left = splitX + "%";
+    tagL.style.display = splitX > 8 ? "" : "none";
+    tagR.style.display = splitX < 92 ? "" : "none";
+  }
+  applySplit(50);
+
+  let dragging = false;
+  grip.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    grip.setPointerCapture(e.pointerId);
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (dragging) applySplit((e.clientX / window.innerWidth) * 100);
+  });
+  window.addEventListener("pointerup", () => (dragging = false));
+
+  // ---- view modes ----
+  document.getElementById("modes").addEventListener("click", (e) => {
+    const m = e.target.dataset && e.target.dataset.mode;
+    if (!m) return;
+    document.querySelectorAll("#modes .chip").forEach((c) => c.classList.toggle("on", c.dataset.mode === m));
+    divider.style.display = m === "split" ? "" : "none";
+    applySplit(m === "current" ? 100 : m === "proposed" ? 0 : 50);
+  });
+
+  // ---- HUD collapse ----
+  document.getElementById("collapse").addEventListener("click", () => {
+    const hud = document.getElementById("hud");
+    hud.classList.toggle("collapsed");
+    document.getElementById("collapse").textContent = hud.classList.contains("collapsed") ? "show" : "hide";
+  });
+</script>
+</body>
+</html>

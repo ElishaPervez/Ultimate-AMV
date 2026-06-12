@@ -327,21 +327,9 @@
 }
 
 /* ── Wallpaper mode ──
-   With a wallpaper set, the dark glass slabs come off and the text sits
-   directly on the wallpaper — the same treatment clip-extractor and the
-   downloader get in base.css §3. Legibility on bright wallpapers is the
-   dark-text toggle's job now, not a scrim's. backdrop-filter must go too:
-   a tintless frosted rectangle still reads as a box. The drag-drop overlay
-   and the hero's faint status chips keep their fills. */
-:root.has-app-bg .dash-hero-card,
-:root.has-app-bg .dash-side-card,
-:root.has-app-bg .dash-stage-main > .extract-vocals-button,
-:root.has-app-bg .dash-stage-main > .audio-card,
-:root.has-app-bg .dash-stage-main > .stem-mixer {
-  background: transparent;
-  border-color: transparent;
-  backdrop-filter: none;
-}
+   Handled by the smoked-glass material (styles/material.css): the hero
+   card, the active stage wrapper and the side column are carriers; the
+   side cards become chip-style controls inside their carrier. */
 
 .dash-stage-side .batch-status-row {
   background: rgba(255, 255, 255, 0.03);

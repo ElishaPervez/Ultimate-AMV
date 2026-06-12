@@ -799,7 +799,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
     return (
       <div className="tsukyio-panel">
         <div className="tsukyio-connect">
-          <div className="tsukyio-connect-card glass">
+          <div className="tsukyio-connect-card glass u-material">
             <div className="tsukyio-brand-mark" aria-hidden="true">T</div>
             <h2>Connect the Tsukyio Vault</h2>
             <p>
@@ -850,6 +850,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         </a>
       </header>
 
+      <div className="tsukyio-console u-material">
       <div className={`tsukyio-toolbar ${isHome ? "is-home" : ""}`}>
         <div className="tsukyio-search">
           <Search size={15} className="tsukyio-search-icon" />
@@ -928,6 +929,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
           )}
         </div>
       )}
+      </div>
 
       {isHome ? (
         // Discovery home: full-width tiles, NO dock.

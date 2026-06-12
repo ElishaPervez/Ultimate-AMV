@@ -131,6 +131,15 @@
   text-decoration: underline;
 }
 
+/* ---- Console (toolbar + categories + breadcrumb + results meta) ----
+   Grouped so the whole control cluster can carry the wallpaper material
+   as ONE surface (styles/material.css). Matches the panel's 14px gap. */
+.tsukyio-console {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 /* ---- Toolbar (search + deep toggle) ---- */
 .tsukyio-toolbar {
   display: flex;

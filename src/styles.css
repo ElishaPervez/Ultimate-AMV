@@ -35,6 +35,10 @@
 /* The app's look — token redefinitions + targeted overrides on top of base. */
 @import "./styles/theme.css" layer(theme);
 
+/* Smoked-glass material for wallpaper mode. Same `theme` layer, imported
+   AFTER theme.css so it wins ties; must stay below `user` (bright-ink). */
+@import "./styles/material.css" layer(theme);
+
 /* Bright-wallpaper dark-ink flip. Deliberately in the USER layer (above
    base AND theme): it must override hardcoded per-component text colors
    regardless of selector specificity. Only active under html.bright-ink. */

@@ -622,11 +622,14 @@
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: rgba(15, 20, 24, 0.55);
+  /* No backdrop-filter here: this renders once PER VISIBLE TILE, and each
+     backdrop-filter element costs its own per-frame backdrop snapshot. The
+     button sits over video thumbnails (not the wallpaper), so a heavier
+     fill does the same legibility job for free. */
+  background: rgba(15, 20, 24, 0.78);
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: rgba(255, 255, 255, 0.6);
   cursor: pointer;
-  backdrop-filter: blur(4px);
   transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   outline: none;
 }

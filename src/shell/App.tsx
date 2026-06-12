@@ -265,12 +265,7 @@ export function App() {
     // Dark workspace ink for bright wallpapers (styles/bright-ink.css). Only
     // meaningful while a wallpaper is actually set.
     root.classList.toggle("bright-ink", hasBg && liveBg.brightText);
-    if (hasBg) {
-      root.style.setProperty("--app-bg-blur", `${Math.max(0, liveBg.blur)}px`);
-    } else {
-      root.style.removeProperty("--app-bg-blur");
-    }
-  }, [liveBg.imagePath, liveBg.videoPath, liveBg.blur, liveBg.brightText]);
+  }, [liveBg.imagePath, liveBg.videoPath, liveBg.brightText]);
 
   React.useEffect(() => {
     setDiscordPanel(activeMeta?.title ?? "Idle");

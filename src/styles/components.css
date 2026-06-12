@@ -18,10 +18,19 @@
 
 .logs-panel {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   padding: 14px 18px 18px;
+}
+
+/* Stats bar + toolbar + filters + results count, grouped so the whole
+   control cluster can carry the wallpaper material as ONE surface
+   (styles/material.css). */
+.logs-console {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* Stats Bar */
@@ -294,6 +303,7 @@
 
 /* Terminal Log */
 .terminal-log {
+  flex: 1;
   min-height: 0;
   overflow: auto;
   margin: 0;

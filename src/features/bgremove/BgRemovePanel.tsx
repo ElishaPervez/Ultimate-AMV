@@ -512,7 +512,7 @@ export function BgRemovePanel({
   return (
     <section
       ref={dropZone.ref}
-      className={`conversion-panel drop-zone${dropZone.hover ? " is-drop-target" : ""}`}
+      className={`conversion-panel bgremove-panel drop-zone${dropZone.hover ? " is-drop-target" : ""}`}
       style={hiddenStyle}
     >
       <div className="drop-zone-overlay">
@@ -535,7 +535,7 @@ export function BgRemovePanel({
 
       <div className="conversion-grid">
         {/* Left Side: Source details / preview */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        <div className="bgremove-col u-material">
           <ConversionSourceCard
             icon={isImageTab ? <Image size={22} /> : <Video size={22} />}
             label={isImageTab ? "Input Image" : "Input Video"}
@@ -712,7 +712,7 @@ export function BgRemovePanel({
         </div>
 
         {/* Right Side: Options / Action */}
-        <div className="conversion-card run-card">
+        <div className="conversion-card run-card u-material">
           <div className="conversion-format-card wide">
             {status && (
               <div className={`conversion-compat ${status.hardware && status.hardware.hasCuda ? "is-ready" : "is-locked"}`}>

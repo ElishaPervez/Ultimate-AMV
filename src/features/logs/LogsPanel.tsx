@@ -283,6 +283,7 @@ export function LogsPanel() {
 
   return (
     <div className="logs-panel">
+      <div className="logs-console u-material">
       {/* Stats Bar */}
       <div className="logs-stats">
         <div className={`log-stat ${activeTab === "all" ? "is-active" : ""}`} onClick={() => setActiveTab("all")}>
@@ -380,6 +381,7 @@ export function LogsPanel() {
         {(searchQuery || selectedCategory !== "all" || activeTab !== "all") && (
           <span className="logs-filter-badge">filtered</span>
         )}
+      </div>
       </div>
 
       {errorMessage && (

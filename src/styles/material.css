@@ -1,0 +1,269 @@
+/* ============================================================
+   SMOKED-GLASS MATERIAL (wallpaper legibility layer)
+   ============================================================
+   Active only under `:root.has-app-bg`. Guarantees a contrast floor
+   for UI that sits on a user wallpaper by MULTIPLICATIVELY darkening
+   the backdrop behind designated "carrier" surfaces:
+
+     blur       — texture knob (detail removal)
+     brightness — contrast knob (pulls bright wallpapers under a
+                  luminance ceiling; dark wallpapers pass through
+                  nearly untouched, so this is NOT a dark slab)
+     saturate   — keeps the darkened glass feeling like the wallpaper
+
+   Controls inside a carrier keep their normal white-alpha styling —
+   the carrier guarantees a dark-ish backdrop behind them. The
+   wallpaper stays sharp and full-brightness in the gaps between
+   carriers; that is the point of the design.
+
+   Rules of use (see docs/material-implementation-map.md):
+   - Carriers are PANEL/CARD-level only, a handful per page. Every
+     backdrop-filter element costs a per-frame backdrop snapshot
+     (video wallpapers!) — never put the material on small controls.
+   - Never nest a carrier inside another carrier (Chromium backdrop-
+     root quirks + wasted snapshots). The de-blur guard below strips
+     `.glass` children inside carriers automatically.
+   - `.focus-panel` must NEVER be a carrier: it spans the whole
+     workspace, so smoking it would dim the entire wallpaper.
+   - The material's blur is fixed and deliberately independent of the
+     wallpaper "Blur" slider — that slider is a wallpaper aesthetic
+     (applied to the wallpaper element itself in BackgroundLayer),
+     while the material is a legibility guarantee.
+
+   Lives in the `theme` layer, imported AFTER theme.css, so it beats
+   every base-layer rule and theme.css at equal specificity without
+   !important, while staying below `user` (bright-ink).
+   ============================================================ */
+
+:root {
+  --material-blur: 20px;
+  --material-brightness: 0.55;
+  --material-saturate: 1.4;
+  --material-tint: rgba(10, 12, 24, 0.3);
+  --material-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 12px 40px -12px rgba(0, 0, 0, 0.5);
+}
+
+/* ---- Carriers --------------------------------------------- */
+/* `.u-material` is the opt-in class for JSX-designated carriers; the
+   named selectors attach carriers to existing classed elements (one
+   list entry per page surface — see the per-page sections below for
+   their shaping). Kept as a comma list, NOT :is(), so each selector
+   carries its own specificity and later per-surface overrides in
+   this file win by source order. */
+:root.has-app-bg .u-material,
+:root.has-app-bg .sidebar,
+:root.has-app-bg .mode-switcher,
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-grid,
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-format-card,
+:root.has-app-bg .dash-hero-card,
+:root.has-app-bg .dash-stage-main > :is(.extract-vocals-button, .audio-card, .stem-mixer),
+:root.has-app-bg .dash-stage-side,
+:root.has-app-bg .tsukyio-panel > .tsukyio-grid-scroll,
+:root.has-app-bg .tsukyio-results-col,
+:root.has-app-bg .tsukyio-dock,
+:root.has-app-bg .youtube-download-card,
+:root.has-app-bg .youtube-format-list,
+:root.has-app-bg .youtube-trim,
+:root.has-app-bg .download-history-panel,
+:root.has-app-bg .terminal-log,
+:root.has-app-bg .clip-extractor-rail,
+:root.has-app-bg .download-queue-panel,
+:root.has-app-bg .home-grid {
+  background: var(--material-tint);
+  backdrop-filter: blur(var(--material-blur)) brightness(var(--material-brightness)) saturate(var(--material-saturate));
+  -webkit-backdrop-filter: blur(var(--material-blur)) brightness(var(--material-brightness)) saturate(var(--material-saturate));
+  box-shadow: var(--material-edge);
+}
+
+/* Card-shaped carriers get the hairline. Rails (.sidebar,
+   .clip-extractor-rail, .download-queue-panel) and the mode switcher
+   keep their own edge-to-edge borders. */
+:root.has-app-bg .u-material,
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-grid,
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-format-card,
+:root.has-app-bg .dash-hero-card,
+:root.has-app-bg .dash-stage-main > :is(.extract-vocals-button, .audio-card, .stem-mixer),
+:root.has-app-bg .dash-stage-side,
+:root.has-app-bg .tsukyio-panel > .tsukyio-grid-scroll,
+:root.has-app-bg .tsukyio-results-col,
+:root.has-app-bg .tsukyio-dock,
+:root.has-app-bg .youtube-download-card,
+:root.has-app-bg .youtube-format-list,
+:root.has-app-bg .youtube-trim,
+:root.has-app-bg .download-history-panel,
+:root.has-app-bg .terminal-log,
+:root.has-app-bg .home-grid {
+  border: 1px solid var(--glass-border);
+}
+
+/* ---- One snapshot per carrier ------------------------------ */
+/* Under a wallpaper, ONLY carriers may hold a backdrop snapshot.
+   This kills `.glass`'s base blur on every non-carrier — including
+   `.focus-panel.glass` (whole-viewport!) and glassy children inside
+   carriers. Without a wallpaper, `.glass` keeps its normal blur over
+   the static theme gradient. */
+:root.has-app-bg :is(.glass, .glass-strong):not(.u-material),
+:root.has-app-bg .dash-side-card {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---- Shell carrier shaping --------------------------------- */
+/* Sidebar is a full-height rail: square corners, its own border-right
+   hairline; the ambient drop shadow would just bleed off-viewport. */
+:root.has-app-bg .sidebar {
+  box-shadow: none;
+}
+
+/* Mode switcher connects flush to the window chrome above it: square
+   corners and no inset top highlight, so chrome + sidebar + tab band
+   read as one continuous app frame instead of a floating pill. Only
+   the downward drop shadow remains, settling the band onto the page. */
+:root.has-app-bg .mode-switcher {
+  border-radius: 0;
+  box-shadow: 0 14px 30px -16px rgba(0, 0, 0, 0.45);
+  /* Overhang the focus panel's 1px hairline border columns: the panel is
+     transparent, so the wallpaper otherwise beams through that 1px strip
+     as a bright seam between the sidebar and the band. */
+  margin: 0 -1px;
+}
+
+/* Matching square-off for the panel's own hairline behind the band —
+   the chrome's border-bottom is the only separator line up there. */
+:root.has-app-bg .focus-panel:has(.mode-switcher) {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top: none;
+}
+
+/* ---- Bare hero scrim ---------------------------------------- */
+/* Page heroes (kicker + display title + subtitle) sit directly on the
+   wallpaper by design. A left-anchored gradient scrim guarantees they
+   read on bright wallpapers without costing a backdrop snapshot; on
+   dark wallpapers it disappears into the backdrop. The negative left
+   margin keeps the text column optically aligned with the content
+   below despite the scrim's padding. */
+:root.has-app-bg .conversion-hero {
+  background: linear-gradient(90deg, rgba(6, 8, 16, 0.5), rgba(6, 8, 16, 0) 72%);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px 22px;
+  margin-left: -20px;
+}
+
+:root.has-app-bg .conversion-hero h2 {
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+}
+
+/* ---- BG remover (Phase 2.1) -------------------------------- */
+/* Two column carriers side by side; the grid's gap-0 + border-left
+   divider layout was designed for the no-surface look, so under a
+   wallpaper the columns separate into distinct cards instead. */
+:root.has-app-bg .bgremove-panel .conversion-grid {
+  gap: 24px;
+}
+
+:root.has-app-bg .bgremove-panel :is(.bgremove-col, .run-card) {
+  border-radius: var(--radius-xl);
+}
+
+:root.has-app-bg .bgremove-panel .bgremove-col {
+  padding: 20px;
+}
+
+:root.has-app-bg .bgremove-panel .run-card {
+  padding: 24px;
+}
+
+/* ---- Audio / video conversion (Phase 2.2) ------------------- */
+/* The grid is ONE surface (source + run columns separated by the
+   run-card's border-left divider); it has no padding of its own.
+   align-self: start — the panel's 1fr row otherwise stretches the
+   surface to the bottom of the page regardless of content. */
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-grid {
+  padding: 0 26px;
+  border-radius: var(--radius-xl);
+  align-self: start;
+}
+
+/* The run column's first element is the right-justified Start/Cancel
+   button; its base padding-top is 0, which parked the button flush in
+   the surface's corner. */
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .run-card {
+  padding-top: 24px;
+}
+
+:root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-format-card {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+}
+
+/* ---- Vocal separation (Phase 2.3) --------------------------- */
+/* Hero + the active stage card carry their own material (one of the
+   stage wrappers is visible at a time). The side column is ONE
+   carrier; the small cards inside it become chip-style controls —
+   their own backdrop blur is killed in the guard above. */
+:root.has-app-bg .dash-stage-side {
+  padding: 14px;
+  border-radius: 18px;
+}
+
+:root.has-app-bg .dash-side-card {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* ---- Tsukyio vault (Phase 2.4) ------------------------------ */
+:root.has-app-bg .tsukyio-console {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+}
+
+:root.has-app-bg .tsukyio-panel > .tsukyio-grid-scroll,
+:root.has-app-bg .tsukyio-results-col {
+  padding: 12px;
+  border-radius: var(--radius-lg);
+}
+
+/* Vault header stays bare on the wallpaper — same halo treatment the
+   kicker already gets from base.css §3. */
+:root.has-app-bg .tsukyio-header h2 {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
+
+/* ---- YouTube tab (Phase 2.5) -------------------------------- */
+:root.has-app-bg .youtube-format-list {
+  padding: 10px;
+  border-radius: 10px;
+}
+
+/* The lone queue button floats bare between carriers — give it a
+   solid accent fill instead of its washes-on-bright 8% tint. */
+:root.has-app-bg .youtube-actions button {
+  border-color: transparent;
+  background: var(--accent-gradient);
+  color: var(--theme-accent-contrast);
+}
+
+/* ---- Logs (Phase 2.6) --------------------------------------- */
+:root.has-app-bg .logs-console {
+  padding: 12px;
+  border-radius: 12px;
+}
+
+/* ---- Home (Phase 2.9) --------------------------------------- */
+:root.has-app-bg .home-grid {
+  padding: 16px;
+  border-radius: var(--radius-xl);
+}
+
+/* Home hero sits bare on the wallpaper and had NO protection at all. */
+:root.has-app-bg .home-hero-title,
+:root.has-app-bg .home-hero-sub {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
+
+:root.has-app-bg .home-hero-sub {
+  color: rgba(255, 255, 255, 0.92);
+}
