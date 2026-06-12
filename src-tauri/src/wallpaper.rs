@@ -116,7 +116,25 @@ fn probe_duration_seconds(ffmpeg: &Path, input: &Path) -> Option<f64> {
     probe_video_metadata(ffmpeg, input).1
 }
 
-fn cache_key(source: &Path, fps: u32) -> Result<(String, String), String> {
+/// Encode ceiling derived from the attached displays: the tallest monitor's
+/// physical height, kept within [1080, 2160]. The floor keeps small-display
+/// machines on the cheap 1080p files we always produced (and moving to a
+/// bigger screen later just re-transcodes — the height is part of the cache
+/// key); the ceiling avoids 8K encodes that h264_nvenc cannot produce and
+/// that no wallpaper needs.
+fn target_wallpaper_height(window: &tauri::Window) -> u32 {
+    let tallest = window
+        .available_monitors()
+        .ok()
+        .into_iter()
+        .flatten()
+        .map(|monitor| monitor.size().height)
+        .max()
+        .unwrap_or(1080);
+    tallest.clamp(1080, 2160)
+}
+
+fn cache_key(source: &Path, fps: u32, max_height: u32) -> Result<(String, String), String> {
     let metadata = source
         .metadata()
         .map_err(|error| format!("Could not read source video: {error}"))?;
@@ -129,7 +147,10 @@ fn cache_key(source: &Path, fps: u32) -> Result<(String, String), String> {
     let size = metadata.len().to_string();
     let input_key = source.to_string_lossy().to_string();
     let fps_key = fps.to_string();
-    let id = short_stable_id(&[&input_key, &size, &modified, &fps_key, "wallpaper-v1"]);
+    // max_height is part of the key so a display change (dock/undock, new
+    // monitor) re-transcodes instead of silently reusing a lower-res file.
+    let height_key = max_height.to_string();
+    let id = short_stable_id(&[&input_key, &size, &modified, &fps_key, &height_key, "wallpaper-v1"]);
     let stem = sanitize_path_segment(
         source
             .file_stem()
@@ -177,6 +198,7 @@ fn run_transcode(
     input: &Path,
     output: &Path,
     fps: u32,
+    max_height: u32,
     duration: Option<f64>,
     use_nvenc: bool,
     use_hwaccel: bool,
@@ -204,11 +226,11 @@ fn run_transcode(
         "-map".to_string(),
         "0:v:0".to_string(),
         "-an".to_string(),
-        // Cap at 1080p (preserve aspect) and target the requested fps. The
-        // min() guard keeps sub-1080p sources at native resolution so we
-        // never upscale.
+        // Cap at the display-derived height (preserve aspect) and target the
+        // requested fps — see target_wallpaper_height(). The min() guard
+        // keeps smaller sources at native resolution so we never upscale.
         "-vf".to_string(),
-        format!("scale=-2:'min(1080,ih)',fps={fps}"),
+        format!("scale=-2:'min({max_height},ih)',fps={fps}"),
         "-r".to_string(),
         fps.to_string(),
     ]);
@@ -327,10 +349,11 @@ pub(crate) async fn wallpaper_transcode(
     fps: u32,
 ) -> Result<WallpaperTranscodeResult, String> {
     let fps = fps.clamp(15, 60);
+    let max_height = target_wallpaper_height(&window);
     log_info(
         "wallpaper.transcode.start",
         "Starting wallpaper transcode",
-        json!({ "source": &source, "fps": fps }),
+        json!({ "source": &source, "fps": fps, "max_height": max_height }),
     );
     let app_handle = window.app_handle().clone();
     let dir = wallpaper_dir(&app_handle)?;
@@ -343,7 +366,7 @@ pub(crate) async fn wallpaper_transcode(
             return Err(format!("Source video not found: {source}"));
         }
 
-        let (stem, id) = cache_key(&source_path, fps)?;
+        let (stem, id) = cache_key(&source_path, fps, max_height)?;
         let output = dir.join(format!("wp_{stem}-{id}.mp4"));
 
         if output
@@ -382,6 +405,7 @@ pub(crate) async fn wallpaper_transcode(
             &source_path,
             &output,
             fps,
+            max_height,
             duration,
             use_nvenc,
             true,
@@ -403,6 +427,7 @@ pub(crate) async fn wallpaper_transcode(
                 &source_path,
                 &output,
                 fps,
+                max_height,
                 duration,
                 false,
                 false,
