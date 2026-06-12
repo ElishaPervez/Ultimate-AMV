@@ -21,7 +21,6 @@ import {
   Sparkles,
   Tv,
 } from "lucide-react";
-import { isAudioBusy, onAudioBusyChange } from "../lib/audioBusy";
 import { readBackgroundState } from "../lib/background";
 import { APP_THEMES, DEFAULT_BG_STATE } from "../lib/constants";
 import { setDiscordPanel } from "../lib/discord";
@@ -31,7 +30,6 @@ import { parseBridgePayload } from "../utils/bridge";
 import type { AppConfig, BackgroundState, SectionId } from "../types/app";
 import type { DownloaderTab } from "../types/download";
 import { NewAudioExtractionPanel } from "../features/audio/NewAudioExtractionPanel";
-import { AudioExtractionPanel } from "../features/audio/AudioExtractionPanel";
 import { MediaToAudioPanel } from "../features/audio/MediaToAudioPanel";
 import { ClipExtractorPanel } from "../features/clips/ClipExtractorPanel";
 import { DownloaderPanel } from "../features/downloader/DownloaderPanel";
@@ -224,32 +222,6 @@ export function App() {
     const match = engineThemes.find((t) => t.id === activeThemeId);
     return match?.name ?? activeThemeId;
   }, [engineThemes, activeThemeId]);
-  // Documented CSS-only-rule exception: the two flagship themes are genuinely
-  // "old UI vs new UI" — when "ultimate-amv-old" is active we render the legacy
-  // AudioExtractionPanel; every other theme uses NewAudioExtractionPanel. This
-  // is the ONLY component branch keyed on the engine theme.
-  //
-  // The CSS swap is instant on theme change, but the audio *component* swap is
-  // DEFERRED while a vocal-separation extraction is in flight: unmounting the
-  // running panel would tear down its audio-progress listener and orphan the
-  // job. We hold the committed choice until the panel reports idle, then catch
-  // up to the active theme. The audio screen itself doesn't have to be visible
-  // for an extraction to be running, so this guard is theme- not nav-scoped.
-  const desiredLegacyAudioPanel = activeThemeId === "ultimate-amv-old";
-  const [useLegacyAudioPanel, setUseLegacyAudioPanel] = React.useState(desiredLegacyAudioPanel);
-  React.useEffect(() => {
-    if (!isAudioBusy()) {
-      // Idle: follow the theme immediately.
-      setUseLegacyAudioPanel(desiredLegacyAudioPanel);
-      return;
-    }
-    // Busy: hold the current panel and commit the pending choice when the
-    // in-flight extraction reports done.
-    const off = onAudioBusyChange((busy) => {
-      if (!busy) setUseLegacyAudioPanel(desiredLegacyAudioPanel);
-    });
-    return off;
-  }, [desiredLegacyAudioPanel]);
   const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({
     media: true,
     downloads: false,
@@ -756,7 +728,7 @@ export function App() {
                   <DownloaderPanel active={isDownloader} activeTab={downloaderTab} />
                 </div>
                 <div className={`panel-view spring-motion ${isAudioExtraction ? "is-active" : "is-hidden"}`} aria-hidden={!isAudioExtraction}>
-                  {useLegacyAudioPanel ? <AudioExtractionPanel /> : <NewAudioExtractionPanel />}
+                  <NewAudioExtractionPanel />
                 </div>
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
                   <BgRemovePanel activeTab={bgRemoveTab} />
