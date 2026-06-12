@@ -299,19 +299,34 @@ pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Va
         .map_err(|error| format!("Could not parse Tsukyio response: {error}"))
 }
 
+/// True when `ext` looks like a real file extension (short, alphanumeric)
+/// rather than a dotted name fragment like "verylongext" or "v1.2 final".
+fn is_real_extension(ext: &str) -> bool {
+    let ext = ext.trim();
+    !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// Picks a sensible file extension for a downloaded asset. The vault encodes
 /// the real extension in the item's `path`/`name`; default to .mp4 (video) so
 /// the file is at least openable when no extension is present.
 fn extension_for(name: &str, path_hint: &str) -> String {
     for source in [path_hint, name] {
         if let Some(ext) = Path::new(source).extension().and_then(|e| e.to_str()) {
-            let ext = ext.trim().to_ascii_lowercase();
-            if !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-                return ext;
+            if is_real_extension(ext) {
+                return ext.trim().to_ascii_lowercase();
             }
         }
     }
     "mp4".to_string()
+}
+
+/// Strips a recognized extension from a vault item name, so composing the
+/// final `{stem}.{ext}` path doesn't double it (`clip.mp4` → `clip.mp4.mp4`).
+fn stem_for(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && is_real_extension(ext) => stem,
+        _ => name,
+    }
 }
 
 fn emit_progress(window: &Window, payload: Value) {
@@ -344,7 +359,7 @@ pub(crate) async fn tsukyio_download(
         .map_err(|error| format!("Could not create download folder: {error}"))?;
 
     let ext = extension_for(&name, path_hint.as_deref().unwrap_or(""));
-    let stem = sanitize_path_segment(&name, &asset_id, 120);
+    let stem = sanitize_path_segment(stem_for(&name), &asset_id, 120);
     // Pick a non-colliding final path: two different assets can share the same
     // display name, and `File::create` truncates, so a naive `{stem}.{ext}`
     // would silently overwrite an existing different file.
@@ -993,6 +1008,21 @@ mod tests {
         assert_eq!(extension_for("song.mp3", ""), "mp3");
         // Reject junk that isn't really an extension.
         assert_eq!(extension_for("a.b.c.verylongext", ""), "mp4");
+    }
+
+    #[test]
+    fn stem_strips_only_real_extensions() {
+        // The vault's `name` usually carries the extension; the stem must not,
+        // or the composed `{stem}.{ext}` doubles it (clip.mp4.mp4).
+        assert_eq!(stem_for("clip.mp4"), "clip");
+        assert_eq!(stem_for("song.mp3"), "song");
+        assert_eq!(stem_for("clip"), "clip");
+        // A junk suffix isn't an extension and stays part of the stem.
+        assert_eq!(stem_for("a.b.c.verylongext"), "a.b.c.verylongext");
+        // Dotted version fragments survive too.
+        assert_eq!(stem_for("opening v1.2 final"), "opening v1.2 final");
+        // A bare dot-name has no stem to keep.
+        assert_eq!(stem_for(".mp4"), ".mp4");
     }
 
     #[test]
