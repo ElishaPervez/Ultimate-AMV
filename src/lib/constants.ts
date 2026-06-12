@@ -42,6 +42,7 @@ export const DEFAULT_BG_STATE: BackgroundState = {
   videoPath: "",
   videoSource: "",
   videoFps: 30,
+  brightText: false,
 };
 
 export const WALLPAPER_FPS_OPTIONS = [15, 24, 30, 60] as const;

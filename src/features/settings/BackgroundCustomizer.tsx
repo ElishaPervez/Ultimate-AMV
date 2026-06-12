@@ -9,6 +9,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Lock,
+  Sun,
   Trash2,
   Upload,
   X,
@@ -63,6 +64,49 @@ function markLegibilityNoticeShown(): void {
   } catch {
     // Ignore storage failures; the notice just shows again next time.
   }
+}
+
+// ---- Wallpaper brightness sniff (drives the "use dark text" SUGGESTION) ----
+// Downsample the picked image / a video frame onto a tiny canvas and measure
+// perceptual luminance. Drives a dismissible suggestion only — never a forced
+// override. Thresholds: a high mean catches uniformly light wallpapers; the
+// bright-pixel fraction catches mixed shots whose mean is dragged down by a
+// dark region but that are still mostly white where the UI sits.
+const BRIGHT_MEAN_THRESHOLD = 0.58;
+const BRIGHT_FRACTION_THRESHOLD = 0.45;
+
+function sampleLuminance(
+  source: CanvasImageSource,
+): { mean: number; brightFraction: number } | null {
+  try {
+    const w = 48;
+    const h = 27;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(source, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    let sum = 0;
+    let bright = 0;
+    const count = w * h;
+    for (let i = 0; i < data.length; i += 4) {
+      const lum = (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+      sum += lum;
+      if (lum > 0.82) bright += 1;
+    }
+    return { mean: sum / count, brightFraction: bright / count };
+  } catch {
+    // Canvas unavailable (test env) or the source is tainted — the suggestion
+    // simply never appears; the manual toggle still works.
+    return null;
+  }
+}
+
+function looksBright(sample: { mean: number; brightFraction: number } | null): boolean {
+  if (!sample) return false;
+  return sample.mean >= BRIGHT_MEAN_THRESHOLD || sample.brightFraction >= BRIGHT_FRACTION_THRESHOLD;
 }
 
 type TabId = "image" | "video";
@@ -136,6 +180,11 @@ export function BackgroundCustomizer({
   }, []);
   const legibilityLocked = legibilityPhase !== "gone";
   const legibilityTyping = typedChars < LEGIBILITY_NOTICE_TEXT.length;
+  // Bright-wallpaper suggestion state. `brightSuggest` arms the dismissible
+  // "use dark text?" row; dismissals are remembered per source path so
+  // re-previewing the same file doesn't re-nag within this modal session.
+  const [brightSuggest, setBrightSuggest] = React.useState(false);
+  const brightDismissedRef = React.useRef<Set<string>>(new Set());
   const frameRef = React.useRef<HTMLDivElement | null>(null);
   const dragRef = React.useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
   const draftRef = React.useRef(draft);
@@ -172,6 +221,37 @@ export function BackgroundCustomizer({
 
   const previewUrl = draft.imagePath ? convertFileSrc(draft.imagePath) : "";
   const videoPreviewUrl = draft.videoPath ? convertFileSrc(draft.videoPath) : "";
+
+  // Measure a wallpaper and arm the dark-text suggestion if it reads bright.
+  // No-op when dark text is already on or this source was already dismissed.
+  const evaluateBrightness = React.useCallback((source: CanvasImageSource, key: string) => {
+    if (!key || brightDismissedRef.current.has(key)) return;
+    if (draftRef.current.brightText) return;
+    setBrightSuggest(looksBright(sampleLuminance(source)));
+  }, []);
+
+  function dismissBrightSuggest() {
+    const key = tab === "video" ? draftRef.current.videoPath : draftRef.current.imagePath;
+    if (key) brightDismissedRef.current.add(key);
+    setBrightSuggest(false);
+  }
+
+  // Sniff picked images. (Videos are sniffed from the preview element's first
+  // decoded frame via onLoadedData — see the <video> below.) The cancelled
+  // flag drops a stale decode that lands after the user picked another file.
+  React.useEffect(() => {
+    setBrightSuggest(false);
+    if (!draft.imagePath) return undefined;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (!cancelled) evaluateBrightness(img, draft.imagePath);
+    };
+    img.src = convertFileSrc(draft.imagePath);
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.imagePath, evaluateBrightness]);
 
   async function ingestImagePath(source: string) {
     setError(null);
@@ -356,34 +436,23 @@ export function BackgroundCustomizer({
     },
   });
 
-  async function clearImage() {
+  // Remove edits the DRAFT only. Deleting files here would be destructive
+  // before commit: the persisted config still references them until Apply,
+  // so a Remove followed by Cancel/close left config pointing at deleted
+  // files — every surface goes transparent for a wallpaper that can't load,
+  // and the whole app renders white. Files are GC'd at Apply time instead.
+  function clearImage() {
     setError(null);
-    try {
-      setBusy(true);
-      await invoke("clear_background_image");
-      update({ imagePath: "" });
-    } catch (e) {
-      setError(readBridgeError(e));
-    } finally {
-      setBusy(false);
-    }
+    update({ imagePath: "" });
   }
 
-  async function clearVideo() {
+  function clearVideo() {
     setError(null);
-    try {
-      setBusy(true);
-      // Invalidate any in-flight transcode so its result can't repopulate
-      // videoPath after the user explicitly removed the wallpaper.
-      transcodeGenRef.current += 1;
-      await invoke("wallpaper_clear");
-      setSourceFps(null);
-      update({ videoPath: "", videoSource: "", videoFps: DEFAULT_BG_STATE.videoFps });
-    } catch (e) {
-      setError(readBridgeError(e));
-    } finally {
-      setBusy(false);
-    }
+    // Invalidate any in-flight transcode so its result can't repopulate
+    // videoPath after the user explicitly removed the wallpaper.
+    transcodeGenRef.current += 1;
+    setSourceFps(null);
+    update({ videoPath: "", videoSource: "", videoFps: DEFAULT_BG_STATE.videoFps });
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
@@ -428,7 +497,8 @@ export function BackgroundCustomizer({
   }
 
   function reset() {
-    update({ ...DEFAULT_BG_STATE, imagePath: draft.imagePath, videoPath: draft.videoPath, videoSource: draft.videoSource, videoFps: draft.videoFps });
+    // "Reset position" only — the dark-text preference is not positional.
+    update({ ...DEFAULT_BG_STATE, imagePath: draft.imagePath, videoPath: draft.videoPath, videoSource: draft.videoSource, videoFps: draft.videoFps, brightText: draft.brightText });
   }
 
   async function applyImage() {
@@ -439,6 +509,7 @@ export function BackgroundCustomizer({
       ["background_offset_y", String(draft.offsetY)],
       ["background_dim", String(Math.round(draft.dim))],
       ["background_blur", String(Math.round(draft.blur))],
+      ["background_bright_text", draft.brightText ? "1" : "0"],
     ];
     // Picking image clears any active video so the two stay mutually
     // exclusive at render time (image won't ever shadow the video field).
@@ -449,6 +520,19 @@ export function BackgroundCustomizer({
     for (const [key, value] of fields) {
       await invoke<string>("set_config", { key, value });
     }
+    // GC only AFTER the config writes above stop referencing the files:
+    // wallpaper cache when an image displaced the video, ingested image
+    // copies when the user removed the image. Best-effort — a failure just
+    // leaves orphans for the next apply to sweep.
+    try {
+      if (draft.imagePath) {
+        await invoke("wallpaper_clear");
+      } else {
+        await invoke("clear_background_image");
+      }
+    } catch {
+      // Pruning is best-effort.
+    }
     const next: BackgroundState = draft.imagePath
       ? { ...draft, videoPath: "", videoSource: "" }
       : draft;
@@ -456,7 +540,7 @@ export function BackgroundCustomizer({
   }
 
   async function applyVideo() {
-    if (!draft.videoPath) {
+    if (!draft.videoPath && draft.videoSource) {
       // The transcode for this source + fps never produced a file - either
       // it's still running or it errored out earlier. Apply has nothing to
       // commit yet.
@@ -469,25 +553,32 @@ export function BackgroundCustomizer({
       ["background_video_fps", String(draft.videoFps)],
       ["background_dim", String(Math.round(draft.dim))],
       ["background_blur", String(Math.round(draft.blur))],
-      // Setting a wallpaper hides the image background.
-      ["background_image", ""],
+      ["background_bright_text", draft.brightText ? "1" : "0"],
     ];
+    if (draft.videoPath) {
+      // Setting a wallpaper hides the image background.
+      fields.push(["background_image", ""]);
+    }
     for (const [key, value] of fields) {
       await invoke<string>("set_config", { key, value });
     }
-    // Prune sibling cache files now that the user has settled on a final
-    // source + fps. Earlier transcodes from this session (other fps values
-    // the user previewed) are no longer needed.
+    // Cache GC, only AFTER config no longer references the swept files.
+    // Settled on a wallpaper: prune sibling transcodes from this session
+    // (other fps values the user previewed). Removed the wallpaper: sweep
+    // the whole cache.
     try {
-      await invoke("wallpaper_commit", { keep: draft.videoPath });
+      if (draft.videoPath) {
+        await invoke("wallpaper_commit", { keep: draft.videoPath });
+      } else {
+        await invoke("wallpaper_clear");
+      }
     } catch {
       // Pruning is best-effort - failing here just leaves an orphan file
       // that the next commit will sweep, so don't surface it to the user.
     }
-    const next: BackgroundState = {
-      ...draft,
-      imagePath: "",
-    };
+    const next: BackgroundState = draft.videoPath
+      ? { ...draft, imagePath: "" }
+      : draft;
     onCommit(next);
   }
 
@@ -695,6 +786,7 @@ export function BackgroundCustomizer({
                 loop
                 playsInline
                 preload="auto"
+                onLoadedData={(e) => evaluateBrightness(e.currentTarget, draft.videoPath)}
                 style={{ filter: draft.blur > 0 ? `blur(${draft.blur * 0.4}px)` : undefined }}
               />
             ) : draft.videoSource ? (
@@ -784,7 +876,59 @@ export function BackgroundCustomizer({
               onChange={(e) => update({ blur: Number(e.currentTarget.value) })}
             />
           </label>
+          <div className="bg-control bg-control-toggle">
+            <span>Dark text</span>
+            <button
+              type="button"
+              className="bg-toggle"
+              role="switch"
+              aria-checked={draft.brightText}
+              aria-label="Dark text for bright wallpapers"
+              data-on={draft.brightText ? "true" : "false"}
+              onClick={() => {
+                const next = !draft.brightText;
+                if (next) setBrightSuggest(false);
+                update({ brightText: next });
+              }}
+              title={
+                draft.brightText
+                  ? "Switch the app back to light text"
+                  : "Switch app text to dark for bright wallpapers"
+              }
+            >
+              <span className="bg-toggle-knob" aria-hidden="true" />
+            </button>
+          </div>
         </div>
+
+        {brightSuggest &&
+          !draft.brightText &&
+          (tab === "image" ? Boolean(draft.imagePath) : Boolean(draft.videoPath)) && (
+            <div className="bg-bright-suggest" role="status">
+              <Sun size={15} strokeWidth={2.2} aria-hidden="true" />
+              <span className="bg-bright-suggest-text">
+                This wallpaper looks bright — switch the app to dark text for readability?
+              </span>
+              <button
+                type="button"
+                className="install-btn is-secondary bg-bright-suggest-accept"
+                onClick={() => {
+                  setBrightSuggest(false);
+                  update({ brightText: true });
+                }}
+              >
+                <span>Use dark text</span>
+              </button>
+              <button
+                type="button"
+                className="bg-bright-suggest-dismiss"
+                onClick={dismissBrightSuggest}
+                aria-label="Dismiss dark text suggestion"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
 
         {transcodeProgress && (
           <div className="bg-customizer-progress">
@@ -855,7 +999,7 @@ export function BackgroundCustomizer({
               type="button"
               className="install-btn is-primary"
               onClick={() => void apply()}
-              disabled={busy || encoding || (tab === "video" && !draft.videoPath)}
+              disabled={busy || encoding || (tab === "video" && !draft.videoPath && Boolean(draft.videoSource))}
             >
               {busy || encoding ? <Loader2 size={16} className="audio-spin" /> : <CheckCircle2 size={16} strokeWidth={2.3} />}
               <span>{encoding ? "Compressing..." : busy ? "Saving..." : "Apply"}</span>

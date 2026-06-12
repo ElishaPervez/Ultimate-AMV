@@ -18,5 +18,9 @@ export function readBackgroundState(config: Partial<AppConfig> | null | undefine
     videoPath: typeof config?.background_video === "string" ? config.background_video : "",
     videoSource: typeof config?.background_video_source === "string" ? config.background_video_source : "",
     videoFps: clampBgValue(config?.background_video_fps, 15, 60, DEFAULT_BG_STATE.videoFps),
+    brightText:
+      config?.background_bright_text === true ||
+      config?.background_bright_text === "1" ||
+      config?.background_bright_text === "true",
   };
 }

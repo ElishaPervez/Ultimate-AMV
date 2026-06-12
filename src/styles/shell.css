@@ -277,6 +277,132 @@
   background: rgba(255, 255, 255, 0.04);
   font-size: 12.5px;
 }
+
+/* Dark-text toggle: label and switch sit together as one unit (no
+   space-between — that floated the switch to its grid column's far edge,
+   visually orphaned from the label). */
+.bg-control-toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+/* Compact switch sized for this row. No in-track ON/OFF text — at this scale
+   the knob covers it; the knob position and accent fill carry the state. */
+.bg-toggle {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: background 200ms ease, border-color 200ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bg-toggle[data-on="true"] {
+  background: linear-gradient(
+    120deg,
+    rgb(var(--theme-accent-rgb)),
+    rgb(var(--theme-accent-2-rgb))
+  );
+  border-color: rgb(var(--theme-accent-rgb) / 0.85);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.bg-toggle:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px #050507,
+    0 0 0 4px rgb(var(--theme-accent-rgb) / 0.7);
+}
+
+.bg-toggle-knob {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #e9eef3;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transform: translate(0, -50%);
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.4, 0.5, 1),
+    background 200ms ease;
+}
+
+.bg-toggle[data-on="true"] .bg-toggle-knob {
+  transform: translate(16px, -50%);
+  background: #ffffff;
+}
+
+/* Dismissible "wallpaper looks bright" suggestion (never a forced override).
+   Amber-tinted so it reads as advice, not the red legibility warning. */
+.bg-bright-suggest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  background: rgba(251, 191, 36, 0.08);
+  font-size: 12.5px;
+}
+
+.bg-bright-suggest > svg {
+  flex-shrink: 0;
+  color: var(--amber);
+}
+
+.bg-bright-suggest-text {
+  flex: 1;
+  min-width: 0;
+  color: #ecdfc0;
+}
+
+.bg-bright-suggest-accept {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.14);
+  color: #fbd38d;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bg-bright-suggest-accept:hover {
+  background: rgba(251, 191, 36, 0.22);
+  color: #ffe3a3;
+}
+
+.bg-bright-suggest-dismiss {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8896a3;
+  cursor: pointer;
+}
+
+.bg-bright-suggest-dismiss:hover {
+  color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.06);
+}
 .bg-customizer-actions .install-btn:hover:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.07);

@@ -1,6 +1,7 @@
 /**
  * BackgroundCustomizer tests
- * Tests mount, apply invokes set_config, cancel callback, clear invokes clear_background_image.
+ * Tests mount, apply invokes set_config, cancel callback, and Remove semantics
+ * (draft-only until Apply; file GC happens at Apply time, never at Remove time).
  */
 
 import React from 'react'
@@ -27,6 +28,7 @@ const initialState: BackgroundState = {
   videoPath: '',
   videoSource: '',
   videoFps: 30,
+  brightText: false,
 }
 
 const stateWithImage: BackgroundState = {
@@ -39,6 +41,7 @@ const stateWithImage: BackgroundState = {
   videoPath: '',
   videoSource: '',
   videoFps: 30,
+  brightText: false,
 }
 
 function renderCustomizer(overrides: {
@@ -67,6 +70,9 @@ describe('BackgroundCustomizer', () => {
     mockInvoke('set_config', () => '{}')
     mockInvoke('save_background_image', () => '/saved/bg.jpg')
     mockInvoke('clear_background_image', () => undefined)
+    mockInvoke('wallpaper_clear', () => undefined)
+    mockInvoke('wallpaper_commit', () => undefined)
+    mockInvoke('wallpaper_probe', () => ({ sourceFps: 30, durationSeconds: 10 }))
   })
 
   it('renders without crashing', () => {
@@ -127,13 +133,58 @@ describe('BackgroundCustomizer', () => {
     expect(screen.getByRole('button', { name: /Remove/i })).toBeInTheDocument()
   })
 
-  it('clicking Remove calls clear_background_image invoke', async () => {
+  it('clicking Remove is draft-only: no destructive invoke until Apply', async () => {
+    // Deleting files at Remove-click time while the persisted config still
+    // referenced them is the bug that white-screened the whole app when the
+    // user closed the modal without applying.
     const user = userEvent.setup()
     renderCustomizer({ initial: stateWithImage })
     await user.click(screen.getByRole('button', { name: /Remove/i }))
+    expect(mockInvokeFn.mock.calls.some((c) => c[0] === 'clear_background_image')).toBe(false)
+    expect(mockInvokeFn.mock.calls.some((c) => c[0] === 'set_config')).toBe(false)
+  })
+
+  it('Apply after Remove persists the empty image and then GCs the files', async () => {
+    const user = userEvent.setup()
+    const { onCommit } = renderCustomizer({ initial: stateWithImage })
+    await user.click(screen.getByRole('button', { name: /Remove/i }))
+    await user.click(screen.getByRole('button', { name: /Apply/i }))
     await waitFor(() => {
       const calls = mockInvokeFn.mock.calls
+      const bgCall = calls.find(
+        (c) => c[0] === 'set_config' && (c[1] as Record<string, unknown>)?.key === 'background_image',
+      )
+      expect(bgCall).toBeDefined()
+      expect((bgCall?.[1] as Record<string, unknown>)?.value).toBe('')
       expect(calls.some((c) => c[0] === 'clear_background_image')).toBe(true)
+      expect(onCommit).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('video Remove + Apply persists the removal and sweeps the wallpaper cache', async () => {
+    const user = userEvent.setup()
+    const stateWithVideo: BackgroundState = {
+      ...initialState,
+      videoPath: '/wallpapers/wp_clip.mp4',
+      videoSource: '/source/clip.mp4',
+    }
+    const { onCommit } = renderCustomizer({ initial: stateWithVideo })
+    await user.click(screen.getByRole('button', { name: /Remove/i }))
+    // Remove itself must not delete anything on disk.
+    expect(mockInvokeFn.mock.calls.some((c) => c[0] === 'wallpaper_clear')).toBe(false)
+    // Apply must stay clickable so the removal can actually be persisted.
+    const applyBtn = screen.getByRole('button', { name: /Apply/i })
+    expect(applyBtn).toBeEnabled()
+    await user.click(applyBtn)
+    await waitFor(() => {
+      const calls = mockInvokeFn.mock.calls
+      const videoCall = calls.find(
+        (c) => c[0] === 'set_config' && (c[1] as Record<string, unknown>)?.key === 'background_video',
+      )
+      expect(videoCall).toBeDefined()
+      expect((videoCall?.[1] as Record<string, unknown>)?.value).toBe('')
+      expect(calls.some((c) => c[0] === 'wallpaper_clear')).toBe(true)
+      expect(onCommit).toHaveBeenCalledTimes(1)
     })
   })
 

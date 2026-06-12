@@ -551,6 +551,44 @@ class TestSetConfigBackgroundInts:
 
 
 # ---------------------------------------------------------------------------
+# set_config — background_bright_text
+# ---------------------------------------------------------------------------
+
+class TestSetConfigBackgroundBrightText:
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", " true "])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_truthy_values_store_true(self, mock_load, mock_save, mock_emit, value):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("background_bright_text", value)
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["background_bright_text"] is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "", "yes", "garbage"])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_everything_else_stores_false(self, mock_load, mock_save, mock_emit, value):
+        mock_load.return_value = base_cfg(background_bright_text=True)
+        from audio_cli import set_config
+        result = set_config("background_bright_text", value)
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["background_bright_text"] is False
+
+    def test_payload_default_is_false(self):
+        from audio_cli import _config_payload
+        assert _config_payload({})["background_bright_text"] is False
+
+    def test_payload_coerces_to_bool(self):
+        from audio_cli import _config_payload
+        assert _config_payload({"background_bright_text": 1})["background_bright_text"] is True
+
+
+# ---------------------------------------------------------------------------
 # set_config — audio_output_format
 # ---------------------------------------------------------------------------
 

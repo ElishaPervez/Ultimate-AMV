@@ -32,6 +32,9 @@ export type AppConfig = {
   background_video: string;
   background_video_source: string;
   background_video_fps: number;
+  /** "1"/"true" = flip workspace text dark for bright wallpapers. Stored as a
+   * string by set_config; parsed tolerantly in readBackgroundState. */
+  background_bright_text: string | boolean;
   audio_output_format: "wav" | "mp3";
   clip_hover_preview: boolean;
   tsukyio_api_key: string;
@@ -47,4 +50,7 @@ export type BackgroundState = {
   videoPath: string;
   videoSource: string;
   videoFps: number;
+  /** Dark workspace text for bright wallpapers (user-opted, suggested by the
+   * customizer's brightness sniff — never forced). */
+  brightText: boolean;
 };

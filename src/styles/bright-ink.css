@@ -1,0 +1,203 @@
+/* ============================================================
+   BRIGHT-WALLPAPER DARK INK ("Dark text" toggle)
+   ============================================================
+   Active while `html.bright-ink` is set (App.tsx, driven by the
+   background customizer's "Dark text" toggle). Flips the FOREGROUND
+   palette inside the translucent workspace so text survives bright /
+   white wallpapers, instead of dimming the wallpaper into invisibility.
+
+   Scope rules:
+   - ONLY `.workspace` descendants. The sidebar, modals, dropdown menus
+     and toasts are solid dark surfaces the wallpaper never bleeds
+     through — they keep light text and never notice the toggle.
+   - Solid-dark islands INSIDE the workspace (embedded browser, video
+     stages) are re-asserted light at the bottom of this file.
+
+   This file is imported into the `user` cascade layer (styles.css), the
+   highest layer in the app. That is load-bearing: most workspace text
+   colors are hardcoded per-component in `base`, and user-layer rules
+   beat base rules regardless of selector specificity — so the simple,
+   broad selectors below win without a specificity war or !important.
+   ============================================================ */
+
+html.bright-ink .workspace {
+  /* Variable-driven components (Tsukyio panel, newer UI) flip wholesale. */
+  --ink: #10161d;
+  --muted: rgba(18, 28, 38, 0.66);
+  --line: rgba(8, 14, 20, 0.12);
+  --glass: rgba(8, 14, 20, 0.05);
+  --glass-border: rgba(8, 14, 20, 0.18);
+  color: var(--ink);
+}
+
+/* has-app-bg adds a dark halo text-shadow to kickers/labels to lift LIGHT
+   text off the wallpaper (base.css §3). Under dark ink that halo reads as a
+   smudgy glow — kill every text-shadow in the flipped scope. */
+html.bright-ink .workspace * {
+  text-shadow: none;
+}
+
+/* The decorative canvas grid: white hairlines vanish on white; flip them. */
+html.bright-ink .canvas-grid {
+  background-image:
+    linear-gradient(rgba(0, 0, 0, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.06) 1px, transparent 1px);
+}
+
+/* ---- Broad copy flip ----
+   Headings, body copy and form labels across all panels (these hardcode
+   light colors per-component in base). */
+html.bright-ink .workspace :is(h1, h2, h3, h4, h5, h6, label, li, dt, dd, strong) {
+  color: var(--ink);
+}
+
+html.bright-ink .workspace :is(p, small) {
+  color: rgba(16, 24, 33, 0.78);
+}
+
+/* Bare un-classed spans used as section labels/kickers (e.g. the audio
+   conversion "Output" eyebrow: `.conversion-format-card > span`). Scoped to
+   div/section/header children so button captions are untouched — buttons
+   keep their own designed colors. */
+html.bright-ink .workspace :is(div, section, header) > span:not([class]) {
+  color: rgba(18, 28, 38, 0.7);
+}
+
+/* Kicker/label/description spans: the app's naming is consistent enough
+   that class-substring sweeps catch the long tail of small text
+   (SOURCE/OUTPUT/PRESET kickers, setting rows, card meta, hints...)
+   without enumerating every component. Anything this over-catches on a
+   solid-dark island is re-asserted in the exceptions below. */
+html.bright-ink .workspace
+  :is(
+    [class*="kicker"],
+    [class*="-label"],
+    [class*="-title"],
+    [class*="-name"],
+    [class*="-heading"]
+  ) {
+  color: var(--ink);
+}
+
+html.bright-ink .workspace
+  :is(
+    [class*="-desc"],
+    [class*="-sub"],
+    [class*="-hint"],
+    [class*="-meta"],
+    [class*="-text"],
+    [class*="-count"],
+    [class*="-status"]
+  ) {
+  color: rgba(18, 28, 38, 0.7);
+}
+
+/* Inactive mode-switcher tabs (top of the focus panel). The active tab
+   keeps its accent gradient + contrast text. */
+html.bright-ink .workspace .mode-tab:not(.is-active) {
+  color: rgba(16, 24, 33, 0.72);
+  border-color: rgba(8, 14, 20, 0.16);
+  background: rgba(8, 14, 20, 0.04);
+}
+
+/* Ghost buttons / chips that use white-alpha fills and borders read as
+   invisible outlines on white. Flip the alphas to dark. Accent-gradient
+   buttons are untouched (their text is the theme contrast color). */
+html.bright-ink .workspace :is(button, .tab):not([class*="is-active"]) {
+  border-color: rgba(8, 14, 20, 0.16);
+}
+
+/* Transparent ghost buttons whose hardcoded light captions wash out:
+   conversion file pickers and the inactive halves of segmented controls
+   (WAV/MP3, preset pickers). Active segments keep their accent gradient. */
+html.bright-ink .workspace .conversion-pick-btn,
+html.bright-ink .workspace .conversion-segment button:not(.is-active) {
+  color: var(--ink);
+}
+
+/* ---- Keep-light exceptions ----
+   Solid-dark islands inside the workspace where the wallpaper does NOT
+   bleed through: the embedded download browser + its capture bar, and
+   media player stages. Re-assert the original light foreground for
+   everything the sweeps above may have flipped. */
+html.bright-ink .workspace
+  :is(.anikai-browser, .stream-capture-row, .scene-viewer-stage, .tsukyio-player-stage)
+  :is(h1, h2, h3, h4, h5, h6, p, label, li, small, span, dt, dd) {
+  color: #e7edf2;
+}
+
+html.bright-ink .workspace
+  :is(.anikai-browser, .stream-capture-row)
+  :is([class*="-desc"], [class*="-sub"], [class*="-hint"], [class*="-meta"], [class*="-status"]) {
+  color: #94a3b8;
+}
+
+/* Floating dropdown menus (components/Dropdown.tsx) render inline next to
+   their trigger, so the sweeps above catch them wherever a workspace page
+   embeds one (BG Remover model picker, clip export format, log filters).
+   The open menu is a solid dark popup the wallpaper never bleeds through —
+   restore the light palette inside it. The flipped --ink/--muted vars are
+   re-set here too: option descriptions read var(--muted) directly. The
+   TRIGGER button stays flipped — it sits on the wallpaper like any other
+   control. */
+html.bright-ink .workspace .custom-dropdown-menu {
+  --ink: #eef3f8;
+  --muted: #94a3b8;
+  color: var(--ink);
+}
+
+html.bright-ink .workspace .custom-dropdown-menu :is(span, button, div, small),
+html.bright-ink .workspace .custom-dropdown-menu :is(div, section, header) > span:not([class]) {
+  color: revert-layer;
+}
+
+/* Buttons/chips that carry their OWN dark fill inside the workspace — the
+   engine GPU/CPU switch tiles and settings action pills. Their captions
+   stay light regardless of the toggle. */
+html.bright-ink .workspace .deps-switch-actions .install-btn,
+html.bright-ink .workspace .deps-switch-actions .install-btn :is(span, small),
+html.bright-ink .workspace .settings-action-pill,
+html.bright-ink .workspace .settings-action-pill :is(span, [class*="-label"]) {
+  color: #e7edf2;
+}
+
+html.bright-ink .workspace .deps-switch-actions .install-btn small {
+  color: #94a3b8;
+}
+
+/* ---- Settings panel: opted OUT of the flip entirely ----
+   Settings is dense utility text sitting on near-transparent cards, so its
+   readability depended on whichever wallpaper region happened to be behind
+   each row — dark ink fixed the bright regions and broke the dark ones.
+   Instead: restore the light palette AND solidify the panel's existing
+   surfaces so it reads on ANY wallpaper. The wallpaper stays visible
+   around the cards. */
+html.bright-ink .workspace .settings-panel {
+  --ink: #eef3f8;
+  --muted: #94a3b8;
+  --line: rgba(255, 255, 255, 0.05);
+  --glass: rgba(255, 255, 255, 0.03);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
+}
+
+/* The second selector mirrors the bare-span flip above with .settings-panel
+   added — the flip's `:not([class])` gives it class-level specificity that a
+   plain `span` here would lose to. */
+html.bright-ink .workspace .settings-panel
+  :is(h1, h2, h3, h4, h5, h6, p, label, li, small, span, strong, dt, dd, button),
+html.bright-ink .workspace .settings-panel :is(div, section, header) > span:not([class]) {
+  color: revert-layer;
+}
+
+html.bright-ink .workspace .settings-panel :is(.settings-group.glass, .settings-tab-bar) {
+  background: rgba(13, 16, 22, 0.78);
+}
+
+/* The "System preferences" toolbar line sits on bare wallpaper above the
+   tab bar — give it a matching chip so it survives any region. */
+html.bright-ink .workspace .settings-panel .settings-toolbar {
+  background: rgba(13, 16, 22, 0.78);
+  border-radius: 10px;
+  padding: 0 12px;
+}

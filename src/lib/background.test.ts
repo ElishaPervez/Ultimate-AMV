@@ -101,4 +101,17 @@ describe('readBackgroundState', () => {
     expect(readBackgroundState({ background_blur: -5 }).blur).toBe(0)
     expect(readBackgroundState({ background_blur: 50 }).blur).toBe(40)
   })
+
+  it('parses brightText from "1"/"true"/true', () => {
+    expect(readBackgroundState({ background_bright_text: '1' }).brightText).toBe(true)
+    expect(readBackgroundState({ background_bright_text: 'true' }).brightText).toBe(true)
+    expect(readBackgroundState({ background_bright_text: true }).brightText).toBe(true)
+  })
+
+  it('brightText defaults to false for "0", garbage and missing values', () => {
+    expect(readBackgroundState({ background_bright_text: '0' }).brightText).toBe(false)
+    expect(readBackgroundState({ background_bright_text: 'yes' }).brightText).toBe(false)
+    expect(readBackgroundState({}).brightText).toBe(false)
+    expect(readBackgroundState(null).brightText).toBe(false)
+  })
 })

@@ -34,3 +34,8 @@
 
 /* The app's look — token redefinitions + targeted overrides on top of base. */
 @import "./styles/theme.css" layer(theme);
+
+/* Bright-wallpaper dark-ink flip. Deliberately in the USER layer (above
+   base AND theme): it must override hardcoded per-component text colors
+   regardless of selector specificity. Only active under html.bright-ink. */
+@import "./styles/bright-ink.css" layer(user);

@@ -207,6 +207,47 @@ button {
 :root.has-app-bg .bg-customizer-hint {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
 }
+/* The grey micro-labels (page kickers, stat/field eyebrows) go further:
+   the halo alone can't rescue mid-grey ink (#6b7280-ish) against a
+   bright wallpaper, so while a wallpaper is active they read in white.
+   Hierarchy survives through their size/weight/uppercase, not the grey.
+   The "Dark text" toggle (bright-ink.css, user layer) still wins over
+   all of this and flips them dark. */
+:root.has-app-bg .dash-hero-kicker,
+:root.has-app-bg .dash-status-label,
+:root.has-app-bg .conversion-kicker,
+:root.has-app-bg .conversion-format-card > span,
+:root.has-app-bg .conversion-card small,
+:root.has-app-bg .conversion-field-label,
+:root.has-app-bg .clip-source-card small,
+:root.has-app-bg .clip-cols-label span,
+:root.has-app-bg .video-output-control-head small,
+:root.has-app-bg .tsukyio-kicker {
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
+/* Helper copy next to those labels (hero subtitles, preset/bitrate
+   blurbs, vault tile counts) gets the same treatment a step softer. */
+:root.has-app-bg .dash-hero-desc,
+:root.has-app-bg .dash-tip-text,
+:root.has-app-bg .conversion-hero p,
+:root.has-app-bg .conversion-card p,
+:root.has-app-bg .video-output-control-head > div > span,
+:root.has-app-bg .tsukyio-home-head p,
+:root.has-app-bg .tsukyio-tile-count,
+:root.has-app-bg .tsukyio-card-sub,
+:root.has-app-bg .youtube-download-head small {
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
+/* Vault category chips: their inactive captions are var(--muted) BUTTONS,
+   which the dark-ink user-layer sweeps do not recolor (they only restyle
+   button borders) — so unlike everything above, the white ink must be
+   gated off explicitly while the "Dark text" toggle is on. */
+:root.has-app-bg:not(.bright-ink) .tsukyio-cat-chip:not(.is-active) {
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 12px rgba(0, 0, 0, 0.55);
+}
 /* When a background image is set, every panel/glass surface on the path
    to the image inherits the user's blur slider via --app-bg-blur. At
    slider=0 the bg image stays sharp (no residual backdrop-filter blur
@@ -230,6 +271,16 @@ button {
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
+}
+/* Safety net: while has-app-bg holds, every surface above this layer is
+   transparent and the theme's dark gradient is gated off — the wallpaper is
+   the only thing painting the viewport. If its file is missing or fails to
+   decode, nothing paints at all and the WebView's default white page bleeds
+   through the entire app. A dark base here makes a broken wallpaper degrade
+   to the normal dark chrome instead. Scoped to has-app-bg so the always-
+   mounted (empty) layer never covers the theme gradient. */
+:root.has-app-bg .app-bg {
+  background: #020203;
 }
 .app-bg-image {
   position: absolute;

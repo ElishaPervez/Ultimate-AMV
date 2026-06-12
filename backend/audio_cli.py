@@ -75,6 +75,7 @@ BACKGROUND_DEFAULTS = {
     "background_video": "",
     "background_video_source": "",
     "background_video_fps": 30,
+    "background_bright_text": False,
 }
 
 
@@ -99,6 +100,7 @@ def _config_payload(cfg):
         "background_video": cfg.get("background_video", BACKGROUND_DEFAULTS["background_video"]),
         "background_video_source": cfg.get("background_video_source", BACKGROUND_DEFAULTS["background_video_source"]),
         "background_video_fps": int(cfg.get("background_video_fps", BACKGROUND_DEFAULTS["background_video_fps"])),
+        "background_bright_text": bool(cfg.get("background_bright_text", BACKGROUND_DEFAULTS["background_bright_text"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
@@ -216,6 +218,8 @@ def set_config(key, value):
             emit({"type": "error", "message": "background_video_fps must be an integer"})
             return 1
         cfg["background_video_fps"] = max(15, min(60, number))
+    elif key == "background_bright_text":
+        cfg["background_bright_text"] = value.strip().lower() in {"1", "true"}
     elif key == "audio_output_format":
         normalized = (value or "").strip().lower()
         if normalized not in {"wav", "mp3"}:

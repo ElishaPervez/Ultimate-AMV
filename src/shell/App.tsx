@@ -262,12 +262,15 @@ export function App() {
     const root = document.documentElement;
     const hasBg = Boolean(liveBg.videoPath) || Boolean(liveBg.imagePath);
     root.classList.toggle("has-app-bg", hasBg);
+    // Dark workspace ink for bright wallpapers (styles/bright-ink.css). Only
+    // meaningful while a wallpaper is actually set.
+    root.classList.toggle("bright-ink", hasBg && liveBg.brightText);
     if (hasBg) {
       root.style.setProperty("--app-bg-blur", `${Math.max(0, liveBg.blur)}px`);
     } else {
       root.style.removeProperty("--app-bg-blur");
     }
-  }, [liveBg.imagePath, liveBg.videoPath, liveBg.blur]);
+  }, [liveBg.imagePath, liveBg.videoPath, liveBg.blur, liveBg.brightText]);
 
   React.useEffect(() => {
     setDiscordPanel(activeMeta?.title ?? "Idle");

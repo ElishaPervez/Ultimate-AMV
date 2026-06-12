@@ -29,6 +29,7 @@ const baseConfig: AppConfig = {
   background_video: '',
   background_video_source: '',
   background_video_fps: 30,
+  background_bright_text: '0',
   audio_output_format: 'wav',
   clip_hover_preview: false,
   tsukyio_api_key: '',
