@@ -44,9 +44,11 @@
 }
 
 /* ── Top dashboard row ── */
+/* Hero card spans the full row; engine/model/deps/GPU live as chips inside
+   it rather than as a separate stat-card grid. */
 .dash-top-row {
   display: grid;
-  grid-template-columns: minmax(300px, 1.1fr) minmax(0, 1.6fr);
+  grid-template-columns: 1fr;
   gap: 24px;
   align-items: start;
 }
@@ -96,7 +98,7 @@
 
 .dash-hero-status-list {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -108,6 +110,12 @@
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Lets the value ellipsize instead of blowing the chip open (full GPU
+   names like "NVIDIA GeForce RTX 5060 Ti" live here). */
+.dash-hero-status-item > div {
+  min-width: 0;
 }
 
 .dash-status-dot {
@@ -150,6 +158,9 @@
   font-size: 13px;
   font-weight: 600;
   color: #e5e7eb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dash-hero-cta {
@@ -181,79 +192,6 @@
 .dash-hero-cta:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-/* Stats grid */
-.dash-stats-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
-}
-
-.dash-stat-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 18px;
-  border-radius: 16px;
-  background: rgba(20, 22, 26, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(10px);
-}
-
-.dash-stat-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-
-.dash-stat-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: #6b7280;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  margin-bottom: 6px;
-}
-
-.dash-stat-value {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 700;
-  color: #ffffff;
-}
-
-.dash-stat-icon {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  color: #9ca3af;
-}
-
-.dash-stat-meta {
-  font-size: 11px;
-  color: #6b7280;
-  font-weight: 500;
-}
-
-.dash-stat-bar {
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-}
-
-.dash-stat-bar-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, rgb(var(--theme-accent-rgb)), rgb(var(--theme-accent-2-rgb)));
-  transition: width 500ms ease;
 }
 
 /* ── Main stage ── */
@@ -388,6 +326,23 @@
   margin: 0;
 }
 
+/* ── Wallpaper mode ──
+   With a wallpaper set, the dark glass slabs come off and the text sits
+   directly on the wallpaper — the same treatment clip-extractor and the
+   downloader get in base.css §3. Legibility on bright wallpapers is the
+   dark-text toggle's job now, not a scrim's. backdrop-filter must go too:
+   a tintless frosted rectangle still reads as a box. The drag-drop overlay
+   and the hero's faint status chips keep their fills. */
+:root.has-app-bg .dash-hero-card,
+:root.has-app-bg .dash-side-card,
+:root.has-app-bg .dash-stage-main > .extract-vocals-button,
+:root.has-app-bg .dash-stage-main > .audio-card,
+:root.has-app-bg .dash-stage-main > .stem-mixer {
+  background: transparent;
+  border-color: transparent;
+  backdrop-filter: none;
+}
+
 .dash-stage-side .batch-status-row {
   background: rgba(255, 255, 255, 0.03);
   border-color: rgba(255, 255, 255, 0.05);
@@ -395,8 +350,8 @@
 
 /* ── Responsive ── */
 @media (max-width: 1100px) {
-  .dash-top-row {
-    grid-template-columns: 1fr;
+  .dash-hero-status-list {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .dash-stage {
@@ -426,10 +381,6 @@
   }
 
   .dash-hero-status-list {
-    grid-template-columns: 1fr;
-  }
-
-  .dash-stats-grid {
     grid-template-columns: 1fr;
   }
 

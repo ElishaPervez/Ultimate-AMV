@@ -8,14 +8,10 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleDot,
-  Cpu,
   FileAudio,
   FolderOpen,
-  HardDrive,
   Loader2,
-  Music,
   Upload,
-  Zap,
 } from "lucide-react";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
@@ -252,58 +248,24 @@ export function NewAudioExtractionPanel() {
           label: "Engine",
           value: status.hardware.device_short,
           dot: depsReady ? "optimal" : "warning",
-          sub: status.hardware.device,
         },
         {
           label: "Model",
           value: status.model_name,
           dot: "optimal",
-          sub: "BS-RoFormer",
         },
         {
           label: "Dependencies",
           value: depsReady ? "Ready" : "Setup required",
           dot: depsReady ? "optimal" : "warning",
-          sub: depsReady ? "All OK" : "Install needed",
         },
         {
           label: "GPU",
-          value: hasGpu ? "NVIDIA" : "None",
+          value: hasGpu ? status.hardware.device : "None",
           dot: hasGpu ? "optimal" : "neutral",
-          sub: hasGpu ? "Accelerated" : "CPU only",
         },
       ]
     : [];
-
-  const engineCard = status
-    ? {
-        title: "Engine",
-        subtitle: status.hardware.device_short,
-        dot: depsReady ? "optimal" : "warning",
-        meta: status.hardware.device,
-        pct: hasGpu ? 85 : 60,
-      }
-    : null;
-
-  const modelCard = status
-    ? {
-        title: "Model",
-        subtitle: status.model_name,
-        dot: "optimal",
-        meta: "BS-RoFormer",
-        pct: 100,
-      }
-    : null;
-
-  const statusCard = status
-    ? {
-        title: "Status",
-        subtitle: depsReady ? "Ready" : "Setup",
-        dot: depsReady ? "optimal" : "warning",
-        meta: depsReady ? "All systems go" : "Install required",
-        pct: depsReady ? 100 : 0,
-      }
-    : null;
 
   let stage: React.ReactNode;
   if (setupRunning) {
@@ -390,7 +352,7 @@ export function NewAudioExtractionPanel() {
                   <span className={`dash-status-dot is-${item.dot}`} />
                   <div>
                     <div className="dash-status-label">{item.label}</div>
-                    <div className="dash-status-value">{item.value}</div>
+                    <div className="dash-status-value" title={item.value}>{item.value}</div>
                   </div>
                 </div>
               ))}
@@ -406,51 +368,6 @@ export function NewAudioExtractionPanel() {
             <span>Choose files</span>
             <ChevronRight size={16} />
           </button>
-        </div>
-
-        {/* Stat cards */}
-        <div className="dash-stats-grid">
-          {engineCard && (
-            <DashStatCard
-              icon={<Cpu size={18} />}
-              title={engineCard.title}
-              value={engineCard.subtitle}
-              dot={engineCard.dot}
-              meta={engineCard.meta}
-              pct={engineCard.pct}
-            />
-          )}
-          {modelCard && (
-            <DashStatCard
-              icon={<Music size={18} />}
-              title={modelCard.title}
-              value={modelCard.subtitle}
-              dot={modelCard.dot}
-              meta={modelCard.meta}
-              pct={modelCard.pct}
-            />
-          )}
-          {statusCard && (
-            <DashStatCard
-              icon={<HardDrive size={18} />}
-              title={statusCard.title}
-              value={statusCard.subtitle}
-              dot={statusCard.dot}
-              meta={statusCard.meta}
-              pct={statusCard.pct}
-            />
-          )}
-          {/* GPU card */}
-          {status && (
-            <DashStatCard
-              icon={<Zap size={18} />}
-              title="Accelerator"
-              value={hasGpu ? "GPU" : "CPU"}
-              dot={hasGpu ? "optimal" : "neutral"}
-              meta={hasGpu ? "NVIDIA" : "No GPU detected"}
-              pct={hasGpu ? 90 : 40}
-            />
-          )}
         </div>
       </div>
 
@@ -512,44 +429,6 @@ export function NewAudioExtractionPanel() {
 }
 
 /* ── Sub-components ── */
-
-function DashStatCard({
-  icon,
-  title,
-  value,
-  dot,
-  meta,
-  pct,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  value: string;
-  dot: string;
-  meta: string;
-  pct: number;
-}) {
-  return (
-    <div className="dash-stat-card">
-      <div className="dash-stat-header">
-        <div>
-          <div className="dash-stat-title">{title}</div>
-          <div className="dash-stat-value">
-            <span className={`dash-status-dot is-${dot}`} />
-            {value}
-          </div>
-        </div>
-        <div className="dash-stat-icon">{icon}</div>
-      </div>
-      <div className="dash-stat-meta">{meta}</div>
-      <div className="dash-stat-bar">
-        <div
-          className="dash-stat-bar-fill"
-          style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-        />
-      </div>
-    </div>
-  );
-}
 
 function DashSideCard({
   title,
