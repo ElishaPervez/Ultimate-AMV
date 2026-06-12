@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import threading
 import subprocess
 from pathlib import Path
 
@@ -38,11 +39,17 @@ def remove_background_video(
     model_key: str = "anime",
     export_format: str = "webm",
     force_cpu: bool = False,
-    progress_callback = None
+    progress_callback = None,
+    showcase_path: str = None
 ):
     """
     Processes video frame-by-frame, removes background with the selected model,
-    and encodes the output as WebM with alpha or a PNG sequence.
+    and encodes the output as ProRes MOV / WebM with alpha or a PNG sequence.
+
+    Returns (frames, fps, showcase): when showcase_path is given, a compact
+    VP9+alpha preview of the finished export is encoded there for in-app
+    comparison playback (WebView2 can't decode ProRes and a PNG sequence
+    isn't a video). Showcase failure is non-fatal — showcase is None then.
     """
     import cv2
     from PIL import Image
@@ -74,13 +81,16 @@ def remove_background_video(
         
     ffmpeg_proc = None
     output_dir = None
-    
-    if export_format == "webm":
+    stderr_tail = []
+
+    if export_format in ("webm", "mov"):
         ffmpeg_bin = require_tool("ffmpeg")
-        # FFmpeg VP9 with alpha encoding pipeline
+        # Common raw RGBA stdin pipeline; -nostats keeps the encode chatter
+        # off stderr so the drain thread only carries real errors.
         cmd = [
             ffmpeg_bin,
             "-y",
+            "-hide_banner", "-nostats", "-loglevel", "error",
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{width}x{height}",
@@ -88,20 +98,44 @@ def remove_background_video(
             "-r", str(fps),
             "-i", "-",
             "-an",
-            "-c:v", "libvpx-vp9",
-            "-pix_fmt", "yuva420p",
-            "-b:v", "0",
-            "-crf", "22",          # Balanced high quality
-            "-speed", "6",         # Fast encode speed for vp9 realtime/near-realtime
-            "-auto-alt-ref", "0",  # VP9 transparency fix
-            str(output_path)
         ]
+        if export_format == "webm":
+            # VP9 with alpha: compact transparent video for web/OBS use.
+            cmd += [
+                "-c:v", "libvpx-vp9",
+                "-pix_fmt", "yuva420p",
+                "-b:v", "0",
+                "-crf", "22",          # Balanced high quality
+                "-speed", "6",         # Fast encode speed for vp9 realtime/near-realtime
+                "-auto-alt-ref", "0",  # VP9 transparency fix
+            ]
+        else:
+            # ProRes 4444 with alpha: the transparent format editors actually
+            # import (Premiere, After Effects, DaVinci Resolve).
+            cmd += [
+                "-c:v", "prores_ks",
+                "-profile:v", "4444",
+                "-pix_fmt", "yuva444p10le",
+                "-vendor", "apl0",
+            ]
+        cmd.append(str(output_path))
         ffmpeg_proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE
         )
+
+        # Drain stderr on a thread: with stderr left undrained, a chatty
+        # encode fills the 64KB pipe buffer, ffmpeg blocks on stderr writes,
+        # stops reading stdin, and the frame loop deadlocks mid-job.
+        def _drain_stderr(proc=ffmpeg_proc):
+            for raw_line in proc.stderr:
+                stderr_tail.append(raw_line)
+                if len(stderr_tail) > 200:
+                    del stderr_tail[0]
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
     elif export_format == "png":
         output_dir = Path(output_path)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +157,7 @@ def remove_background_video(
             # Perform background removal
             out_img = remove(img, session=session)
             
-            if export_format == "webm":
+            if export_format in ("webm", "mov"):
                 rgba_data = out_img.tobytes()
                 if ffmpeg_proc and ffmpeg_proc.stdin:
                     ffmpeg_proc.stdin.write(rgba_data)
@@ -159,13 +193,59 @@ def remove_background_video(
         if ffmpeg_proc:
             if ffmpeg_proc.stdin:
                 ffmpeg_proc.stdin.close()
-            # Wait for encode to finish
-            stdout, stderr = ffmpeg_proc.communicate()
+            # Wait for encode to finish; stderr is consumed by the drain thread.
+            ffmpeg_proc.wait()
+            stderr_thread.join(timeout=5)
             if ffmpeg_proc.returncode != 0:
-                err_msg = stderr.decode("utf-8", errors="replace") if stderr else "Unknown FFmpeg encoding error."
-                raise RuntimeError(f"FFmpeg transparent WebM encoding failed:\n{err_msg}")
-                
-    return frame_idx
+                err_msg = (
+                    b"".join(stderr_tail).decode("utf-8", errors="replace").strip()
+                    or "Unknown FFmpeg encoding error."
+                )
+                raise RuntimeError(f"FFmpeg transparent video encoding failed:\n{err_msg}")
+
+    showcase_file = None
+    if showcase_path and frame_idx > 0:
+        if progress_callback:
+            progress_callback("showcase", 99, "Encoding comparison preview...")
+        showcase_file = _build_showcase(export_format, output_path, output_dir, fps, showcase_path)
+
+    return frame_idx, fps, showcase_file
+
+
+def _build_showcase(export_format, output_path, png_dir, fps, showcase_path):
+    """Encode a compact VP9+alpha WebM of the finished export for the in-app
+    before/after player. Best-effort: the export already succeeded, so any
+    failure here just disables the showcase instead of failing the job."""
+    try:
+        ffmpeg_bin = require_tool("ffmpeg")
+        target = Path(showcase_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        safe_fps = fps if fps and fps > 0 else 24
+        if export_format == "png":
+            input_args = ["-framerate", str(safe_fps), "-i", str(Path(png_dir) / "frame_%04d.png")]
+        else:
+            input_args = ["-i", str(output_path)]
+        cmd = [
+            ffmpeg_bin,
+            "-y", "-hide_banner", "-nostats", "-loglevel", "error",
+            *input_args,
+            "-an",
+            "-vf", "scale=-2:min(720\\,ih)",
+            "-c:v", "libvpx-vp9",
+            "-pix_fmt", "yuva420p",
+            "-b:v", "0",
+            "-crf", "32",
+            "-speed", "8",
+            "-row-mt", "1",
+            "-auto-alt-ref", "0",
+            str(target),
+        ]
+        result = subprocess.run(cmd, capture_output=True, check=False)
+        if result.returncode != 0 or not target.exists():
+            return None
+        return str(target)
+    except Exception:
+        return None
 
 def extract_single_frame(video_path: str, output_path: str, frame_index: int):
     """

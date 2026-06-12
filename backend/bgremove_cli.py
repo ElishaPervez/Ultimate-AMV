@@ -77,11 +77,14 @@ def status():
         "models": MODELS,
     })
 
-def process(input_file, output_file, model_key, export_format, force_cpu):
+def process(input_file, output_file, model_key, export_format, force_cpu, showcase_dir=None):
     started_at = time.perf_counter()
     input_path = Path(input_file).expanduser().resolve()
     output_path = Path(output_file).expanduser().resolve()
-    
+    showcase_path = None
+    if showcase_dir:
+        showcase_path = str(Path(showcase_dir).expanduser().resolve() / "showcase.webm")
+
     gpu = not force_cpu
     feature = "bgremove_gpu" if gpu else "bgremove_cpu"
     
@@ -101,6 +104,8 @@ def process(input_file, output_file, model_key, export_format, force_cpu):
         on_progress("process", 10, "Starting background removal...")
         
         # Execute background removal
+        fps = None
+        showcase_file = None
         try:
             if is_image:
                 remove_background_frame(
@@ -111,13 +116,14 @@ def process(input_file, output_file, model_key, export_format, force_cpu):
                 )
                 total_frames = 1
             else:
-                total_frames = remove_background_video(
+                total_frames, fps, showcase_file = remove_background_video(
                     input_path=str(input_path),
                     output_path=str(output_path),
                     model_key=model_key,
                     export_format=export_format,
                     force_cpu=force_cpu,
-                    progress_callback=on_progress
+                    progress_callback=on_progress,
+                    showcase_path=showcase_path
                 )
         except ModuleNotFoundError as missing:
             # Automatic dependency repair if module missing unexpectedly
@@ -133,13 +139,14 @@ def process(input_file, output_file, model_key, export_format, force_cpu):
                 )
                 total_frames = 1
             else:
-                total_frames = remove_background_video(
+                total_frames, fps, showcase_file = remove_background_video(
                     input_path=str(input_path),
                     output_path=str(output_path),
                     model_key=model_key,
                     export_format=export_format,
                     force_cpu=force_cpu,
-                    progress_callback=on_progress
+                    progress_callback=on_progress,
+                    showcase_path=showcase_path
                 )
             
         elapsed = time.perf_counter() - started_at
@@ -154,6 +161,8 @@ def process(input_file, output_file, model_key, export_format, force_cpu):
             "input": str(input_path),
             "output": str(output_path),
             "frames": total_frames,
+            "fps": fps,
+            "showcase": showcase_file,
             "elapsedSeconds": round(elapsed, 2)
         })
         return 0
@@ -202,6 +211,7 @@ def preview(input_file, output_dir, model_key, frame_index, force_cpu):
             img = Image.open(str(input_path))
             img.save(str(orig_path), "PNG")
             frame_to_use = 0
+            total_frames = 1
         else:
             on_progress("preview-extract", 30, "Extracting video preview frame...")
             total_frames = 300
@@ -226,6 +236,7 @@ def preview(input_file, output_dir, model_key, frame_index, force_cpu):
             "original": str(orig_path),
             "isolated": str(isolated_path),
             "frame": frame_to_use,
+            "totalFrames": total_frames,
             "elapsedSeconds": round(elapsed, 2)
         })
         return 0
@@ -247,8 +258,9 @@ def main():
     process_parser.add_argument("--input", required=True, help="Input video file path")
     process_parser.add_argument("--output", required=True, help="Output file path (or folder for PNG sequence)")
     process_parser.add_argument("--model", default="anime", choices=MODEL_KEYS, help="AI model key")
-    process_parser.add_argument("--format", default="webm", choices=["webm", "png"], help="Export format")
+    process_parser.add_argument("--format", default="mov", choices=["mov", "webm", "png"], help="Export format")
     process_parser.add_argument("--cpu", action="store_true", help="Force CPU mode")
+    process_parser.add_argument("--showcase-dir", default=None, help="Directory for the in-app comparison preview WebM")
     
     preview_parser = sub.add_parser("preview")
     preview_parser.add_argument("--input", required=True, help="Input video file path")
@@ -268,7 +280,8 @@ def main():
             output_file=args.output,
             model_key=args.model,
             export_format=args.format,
-            force_cpu=args.cpu
+            force_cpu=args.cpu,
+            showcase_dir=args.showcase_dir
         )
     elif args.command == "preview":
         return preview(

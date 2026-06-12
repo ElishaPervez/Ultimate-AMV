@@ -6,17 +6,62 @@ import { Cpu, Film, Sparkles, Upload, Video, Eye, RefreshCw, Sliders, Columns, A
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, normalizeSelectedPaths } from "../../lib/paths";
-import { extensionAccept, useFileDrop } from "../../lib/useFileDrop";
+import { useFileDrop } from "../../lib/useFileDrop";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import type { BgRemoveProgress, BgRemoveStatus } from "../../types/bgremove";
 import { BgRemoveProgressCard } from "./BgRemoveProgressCard";
 import { BgRemoveResultCard } from "./BgRemoveResultCard";
+import { VideoComparisonCard } from "./VideoComparisonCard";
 import { ConversionSourceCard } from "../video/ConversionSourceCard";
 import { Dropdown } from "../../components/Dropdown";
 
 const VIDEO_INPUT_EXTENSIONS = ["mp4", "mkv", "avi", "webm", "mov"];
 const IMAGE_INPUT_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp"];
 const BGREMOVE_INPUT_EXTENSIONS = [...VIDEO_INPUT_EXTENSIONS, ...IMAGE_INPUT_EXTENSIONS];
+
+export type IsolateMode = "video" | "image";
+
+function detectIsolateMode(path: string): IsolateMode | null {
+  const ext = path.split(".").pop()?.toLowerCase() || "";
+  if (IMAGE_INPUT_EXTENSIONS.includes(ext)) return "image";
+  if (VIDEO_INPUT_EXTENSIONS.includes(ext)) return "video";
+  return null;
+}
+
+// The Python bridge runs one job at a time (a single child PID is tracked for
+// cancellation), so the two mounted tab instances coordinate through this
+// shared owner slot instead of launching concurrent jobs.
+let busyOwner: IsolateMode | null = null;
+const busyListeners = new Set<() => void>();
+function setBusyOwner(owner: IsolateMode | null) {
+  busyOwner = owner;
+  busyListeners.forEach((listener) => listener());
+}
+function subscribeBusyOwner(listener: () => void) {
+  busyListeners.add(listener);
+  return () => {
+    busyListeners.delete(listener);
+  };
+}
+function getBusyOwner() {
+  return busyOwner;
+}
+
+// Lets one tab hand a dropped/picked file of the other type to its sibling
+// instance ("drop a video on the Image tab" → loads in the Video tab).
+const fileRouters: Partial<Record<IsolateMode, (path: string) => void>> = {};
+
+// Both tab instances mount at app start; share one hardware-status fetch.
+let statusPromise: Promise<string> | null = null;
+function fetchBgRemoveStatus(): Promise<string> {
+  if (!statusPromise) {
+    statusPromise = invoke<string>("bgremove_status").catch((error) => {
+      statusPromise = null;
+      throw error;
+    });
+  }
+  return statusPromise;
+}
 const MODEL_LABELS: Record<string, string> = {
   u2netp: "Lightweight Fast (u2netp)",
   silueta: "Fast Silhouette (silueta)",
@@ -28,19 +73,24 @@ const MODEL_LABELS: Record<string, string> = {
   "birefnet-massive": "BiRefNet Massive (birefnet-massive)",
 };
 
-export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "image" }) {
-  const isImageTab = activeTab === "image";
-  const acceptedExtensions = isImageTab ? IMAGE_INPUT_EXTENSIONS : VIDEO_INPUT_EXTENSIONS;
+export function BgRemovePanel({
+  mode = "video",
+  active = true,
+  onRequestTab,
+}: {
+  mode?: IsolateMode;
+  active?: boolean;
+  onRequestTab?: (mode: IsolateMode) => void;
+}) {
+  const isImageTab = mode === "image";
 
   const [status, setStatus] = React.useState<BgRemoveStatus | null>(null);
   const [selectedFile, setSelectedFile] = React.useState<string>("");
-  const [imageModel, setImageModel] = React.useState<string>("anime");
-  const [videoModel, setVideoModel] = React.useState<string>("anime");
-  const model = isImageTab ? imageModel : videoModel;
-  const setModel = isImageTab ? setImageModel : setVideoModel;
-  const [format, setFormat] = React.useState<string>("webm");
+  const [model, setModel] = React.useState<string>("anime");
+  const [format, setFormat] = React.useState<string>(isImageTab ? "png" : "mov");
   const [forceCpu, setForceCpu] = React.useState<boolean>(false);
   const [progress, setProgress] = React.useState<BgRemoveProgress | null>(null);
+  const [fileTypeWarning, setFileTypeWarning] = React.useState<string | null>(null);
   const [processing, setProcessing] = React.useState(false);
   const [resultMessage, setResultMessage] = React.useState<string | null>(null);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -51,36 +101,43 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
     original: string;
     isolated: string;
     frame: number;
+    totalFrames: number;
     elapsedSeconds: number;
   } | null>(null);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
+  // Video tab: the frame the user scrubbed to; null means the backend's
+  // default pick (33% into the video).
+  const [previewFrame, setPreviewFrame] = React.useState<number | null>(null);
+  // Post-run comparison player: original source + the showcase WebM the
+  // backend encodes from the finished export.
+  const [showcase, setShowcase] = React.useState<{
+    original: string;
+    isolated: string;
+    fps: number | null;
+  } | null>(null);
   // Raw filesystem path to the cached isolated PNG from the last preview.
   // Used by the fast-path download to skip re-running the AI pipeline.
   const [cachedIsolatedPath, setCachedIsolatedPath] = React.useState<string>("");
   // Track which settings produced the current cached preview so we can
   // detect when the cache is stale.
+  const previewFileRef = React.useRef<string>("");
   const previewModelRef = React.useRef<string>("");
   const previewCpuRef = React.useRef<boolean>(false);
-  
+
   const cancellingRef = React.useRef(false);
 
-  React.useEffect(() => {
-    reset();
-  }, [activeTab]);
+  const jobOwner = React.useSyncExternalStore(subscribeBusyOwner, getBusyOwner);
+  const otherTabBusy = jobOwner !== null && jobOwner !== mode;
 
+  // One auto-preview attempt per (file, model, hardware) combination on the
+  // image tab. Re-checks once an in-flight preview or the other tab's job
+  // finishes, so attempts deferred by either are picked up.
+  const previewAttemptRef = React.useRef<string>("");
   React.useEffect(() => {
-    if (isImageTab) {
-      setFormat("png");
-    } else {
-      setFormat("webm");
-    }
-  }, [isImageTab]);
-
-  React.useEffect(() => {
-    if (isImageTab && selectedFile) {
-      void generatePreview();
-    }
-  }, [selectedFile, model, forceCpu, isImageTab]);
+    if (!isImageTab || !selectedFile || otherTabBusy || isPreviewing || processing) return;
+    if (previewAttemptRef.current === `${selectedFile}|${model}|${forceCpu}`) return;
+    void generatePreview();
+  }, [selectedFile, model, forceCpu, otherTabBusy, isPreviewing, processing]);
 
   React.useEffect(() => {
     void refreshStatus();
@@ -91,21 +148,35 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
     return () => setDiscordJob("Isolating background", false);
   }, [processing]);
 
+  const firstProgressLoggedRef = React.useRef(false);
   React.useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<BgRemoveProgress>("bgremove-progress", (event) => {
-      setProgress(event.payload);
+      // The progress channel is global; only the tab that owns the running
+      // job should react to it.
+      if (getBusyOwner() === mode) {
+        // DIAGNOSTIC (progress-stuck investigation): confirm events make it
+        // from the Rust bridge into the webview listener.
+        if (!firstProgressLoggedRef.current) {
+          firstProgressLoggedRef.current = true;
+          logFrontend("info", "bgremove.progress.received", "First progress event reached the panel", {
+            mode,
+            payload: safeLogValue(event.payload),
+          });
+        }
+        setProgress(event.payload);
+      }
     }).then((cleanup) => {
       unlisten = cleanup;
     });
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [mode]);
 
   async function refreshStatus() {
     try {
-      const raw = await invoke<string>("bgremove_status");
+      const raw = await fetchBgRemoveStatus();
       const nextStatus = parseBridgePayload<BgRemoveStatus>(raw);
       setStatus(nextStatus);
       // Auto-set force CPU if GPU is not available
@@ -117,38 +188,91 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
     }
   }
 
+  function loadFile(path: string) {
+    if (processing || isPreviewing) return;
+    previewAttemptRef.current = "";
+    setSelectedFile(path);
+    setResultMessage(null);
+    setErrorMessage(null);
+    setPreviewData(null);
+    setPreviewError(null);
+    setPreviewFrame(null);
+    setShowcase(null);
+    setFileTypeWarning(null);
+  }
+
+  // Keep the router pointed at the latest render's state without re-registering.
+  const loadFileRef = React.useRef(loadFile);
+  loadFileRef.current = loadFile;
+
+  React.useEffect(() => {
+    fileRouters[mode] = (path) => {
+      loadFileRef.current(path);
+    };
+    return () => {
+      delete fileRouters[mode];
+    };
+  }, [mode]);
+
+  // Auto-detect the file type: a file matching this tab loads here, anything
+  // else switches to the sibling tab and loads there. Files that are neither
+  // a supported video nor image surface a warning instead of loading.
+  function routeFile(path: string) {
+    const target = detectIsolateMode(path);
+    if (!target) {
+      setFileTypeWarning(
+        `"${fileName(path)}" isn't a supported video (${VIDEO_INPUT_EXTENSIONS.join(", ")}) or image (${IMAGE_INPUT_EXTENSIONS.join(", ")}).`,
+      );
+      return;
+    }
+    setFileTypeWarning(null);
+    if (target === mode) {
+      loadFile(path);
+      return;
+    }
+    onRequestTab?.(target);
+    fileRouters[target]?.(path);
+  }
+
   async function pickInputFile() {
     const selected = await open({
       multiple: false,
       directory: false,
       filters: [
         {
-          name: isImageTab ? "Image File" : "Video File",
-          extensions: acceptedExtensions,
+          name: "Video or Image File",
+          extensions: BGREMOVE_INPUT_EXTENSIONS,
+        },
+        {
+          name: "Video File",
+          extensions: VIDEO_INPUT_EXTENSIONS,
+        },
+        {
+          name: "Image File",
+          extensions: IMAGE_INPUT_EXTENSIONS,
         },
       ],
     });
-    
+
     const paths = normalizeSelectedPaths(selected);
     if (paths && paths.length > 0) {
-      setSelectedFile(paths[0]);
-      setResultMessage(null);
-      setErrorMessage(null);
-      setPreviewData(null);
-      setPreviewError(null);
+      routeFile(paths[0]);
     }
   }
 
   async function runBackgroundRemoval() {
     if (!selectedFile) return;
-    
+    const owner = getBusyOwner();
+    if (owner !== null && owner !== mode) return;
+
+    setBusyOwner(mode);
     setProcessing(true);
     setResultMessage(null);
     setErrorMessage(null);
+    setShowcase(null);
     cancellingRef.current = false;
 
     // Prompt user for saving location
-    const extension = format === "webm" ? "webm" : "";
     const isPngSequence = format === "png";
     
     let destinationPath = "";
@@ -183,14 +307,15 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
         }
         destinationPath = Array.isArray(selectedDir) ? selectedDir[0] : selectedDir;
       } else {
-        // For WebM, prompt where to save the file
-        const proposedName = fileName(selectedFile).replace(/\.[^/.]+$/, "") + "_transparent.webm";
+        // Single-file transparent video (ProRes MOV or WebM)
+        const extension = format === "webm" ? "webm" : "mov";
+        const proposedName = fileName(selectedFile).replace(/\.[^/.]+$/, "") + `_transparent.${extension}`;
         const selectedSave = await save({
           defaultPath: proposedName,
           filters: [
             {
-              name: "Transparent WebM",
-              extensions: ["webm"],
+              name: format === "webm" ? "Transparent WebM" : "Transparent ProRes MOV",
+              extensions: [extension],
             },
           ],
         });
@@ -210,6 +335,7 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
       const canUseCachedPreview =
         isImage &&
         cachedIsolatedPath &&
+        previewFileRef.current === selectedFile &&
         previewModelRef.current === model &&
         previewCpuRef.current === forceCpu;
 
@@ -241,6 +367,8 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
         output: string;
         frames: number;
         elapsedSeconds: number;
+        fps?: number | null;
+        showcase?: string | null;
       }>(raw);
 
       if (cancellingRef.current) {
@@ -250,6 +378,16 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
         setResultMessage(
           `Background removal complete. Processed ${countText} in ${payload.elapsedSeconds}s.`
         );
+        if (payload.showcase) {
+          // The showcase WebM is rewritten at a fixed path each run; the
+          // query param defeats the webview's cache of the previous one.
+          setPreviewData(null);
+          setShowcase({
+            original: convertFileSrc(selectedFile),
+            isolated: `${convertFileSrc(payload.showcase)}?v=${Date.now()}`,
+            fps: payload.fps ?? null,
+          });
+        }
       }
     } catch (error) {
       if (!cancellingRef.current) {
@@ -259,6 +397,7 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
       setProcessing(false);
       setProgress(null);
       cancellingRef.current = false;
+      setBusyOwner(null);
     }
   }
 
@@ -279,37 +418,54 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
     }
   }
 
-  async function generatePreview() {
-    if (!selectedFile) return;
-    
+  async function generatePreview(frameOverride?: number) {
+    // The busyOwner check below doesn't cover a job running on THIS tab, so
+    // guard processing explicitly now that the panel stays interactive.
+    if (!selectedFile || processing) return;
+    const owner = getBusyOwner();
+    if (owner !== null && owner !== mode) return;
+
+    const frame = frameOverride ?? previewFrame ?? -1;
+    if (frameOverride !== undefined) {
+      setPreviewFrame(frameOverride);
+    }
+
+    previewAttemptRef.current = `${selectedFile}|${model}|${forceCpu}`;
+    setBusyOwner(mode);
     setIsPreviewing(true);
     setPreviewError(null);
     setPreviewData(null);
-    
+    setShowcase(null);
+
     try {
       const raw = await invoke<string>("bgremove_preview", {
         inputPath: selectedFile,
         model: model,
         cpu: forceCpu,
+        cacheTag: mode,
+        frame,
       });
-      
+
       const payload = parseBridgePayload<{
         type: string;
         original: string;
         isolated: string;
         frame: number;
+        totalFrames?: number;
         elapsedSeconds: number;
       }>(raw);
-      
+
       if (payload.type === "preview_done") {
         setPreviewData({
           original: convertFileSrc(payload.original),
           isolated: convertFileSrc(payload.isolated),
           frame: payload.frame,
+          totalFrames: payload.totalFrames ?? 1,
           elapsedSeconds: payload.elapsedSeconds,
         });
         // Cache the raw filesystem path + settings for fast-path download
         setCachedIsolatedPath(payload.isolated);
+        previewFileRef.current = selectedFile;
         previewModelRef.current = model;
         previewCpuRef.current = forceCpu;
       } else {
@@ -320,80 +476,41 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
     } finally {
       setIsPreviewing(false);
       setProgress(null);
+      setBusyOwner(null);
     }
   }
 
-  function reset() {
-    setSelectedFile("");
-    setProgress(null);
-    setResultMessage(null);
-    setErrorMessage(null);
-    setOutputPath("");
-    setPreviewData(null);
-    setPreviewError(null);
-    setIsPreviewing(false);
-    setCachedIsolatedPath("");
-  }
-
-  const dropEnabled = !processing && !isPreviewing;
+  const dropEnabled = !processing && !isPreviewing && active;
   const dropZone = useFileDrop({
-    accept: isImageTab ? extensionAccept(IMAGE_INPUT_EXTENSIONS) : extensionAccept(VIDEO_INPUT_EXTENSIONS),
+    // No accept filter: unsupported files must reach routeFile so it can warn
+    // instead of the drop silently doing nothing. A wrong-type media drop
+    // switches to the matching tab.
     enabled: dropEnabled,
     onDrop: (files) => {
-      if (files.length > 0) {
-        setSelectedFile(files[0]);
-        setResultMessage(null);
-        setErrorMessage(null);
-        setPreviewData(null);
-        setPreviewError(null);
-      }
+      const supported = files.find((file) => detectIsolateMode(file) !== null);
+      routeFile(supported ?? files[0]);
     },
   });
 
-  const selectedName = selectedFile ? fileName(selectedFile) : "";
   const isImage = IMAGE_INPUT_EXTENSIONS.includes(selectedFile.split(".").pop()?.toLowerCase() || "");
-  const isWebM = format === "webm";
-  const outputDir = outputPath ? (isWebM || isImage ? outputPath.substring(0, outputPath.lastIndexOf("\\")) : outputPath) : "";
-
-  // Progress UI rendering
-  if (processing || progress) {
-    return (
-      <div className="panel-flex-center">
-        <BgRemoveProgressCard
-          fileName={selectedName}
-          progress={progress}
-          onCancel={cancelProcessing}
-          isImage={isImageTab}
-        />
-      </div>
-    );
-  }
-
-  // Result UI rendering
-  if (resultMessage || errorMessage) {
-    return (
-      <div className="panel-flex-center">
-        <BgRemoveResultCard
-          kind={errorMessage ? "error" : "success"}
-          fileName={selectedName}
-          message={errorMessage || resultMessage || ""}
-          onAgain={reset}
-          onRetry={runBackgroundRemoval}
-          outputDir={outputDir}
-        />
-      </div>
-    );
-  }
+  // PNG sequences save to a directory the user picked; everything else is a
+  // single file whose parent folder is what "Open folder" should reveal.
+  const isSingleFileOutput = isImage || format !== "png";
+  const outputDir = outputPath ? (isSingleFileOutput ? outputPath.substring(0, outputPath.lastIndexOf("\\")) : outputPath) : "";
+  // Both tab instances stay mounted so each keeps its file/preview/progress
+  // state; only the active one is shown.
+  const hiddenStyle = active ? undefined : { display: "none" as const };
 
   return (
     <section
       ref={dropZone.ref}
       className={`conversion-panel drop-zone${dropZone.hover ? " is-drop-target" : ""}`}
+      style={hiddenStyle}
     >
       <div className="drop-zone-overlay">
         <Upload size={32} strokeWidth={1.8} />
-        <span>Drop {isImageTab ? "image" : "video"} to remove background</span>
-        <small>{isImageTab ? "PNG · JPG · JPEG · WEBP · BMP" : "MP4 · MKV · AVI · WEBM · MOV"}</small>
+        <span>Drop video or image to remove background</span>
+        <small>Files open in the matching tab automatically</small>
       </div>
 
       <div className="conversion-hero">
@@ -403,7 +520,7 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
           <p>
             {isImageTab
               ? "Isolate foreground characters and subjects from static images, exporting as a transparent PNG."
-              : "Isolate foreground characters and subjects from video files, exporting as a transparent WebM or PNG sequence."}
+              : "Isolate foreground characters and subjects from video files, exporting as transparent ProRes MOV, WebM, or PNG sequence."}
           </p>
         </div>
       </div>
@@ -419,6 +536,25 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
             onPick={pickInputFile}
             disabled={processing || isPreviewing}
           />
+
+          {fileTypeWarning && (
+            <div
+              className="glass"
+              style={{
+                padding: "16px",
+                borderRadius: "12px",
+                border: "1px solid rgba(245, 158, 11, 0.2)",
+                background: "rgba(245, 158, 11, 0.05)",
+                color: "#fbbf24",
+                fontSize: "13px",
+              }}
+            >
+              <h4 style={{ margin: "0 0 4px 0", fontWeight: 600 }}>Unsupported file type</h4>
+              <p style={{ margin: 0 }} className="dim-text">
+                {fileTypeWarning}
+              </p>
+            </div>
+          )}
 
           {/* Preview loading spinner, error banner, or comparison card */}
           {isPreviewing && (
@@ -476,6 +612,23 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
               <p style={{ margin: 0 }} className="dim-text">
                 {previewError}
               </p>
+              <button
+                type="button"
+                className="install-btn is-secondary"
+                style={{
+                  marginTop: "10px",
+                  padding: "6px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  fontSize: "12px",
+                }}
+                disabled={isPreviewing || processing || otherTabBusy}
+                onClick={() => void generatePreview()}
+              >
+                <RefreshCw size={14} strokeWidth={2.3} />
+                <span>Try again</span>
+              </button>
             </div>
           )}
 
@@ -484,11 +637,22 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
               original={previewData.original}
               isolated={previewData.isolated}
               frame={previewData.frame}
+              totalFrames={previewData.totalFrames}
               elapsedSeconds={previewData.elapsedSeconds}
               model={model}
               isPreviewing={isPreviewing}
-              onRegenerate={generatePreview}
+              disabled={isPreviewing || processing}
+              onRegenerate={() => void generatePreview()}
+              onSeekFrame={(frame) => void generatePreview(frame)}
               isImage={isImageTab}
+            />
+          )}
+
+          {showcase && (
+            <VideoComparisonCard
+              original={showcase.original}
+              isolated={showcase.isolated}
+              fps={showcase.fps}
             />
           )}
 
@@ -522,7 +686,10 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
               ) : (
                 <>
                   <li>
-                    <strong>WebM VP9 + Alpha:</strong> Transparent video format compatible with most video editing software (Premiere, After Effects, DaVinci Resolve).
+                    <strong>ProRes 4444 + Alpha:</strong> The transparent video format editors import natively (Premiere, After Effects, DaVinci Resolve). Use WebM only for OBS overlays and web pages.
+                  </li>
+                  <li>
+                    <strong>Frame Check:</strong> Generate an AI preview, then drag the &quot;Check frame&quot; slider to re-test the isolation on any frame of the video.
                   </li>
                   <li>
                     <strong>Anime Characters:</strong> The Anime Character (isnet-anime) model is optimized specifically for cel-shaded boundary outlines.
@@ -552,7 +719,7 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
 
             {/* Model Select */}
             <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              <label htmlFor="model-select" style={{ fontSize: "11px", fontWeight: 700, color: "rgba(147, 161, 173, 0.82)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              <label htmlFor="model-select" className="conversion-field-label">
                 AI Segmentation Model
               </label>
               <Dropdown<string>
@@ -606,15 +773,20 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
             {/* Export Format Select */}
             {!isImageTab && (
               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                <label htmlFor="format-select" style={{ fontSize: "11px", fontWeight: 700, color: "rgba(147, 161, 173, 0.82)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                <label htmlFor="format-select" className="conversion-field-label">
                   Export Format
                 </label>
                 <Dropdown<string>
                   options={[
                     {
+                      value: "mov",
+                      label: "Editor Video (ProRes 4444 MOV + Alpha)",
+                      description: "Transparent video for Premiere, After Effects, and DaVinci Resolve. Large files.",
+                    },
+                    {
                       value: "webm",
-                      label: "Transparent Video (WebM VP9 + Alpha)",
-                      description: "Exports transparent video overlay (VP9 codec with alpha channel).",
+                      label: "Web Video (WebM VP9 + Alpha)",
+                      description: "Compact transparent video for OBS overlays and browsers. Most editors can't import it.",
                     },
                     {
                       value: "png",
@@ -630,7 +802,7 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
 
             {/* Hardware Selection */}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "12px" }}>
-              <span style={{ fontSize: "11px", fontWeight: 700, color: "rgba(147, 161, 173, 0.82)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              <span className="conversion-field-label">
                 Hardware Accelerator
               </span>
               <div className="conversion-segment">
@@ -655,45 +827,129 @@ export function BgRemovePanel({ activeTab = "video" }: { activeTab?: "video" | "
 
           {/* Action Buttons */}
           <div className="conversion-run-actions" style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "24px", paddingTop: "20px", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-            <button
-              type="button"
-              className="conversion-pick-btn"
-              style={{
-                width: "100%",
-                minHeight: "38px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "8px",
-              }}
-              disabled={!selectedFile || isPreviewing}
-              onClick={generatePreview}
-            >
-              <Eye size={16} />
-              <span>{isPreviewing ? "Generating Preview..." : isImageTab ? "Generate Isolated Preview" : "Generate AI Preview"}</span>
-            </button>
+            {otherTabBusy && (
+              <p className="dim-text" style={{ fontSize: "12px", margin: 0 }}>
+                The {isImageTab ? "Video" : "Image"} Isolate tab is processing — one isolation job runs at a time.
+              </p>
+            )}
+            {(resultMessage || errorMessage) && !processing && (
+              <BgRemoveResultCard
+                kind={errorMessage ? "error" : "success"}
+                message={errorMessage || resultMessage || ""}
+                outputDir={outputDir}
+                onRetry={errorMessage ? runBackgroundRemoval : undefined}
+                onDismiss={() => {
+                  setResultMessage(null);
+                  setErrorMessage(null);
+                }}
+              />
+            )}
+            {processing ? (
+              <BgRemoveProgressCard
+                progress={progress}
+                onCancel={cancelProcessing}
+                isImage={isImageTab}
+              />
+            ) : (
+              <>
+                {/* The image tab auto-previews on select and on model/hardware
+                    change, so it gets no manual preview button — error retry
+                    lives on the preview-error banner instead. */}
+                {!isImageTab && (
+                  <button
+                    type="button"
+                    className="conversion-pick-btn"
+                    style={{
+                      width: "100%",
+                      minHeight: "38px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "8px",
+                    }}
+                    disabled={!selectedFile || isPreviewing || otherTabBusy}
+                    onClick={() => void generatePreview()}
+                  >
+                    <Eye size={16} />
+                    <span>{isPreviewing ? "Generating Preview..." : "Generate AI Preview"}</span>
+                  </button>
+                )}
 
-            <button
-              type="button"
-              className="conversion-run-btn"
-              style={{
-                width: "100%",
-                minHeight: "38px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "8px",
-              }}
-              disabled={!selectedFile || isPreviewing}
-              onClick={runBackgroundRemoval}
-            >
-              <Sparkles size={16} />
-              <span>{isImageTab ? "Download Isolated Image" : "Remove Background"}</span>
-            </button>
+                <button
+                  type="button"
+                  className="conversion-run-btn"
+                  style={{
+                    width: "100%",
+                    minHeight: "38px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                  }}
+                  disabled={!selectedFile || isPreviewing || otherTabBusy}
+                  onClick={runBackgroundRemoval}
+                >
+                  <Sparkles size={16} />
+                  <span>{isImageTab ? "Download Isolated Image" : "Remove Background"}</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
     </section>
+  );
+}
+
+// Scrub through the source video and re-run the single-frame AI preview at
+// the chosen frame. Regeneration happens on release, not while dragging —
+// every regen is a full model pass on that frame.
+function FrameScrubber({
+  frame,
+  totalFrames,
+  disabled,
+  onSeek,
+}: {
+  frame: number;
+  totalFrames: number;
+  disabled?: boolean;
+  onSeek: (frame: number) => void;
+}) {
+  const [value, setValue] = React.useState(frame);
+  // Snap the thumb to the frame the preview actually shows when a new
+  // preview lands.
+  React.useEffect(() => {
+    setValue(frame);
+  }, [frame]);
+
+  const commit = () => {
+    if (!disabled && value !== frame) onSeek(value);
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+      <span className="dim-text" style={{ fontSize: "11px", whiteSpace: "nowrap" }}>
+        Check frame
+      </span>
+      <input
+        type="range"
+        aria-label="Preview frame"
+        min={0}
+        max={Math.max(0, totalFrames - 1)}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => setValue(Number(event.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+        style={{ flex: 1, accentColor: "rgb(var(--theme-accent-rgb))" }}
+      />
+      <span
+        className="dim-text"
+        style={{ fontSize: "11px", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}
+      >
+        {value} / {totalFrames - 1}
+      </span>
+    </div>
   );
 }
 
@@ -876,10 +1132,13 @@ interface PreviewComparisonCardProps {
   original: string;
   isolated: string;
   frame: number;
+  totalFrames: number;
   elapsedSeconds: number;
   model: string;
   isPreviewing: boolean;
+  disabled?: boolean;
   onRegenerate: () => void;
+  onSeekFrame: (frame: number) => void;
   isImage?: boolean;
 }
 
@@ -887,10 +1146,13 @@ function PreviewComparisonCard({
   original,
   isolated,
   frame,
+  totalFrames,
   elapsedSeconds,
   model,
   isPreviewing,
+  disabled,
   onRegenerate,
+  onSeekFrame,
   isImage,
 }: PreviewComparisonCardProps) {
   const [layoutMode, setLayoutMode] = React.useState<"slider" | "side-by-side">("slider");
@@ -978,7 +1240,7 @@ function PreviewComparisonCard({
             type="button"
             className="install-btn is-secondary"
             style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" }}
-            disabled={isPreviewing}
+            disabled={disabled || isPreviewing}
             onClick={onRegenerate}
           >
             <RefreshCw size={12} className={isPreviewing ? "spin" : ""} />
@@ -986,6 +1248,15 @@ function PreviewComparisonCard({
           </button>
         </div>
       </div>
+
+      {!isImage && totalFrames > 1 && (
+        <FrameScrubber
+          frame={frame}
+          totalFrames={totalFrames}
+          disabled={disabled}
+          onSeek={onSeekFrame}
+        />
+      )}
 
       {layoutMode === "slider" ? (
         <ImageComparisonSlider original={original} isolated={isolated} />

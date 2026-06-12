@@ -5,7 +5,7 @@ use std::{
 };
 
 use serde_json::{json, Value};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::{
     app_root, apply_python_env, bgremove_cli_path, clear_child_pid, cmd, kill_child_pid,
@@ -94,6 +94,8 @@ pub(crate) async fn bgremove_preview(
     input_path: String,
     model: String,
     cpu: bool,
+    cache_tag: Option<String>,
+    frame: Option<i64>,
 ) -> Result<String, String> {
     log_info(
         "bgremove.preview.invoke.start",
@@ -101,15 +103,36 @@ pub(crate) async fn bgremove_preview(
         json!({
             "input": &input_path,
             "model": &model,
-            "cpu": cpu
+            "cpu": cpu,
+            "cacheTag": &cache_tag,
+            "frame": frame,
         }),
     );
 
-    let root = app_root()?;
-    let preview_dir = root.join("cache").join("bgremove_previews");
+    // The CLI writes fixed file names (orig.png / isolated.png), so each tab
+    // gets its own subdirectory to keep the video and image previews from
+    // overwriting each other.
+    let cache_sub = match cache_tag.as_deref() {
+        Some("image") => "image",
+        _ => "video",
+    };
+    // Previews must live under app_data_dir: the frontend displays them via
+    // convertFileSrc, and the asset-protocol scope only covers $APPDATA /
+    // $RESOURCE / $HOME — app_root() (dev checkout or install dir) can fall
+    // outside it, which renders the preview images as broken/blank.
+    let app_data_dir = window
+        .app_handle()
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    let preview_dir = app_data_dir.join("bgremove_previews").join(cache_sub);
     std::fs::create_dir_all(&preview_dir).map_err(|error| {
         format!("Could not create preview cache directory: {error}")
     })?;
+    // Silently GC the legacy preview cache that lived next to the app.
+    if let Ok(root) = app_root() {
+        let _ = std::fs::remove_dir_all(root.join("cache").join("bgremove_previews"));
+    }
 
     let args = vec![
         "preview".to_string(),
@@ -122,6 +145,10 @@ pub(crate) async fn bgremove_preview(
     ];
     
     let mut final_args = args;
+    if let Some(frame) = frame.filter(|index| *index >= 0) {
+        final_args.push("--frame".to_string());
+        final_args.push(frame.to_string());
+    }
     if cpu {
         final_args.push("--cpu".to_string());
     }
@@ -186,6 +213,16 @@ pub(crate) async fn bgremove_process(
     ];
     if cpu {
         args.push("--cpu".to_string());
+    }
+    // Best-effort comparison preview: the CLI encodes a compact alpha WebM of
+    // the result here for the in-app before/after player. Must live under
+    // app_data_dir so the asset protocol can serve it (see bgremove_preview).
+    if let Ok(app_data_dir) = window.app_handle().path().app_data_dir() {
+        let showcase_dir = app_data_dir.join("bgremove_previews").join("showcase");
+        if std::fs::create_dir_all(&showcase_dir).is_ok() {
+            args.push("--showcase-dir".to_string());
+            args.push(showcase_dir.to_string_lossy().to_string());
+        }
     }
 
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -272,6 +309,7 @@ pub(crate) fn run_streaming_bgremove_cli(
     });
 
     let mut final_payload: Option<String> = None;
+    let mut forwarded_events: u64 = 0;
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|error| error.to_string())?;
         if line.trim().is_empty() {
@@ -280,7 +318,27 @@ pub(crate) fn run_streaming_bgremove_cli(
         if let Ok(value) = serde_json::from_str::<Value>(&line) {
             match value.get("type").and_then(Value::as_str) {
                 Some("progress") | Some("dependencies") | Some("processing") | Some("model-init") => {
-                    let _ = window.emit(progress_event, value);
+                    // DIAGNOSTIC (progress-stuck investigation): log the first
+                    // forwarded event so System Logs shows whether the bridge
+                    // saw and emitted progress at all.
+                    if forwarded_events == 0 {
+                        log_info(
+                            "bgremove.streaming_bridge.first_event",
+                            "Forwarding first progress event to the webview",
+                            json!({ "event": progress_event, "payload": &value }),
+                        );
+                    }
+                    forwarded_events += 1;
+                    let emitted = window.emit(progress_event, value);
+                    if forwarded_events == 1 {
+                        if let Err(error) = emitted {
+                            log_error(
+                                "bgremove.streaming_bridge.emit_error",
+                                "Could not emit progress event to the webview",
+                                json!({ "event": progress_event, "error": error.to_string() }),
+                            );
+                        }
+                    }
                 }
                 Some("done") | Some("preview_done") | Some("error") => {
                     final_payload = Some(line);
@@ -308,7 +366,7 @@ pub(crate) fn run_streaming_bgremove_cli(
             Ok(payload) => log_info(
                 "bgremove.streaming_bridge.complete",
                 "Streaming background removal bridge completed",
-                json!({ "args": &args, "result": payload }),
+                json!({ "args": &args, "result": payload, "forwardedEvents": forwarded_events }),
             ),
             Err(error) => log_error(
                 "bgremove.streaming_bridge.error",

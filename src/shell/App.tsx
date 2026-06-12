@@ -641,7 +641,10 @@ export function App() {
                   <NewAudioExtractionPanel />
                 </div>
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
-                  <BgRemovePanel activeTab={bgRemoveTab} />
+                  {/* Both isolate tabs stay mounted so switching tabs never
+                      discards an in-flight job or generated preview. */}
+                  <BgRemovePanel mode="video" active={bgRemoveTab === "video"} onRequestTab={setBgRemoveTab} />
+                  <BgRemovePanel mode="image" active={bgRemoveTab === "image"} onRequestTab={setBgRemoveTab} />
                 </div>
                 <div className={`panel-view spring-motion ${isTsukyio ? "is-active" : "is-hidden"}`} aria-hidden={!isTsukyio}>
                   <TsukyioPanel active={isTsukyio} onOpenSettings={() => setActive("settings")} />

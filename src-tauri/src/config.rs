@@ -48,10 +48,15 @@ pub(crate) async fn clear_app_cache(window: tauri::Window) -> Result<ClearCacheR
     );
 
     let report = tauri::async_runtime::spawn_blocking(move || -> Result<ClearCacheReport, String> {
-        // All three are regenerated on demand, so wiping them is safe.
+        // All of these are regenerated on demand, so wiping them is safe.
         // Don't touch `backgrounds/`, `logs/`, `*.json`, or the WebView2
         // browser data — those are user data, not cache.
-        const CACHE_DIRS: &[&str] = &["clip_previews", "scene_clips", "clip_compat_cache"];
+        const CACHE_DIRS: &[&str] = &[
+            "clip_previews",
+            "scene_clips",
+            "clip_compat_cache",
+            "bgremove_previews",
+        ];
 
         let mut total_files = 0u64;
         let mut total_bytes = 0u64;

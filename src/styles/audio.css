@@ -821,6 +821,17 @@
   text-transform: uppercase;
 }
 
+/* Field eyebrows above form controls (BG remover model/format/hardware).
+   A class (not inline styles) so the has-app-bg legibility rules in
+   base.css §3 can reach them. */
+.conversion-field-label {
+  color: rgba(147, 161, 173, 0.82);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .conversion-hero h2 {
   margin: 7px 0 8px;
   max-width: 780px;

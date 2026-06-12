@@ -30,24 +30,27 @@ class TestBgRemoveCli(unittest.TestCase):
     @patch("bgremove_cli.remove_background_video")
     @patch("bgremove_cli.ensure_feature_dependencies")
     def test_process_success(self, mock_ensure_deps, mock_remove_bg, mock_emit):
-        mock_remove_bg.return_value = 100
-        
+        mock_remove_bg.return_value = (100, 24.0, "C:\\cache\\showcase.webm")
+
         result = process(
             input_file="input.mp4",
             output_file="output.webm",
             model_key="anime",
             export_format="webm",
-            force_cpu=False
+            force_cpu=False,
+            showcase_dir="C:\\cache"
         )
-        
+
         self.assertEqual(result, 0)
         mock_ensure_deps.assert_called_once()
         mock_remove_bg.assert_called_once()
-        
+
         # Verify done payload was emitted
         done_calls = [call for call in mock_emit.call_args_list if call[0][0].get("type") == "done"]
         self.assertEqual(len(done_calls), 1)
         self.assertEqual(done_calls[0][0][0]["frames"], 100)
+        self.assertEqual(done_calls[0][0][0]["fps"], 24.0)
+        self.assertEqual(done_calls[0][0][0]["showcase"], "C:\\cache\\showcase.webm")
 
     @patch("bgremove_cli.emit")
     @patch("bgremove_cli.remove_background_video")
@@ -92,6 +95,7 @@ class TestBgRemoveCli(unittest.TestCase):
         done_calls = [call for call in mock_emit.call_args_list if call[0][0].get("type") == "preview_done"]
         self.assertEqual(len(done_calls), 1)
         self.assertEqual(done_calls[0][0][0]["frame"], 150)
+        self.assertIn("totalFrames", done_calls[0][0][0])
 
     @patch("bgremove_cli.emit")
     @patch("bgremove_cli.extract_single_frame")
