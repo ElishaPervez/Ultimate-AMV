@@ -25,7 +25,10 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::Instant,
 };
 
@@ -106,28 +109,39 @@ pub(crate) fn tsukyio_set_session_key(
     state.set(key);
 }
 
-/// Builds a reqwest client carrying the user's Bearer key. Mirrors the
-/// construction style used in tools.rs / downloads.rs (a fresh client per
-/// call is fine — these are infrequent, user-driven requests).
-fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
-    let trimmed = api_key.trim();
-    if trimmed.is_empty() {
-        return Err("No Tsukyio API key set. Add your key in Settings.".to_string());
+/// Shared reqwest client for every Tsukyio call (JSON API, downloads, the
+/// stream/thumbnail proxies). Built once so its connection pool + TLS session
+/// survive across requests — the streaming proxy issues one request per Range,
+/// so a per-call client would pay a fresh handshake on every seek. Auth is NOT
+/// baked into the defaults: the key can change at runtime in Settings, so each
+/// call site attaches the current Bearer key via `bearer_value`.
+fn shared_client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
     }
     let mut headers = reqwest::header::HeaderMap::new();
-    let bearer = format!("Bearer {trimmed}");
-    let value = reqwest::header::HeaderValue::from_str(&bearer)
-        .map_err(|_| "The Tsukyio API key contains invalid characters.".to_string())?;
-    headers.insert(reqwest::header::AUTHORIZATION, value);
     headers.insert(
         reqwest::header::ACCEPT,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .default_headers(headers)
         .build()
-        .map_err(|error| format!("Could not build Tsukyio HTTP client: {error}"))
+        .map_err(|error| format!("Could not build Tsukyio HTTP client: {error}"))?;
+    Ok(CLIENT.get_or_init(|| client).clone())
+}
+
+/// Validates the user's API key and renders it as an `Authorization` header
+/// value for a single request.
+fn bearer_value(api_key: &str) -> Result<reqwest::header::HeaderValue, String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err("No Tsukyio API key set. Add your key in Settings.".to_string());
+    }
+    reqwest::header::HeaderValue::from_str(&format!("Bearer {trimmed}"))
+        .map_err(|_| "The Tsukyio API key contains invalid characters.".to_string())
 }
 
 /// Maps an HTTP status to a friendly error. 401/403 → bad key, 429 → rate
@@ -158,9 +172,11 @@ fn status_error(status: reqwest::StatusCode, body: &str) -> String {
 /// parsed JSON body. The vault always replies `{ "success": bool, "data": ... }`,
 /// so callers get the whole object back and read `.data` on the frontend.
 async fn get_json(api_key: &str, url: &str) -> Result<Value, String> {
-    let client = build_client(api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(api_key)?;
     let response = client
         .get(url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -202,7 +218,8 @@ pub(crate) async fn tsukyio_browse(
 ) -> Result<Value, String> {
     let limit = limit.unwrap_or(24);
     let offset = offset.unwrap_or(0);
-    let client = build_client(&api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
     // Use reqwest's query builder so values are percent-encoded correctly
     // (relPaths carry spaces and slashes).
     let mut query: Vec<(&str, String)> = vec![
@@ -224,6 +241,7 @@ pub(crate) async fn tsukyio_browse(
     let response = client
         .get(format!("{TSUKYIO_BASE}/vault/all"))
         .query(&query)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -245,7 +263,8 @@ pub(crate) async fn tsukyio_search(
     q: String,
     category: Option<String>,
 ) -> Result<Value, String> {
-    let client = build_client(&api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
     let mut query: Vec<(&str, String)> = vec![("q", q.clone())];
     if let Some(cat) = category.as_deref().filter(|c| !c.trim().is_empty() && *c != "all") {
         query.push(("category", cat.to_string()));
@@ -258,6 +277,7 @@ pub(crate) async fn tsukyio_search(
     let response = client
         .get(format!("{TSUKYIO_BASE}/vault/search"))
         .query(&query)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -275,7 +295,8 @@ pub(crate) async fn tsukyio_search(
 
 #[tauri::command]
 pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Value, String> {
-    let client = build_client(&api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
     log_info(
         "tsukyio.deep_search.start",
         "Deep-searching Tsukyio clips",
@@ -284,6 +305,7 @@ pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Va
     let response = client
         .get(format!("{TSUKYIO_BASE}/vault/deep-search"))
         .query(&[("q", q.as_str())])
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -333,6 +355,23 @@ fn emit_progress(window: &Window, payload: Value) {
     let _ = window.emit("tsukyio-download-progress", payload);
 }
 
+/// Set by `tsukyio_cancel_download`, checked per chunk by the download loop
+/// (same pattern as tools.rs). A single flag suffices: the panel drives vault
+/// downloads one at a time, and each new download resets it.
+static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Asks the in-flight `tsukyio_download` to stop. The download loop deletes
+/// its `.part` temp and reports a `cancelled` progress event.
+#[tauri::command]
+pub(crate) fn tsukyio_cancel_download() {
+    log_info(
+        "tsukyio.download.cancel",
+        "Tsukyio download cancel requested",
+        Value::Null,
+    );
+    CANCEL_FLAG.store(true, Ordering::SeqCst);
+}
+
 /// Streams `GET /vault/download/{id}` (a plain authenticated GET) to disk under
 /// `{dest}/tsukyio-vault/<Category>/<name>.<ext>`, emitting progress events.
 /// Returns the saved file path on success.
@@ -346,7 +385,9 @@ pub(crate) async fn tsukyio_download(
     path_hint: Option<String>,
     dest_dir: Option<String>,
 ) -> Result<String, String> {
-    let client = build_client(&api_key)?;
+    CANCEL_FLAG.store(false, Ordering::SeqCst);
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
 
     let base = resolve_vault_root(dest_dir.as_deref());
     let category_folder = category
@@ -379,6 +420,7 @@ pub(crate) async fn tsukyio_download(
     let url = format!("{TSUKYIO_BASE}/vault/download/{asset_id}");
     let response = client
         .get(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not start Tsukyio download: {error}"))?;
@@ -411,6 +453,20 @@ pub(crate) async fn tsukyio_download(
     );
 
     while let Some(chunk) = stream.next().await {
+        if CANCEL_FLAG.load(Ordering::SeqCst) {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            log_info(
+                "tsukyio.download.cancelled",
+                "Tsukyio download cancelled",
+                json!({ "assetId": &asset_id }),
+            );
+            emit_progress(
+                &window,
+                json!({ "type": "cancelled", "assetId": &asset_id }),
+            );
+            return Err("Download cancelled.".to_string());
+        }
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -799,12 +855,14 @@ async fn proxy_stream(
         None => format!("bytes={}-", requested.start),
     };
 
-    let client = build_client(api_key).map_err(|e| (401u16, e))?;
+    let client = shared_client().map_err(|e| (500u16, e))?;
+    let auth = bearer_value(api_key).map_err(|e| (401u16, e))?;
 
     let response = client
         .get(format!("{TSUKYIO_BASE}/stream"))
         // Percent-encode the id correctly instead of splicing it raw into the URL.
         .query(&[("id", asset_id)])
+        .header(reqwest::header::AUTHORIZATION, auth)
         .header(reqwest::header::RANGE, &upstream_range)
         // The stream endpoint serves media; override the JSON Accept default.
         .header(reqwest::header::ACCEPT, "*/*")
@@ -843,7 +901,9 @@ async fn proxy_stream(
         // support — does not happen against this endpoint in practice). We must
         // NOT cap here: a capped 200 silently truncates the file and breaks
         // playback/seeking. Read the ENTIRE body and relay it as a plain 200.
-        // Guard against a pathological huge body using the advertised length.
+        // Guard against a pathological huge body: fail fast when the advertised
+        // length is over the ceiling, and enforce the same ceiling inside the
+        // read loop for chunked bodies that advertise no length at all.
         if let Some(len) = upstream_content_length {
             if len > PROXY_MAX_FULL_BODY {
                 return Err((
@@ -855,11 +915,22 @@ async fn proxy_stream(
                 ));
             }
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
-        let body: Vec<u8> = bytes.to_vec();
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
+            if body.len() as u64 + chunk.len() as u64 > PROXY_MAX_FULL_BODY {
+                return Err((
+                    502u16,
+                    format!(
+                        "Tsukyio stream too large to buffer without range support \
+                         (exceeded the {PROXY_MAX_FULL_BODY}-byte ceiling)."
+                    ),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
         let body_len = body.len() as u64;
         return tauri::http::Response::builder()
             .status(200)
@@ -936,18 +1007,20 @@ async fn proxy_thumbnail(
         return Err((400u16, format!("Invalid thumbnail path: {encoded_path}")));
     }
 
-    let client = match api_key {
-        Some(key) => build_client(key).map_err(|e| (401u16, e))?,
-        None => reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .map_err(|e| (500u16, format!("Could not build Tsukyio HTTP client: {e}")))?,
+    let client = shared_client().map_err(|e| (500u16, e))?;
+    let auth = match api_key {
+        Some(key) => Some(bearer_value(key).map_err(|e| (401u16, e))?),
+        None => None,
     };
 
-    let response = client
+    let mut request = client
         .get(format!("{TSUKYIO_ORIGIN}{encoded_path}"))
-        // Image endpoint; override build_client's JSON Accept default.
-        .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8")
+        // Image endpoint; override the shared client's JSON Accept default.
+        .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8");
+    if let Some(auth) = auth {
+        request = request.header(reqwest::header::AUTHORIZATION, auth);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| (502u16, format!("Could not reach Tsukyio thumbnail: {e}")))?;

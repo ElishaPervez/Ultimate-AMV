@@ -449,6 +449,7 @@ pub fn run() {
             tsukyio::tsukyio_search,
             tsukyio::tsukyio_deep_search,
             tsukyio::tsukyio_download,
+            tsukyio::tsukyio_cancel_download,
             tsukyio::tsukyio_set_session_key,
             discord_set_state,
             discord_clear,

@@ -397,6 +397,9 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
   // Separate guard for the background stats fetch so a slow stats response
   // can't clobber a newer one (and so it never interferes with browse/search).
   const statsToken = React.useRef(0);
+  // Asset ids the user asked to cancel, so `startDownload`'s rejection handler
+  // can tell a cancel apart from a real failure (clip export's pattern).
+  const cancellingRef = React.useRef<Set<string>>(new Set());
 
   const currentPath = crumbs.length > 0 ? crumbs[crumbs.length - 1].relPath : "";
   const isSearching = activeSearch.trim().length > 0;
@@ -611,6 +614,9 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
           next[p.assetId] = { status: "downloading", percent };
         } else if (p.type === "done") {
           next[p.assetId] = { status: "done", percent: 100, path: p.path };
+        } else if (p.type === "cancelled") {
+          // A cancelled download leaves no trace — back to a plain Download button.
+          delete next[p.assetId];
         } else if (p.type === "error") {
           next[p.assetId] = { status: "error", percent: 0, message: p.message };
         }
@@ -737,6 +743,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
 
   async function startDownload(item: TsukyioItem) {
     if (!apiKey) return;
+    cancellingRef.current.delete(item.id);
     setDownloads((prev) => ({
       ...prev,
       [item.id]: { status: "downloading", percent: 0 },
@@ -751,12 +758,28 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         destDir: downloadPath || null,
       });
     } catch (e) {
+      // A user-initiated cancel rejects too — clear the entry instead of
+      // surfacing it as a failure (the `cancelled` event does the same, so
+      // either arrival order converges on the cleared state).
+      if (cancellingRef.current.delete(item.id)) {
+        setDownloads((prev) => {
+          const next = { ...prev };
+          delete next[item.id];
+          return next;
+        });
+        return;
+      }
       const message = readBridgeError(e);
       setDownloads((prev) => ({
         ...prev,
         [item.id]: { status: "error", percent: 0, message },
       }));
     }
+  }
+
+  function cancelDownload(item: TsukyioItem) {
+    cancellingRef.current.add(item.id);
+    void invoke("tsukyio_cancel_download").catch(() => {});
   }
 
   // ---- Render: not-yet-loaded / empty-state ----------------------------
@@ -942,6 +965,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
                     onOpenFolder={openSearchFolder}
                     onPreview={selectPreview}
                     onDownload={(item) => void startDownload(item)}
+                    onCancel={cancelDownload}
                   />
                 ) : (
                   <div className="tsukyio-empty">
@@ -967,6 +991,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
                         active={previewItem?.id === item.id}
                         onPreview={() => selectPreview(item)}
                         onDownload={() => void startDownload(item)}
+                        onCancel={() => cancelDownload(item)}
                       />
                     ),
                   )}
@@ -1020,6 +1045,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
               nonce={selectNonce}
               fullscreenRef={fullscreenRef}
               onDownload={() => previewItem && void startDownload(previewItem)}
+              onCancel={() => previewItem && cancelDownload(previewItem)}
               onReveal={(path) => void invoke("reveal_in_folder", { path })}
               onClear={clearPreview}
               onCollapse={collapseDock}
@@ -1048,6 +1074,7 @@ interface TsukyioDockProps {
   // Shared ref the player registers its fullscreen function into (null = audio).
   fullscreenRef: React.MutableRefObject<(() => void) | null>;
   onDownload: () => void;
+  onCancel: () => void;
   onReveal: (path: string) => void;
   onClear: () => void;
   onCollapse: () => void;
@@ -1060,6 +1087,7 @@ function TsukyioDock({
   nonce,
   fullscreenRef,
   onDownload,
+  onCancel,
   onReveal,
   onClear,
   onCollapse,
@@ -1163,15 +1191,23 @@ function TsukyioDock({
                 <Folder size={14} />
                 <span>Reveal file</span>
               </button>
+            ) : downloading ? (
+              <button
+                type="button"
+                className="install-btn is-secondary tsukyio-dl-btn"
+                onClick={onCancel}
+              >
+                <X size={14} />
+                <span>Cancel {download?.percent ?? 0}%</span>
+              </button>
             ) : (
               <button
                 type="button"
                 className="install-btn tsukyio-dl-btn"
-                disabled={downloading}
                 onClick={onDownload}
               >
                 <Download size={14} />
-                <span>{downloading ? `${download?.percent ?? 0}%` : failed ? "Retry download" : "Download"}</span>
+                <span>{failed ? "Retry download" : "Download"}</span>
               </button>
             )}
           </div>
@@ -1241,6 +1277,7 @@ interface SearchResultsProps {
   onOpenFolder: (folder: SearchFolder) => void;
   onPreview: (item: TsukyioItem) => void;
   onDownload: (item: TsukyioItem) => void;
+  onCancel: (item: TsukyioItem) => void;
 }
 
 function SearchResults({
@@ -1252,6 +1289,7 @@ function SearchResults({
   onOpenFolder,
   onPreview,
   onDownload,
+  onCancel,
 }: SearchResultsProps) {
   return (
     <div className="tsukyio-sections">
@@ -1313,6 +1351,7 @@ function SearchResults({
                   active={activeId === item.id}
                   onPreview={() => onPreview(item)}
                   onDownload={() => onDownload(item)}
+                  onCancel={() => onCancel(item)}
                 />
               ))}
             </div>
@@ -1356,9 +1395,10 @@ interface ClipCardProps {
   active?: boolean;
   onPreview: () => void;
   onDownload: () => void;
+  onCancel: () => void;
 }
 
-function ClipCard({ item, download, active, onPreview, onDownload }: ClipCardProps) {
+function ClipCard({ item, download, active, onPreview, onDownload, onCancel }: ClipCardProps) {
   const thumb = usableThumbnail(item.thumbnail);
   const isAudio = item.type === "audio";
   const size = typeof item.size === "number" ? formatBytes(item.size) : "";
@@ -1415,18 +1455,29 @@ function ClipCard({ item, download, active, onPreview, onDownload }: ClipCardPro
             <Folder size={14} />
             <span>Reveal file</span>
           </button>
+        ) : downloading ? (
+          <button
+            type="button"
+            className="install-btn is-secondary tsukyio-dl-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCancel();
+            }}
+          >
+            <X size={14} />
+            <span>Cancel {download?.percent ?? 0}%</span>
+          </button>
         ) : (
           <button
             type="button"
             className="install-btn tsukyio-dl-btn"
-            disabled={downloading}
             onClick={(e) => {
               e.stopPropagation();
               onDownload();
             }}
           >
             <Download size={14} />
-            <span>{downloading ? `${download?.percent ?? 0}%` : failed ? "Retry download" : "Download"}</span>
+            <span>{failed ? "Retry download" : "Download"}</span>
           </button>
         )}
         {failed && <span className="tsukyio-dl-error" title={download?.message}>{download?.message}</span>}

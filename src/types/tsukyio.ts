@@ -86,4 +86,5 @@ export type TsukyioDownloadProgress =
   | { type: "start"; assetId: string; totalBytes: number | null }
   | { type: "progress"; assetId: string; downloadedBytes: number; totalBytes: number | null }
   | { type: "done"; assetId: string; path: string; downloadedBytes: number }
+  | { type: "cancelled"; assetId: string }
   | { type: "error"; assetId: string; message: string };
