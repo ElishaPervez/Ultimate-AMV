@@ -1,11 +1,12 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 use chrono::Local;
@@ -28,6 +29,15 @@ const BROWSER_USER_AGENT: &str =
 /// NOT applied to the YouTube flow — YouTube does not need it and the
 /// impersonation pathway can subtly degrade other callers.
 const YTDLP_IMPERSONATE_TARGET: &str = "Chrome-116:Windows-10";
+
+/// Progress line format handed to `yt-dlp --progress-template`. The first six
+/// fields are yt-dlp's pre-formatted display strings. The trailing three raw
+/// numeric fields (downloaded/total/estimated bytes) exist because yt-dlp's
+/// own `_speed_str` is per-thread and collapses to a few B/s at fragment
+/// boundaries when `--concurrent-fragments` is active — we recompute the real
+/// aggregate speed in `SpeedTracker` from the raw byte counter instead.
+/// Unknown raw fields render as "NA" and parse to `None`.
+const AMV_PROGRESS_TEMPLATE: &str = "download:AMV_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)d|%(progress.total_bytes)d|%(progress.total_bytes_estimate)d";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,6 +436,14 @@ fn inspect_stream_formats(url: String, referer: String) -> Result<Vec<StreamQual
         });
     }
 
+    // Sniffed HLS URLs are often variant (media) playlists, not the master —
+    // those carry zero resolution metadata, so yt-dlp returns formats with no
+    // height and the label falls back to "Detected stream". Probe the actual
+    // video stream with ffprobe (reads the first segment) to recover the real
+    // resolution so the quality picker shows "1080p" instead of three
+    // indistinguishable entries.
+    let probed_count = enrich_qualities_with_ffprobe(&root, &mut qualities, &referer);
+
     qualities.sort_by(|a, b| {
         b.height.cmp(&a.height).then_with(|| {
             b.bitrate
@@ -437,9 +455,199 @@ fn inspect_stream_formats(url: String, referer: String) -> Result<Vec<StreamQual
     log_info(
         "download.inspect.complete",
         "Stream inspection completed",
-        json!({ "url": &url, "qualityCount": qualities.len() }),
+        json!({ "url": &url, "qualityCount": qualities.len(), "ffprobeEnriched": probed_count }),
     );
     Ok(qualities)
+}
+
+struct ProbedVideoInfo {
+    width: Option<u64>,
+    height: Option<u64>,
+    codec: Option<String>,
+    bitrate_kbps: Option<f64>,
+}
+
+/// Fill in width/height (and codec/bitrate when available) for qualities that
+/// yt-dlp could not size, by probing the stream itself with the bundled
+/// ffprobe. Returns how many entries were successfully enriched. Probes run
+/// in parallel (capped) and any failure leaves the entry untouched — this is
+/// best-effort labeling, never a gate on downloading.
+fn enrich_qualities_with_ffprobe(
+    root: &Path,
+    qualities: &mut [StreamQuality],
+    fallback_referer: &str,
+) -> usize {
+    const MAX_PROBES: usize = 4;
+    let targets: Vec<usize> = qualities
+        .iter()
+        .enumerate()
+        .filter(|(_, quality)| quality.height.is_none())
+        .map(|(index, _)| index)
+        .take(MAX_PROBES)
+        .collect();
+    if targets.is_empty() {
+        return 0;
+    }
+    let ffprobe = find_tool(root, "ffprobe");
+    if !command_available(&ffprobe) {
+        return 0;
+    }
+
+    let mut enriched = 0;
+    thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|&index| {
+                let url = qualities[index].url.clone();
+                let referer = qualities[index]
+                    .referer
+                    .clone()
+                    .unwrap_or_else(|| fallback_referer.to_string());
+                let ffprobe = &ffprobe;
+                scope.spawn(move || (index, probe_stream_video_info(ffprobe, &url, &referer)))
+            })
+            .collect();
+        for handle in handles {
+            let Ok((index, Some(info))) = handle.join() else {
+                continue;
+            };
+            let quality = &mut qualities[index];
+            quality.width = quality.width.or(info.width);
+            quality.height = quality.height.or(info.height);
+            if quality.codec.is_none() {
+                quality.codec = info.codec;
+            }
+            if quality.bitrate.is_none() {
+                quality.bitrate = info.bitrate_kbps;
+            }
+            if let Some(height) = quality.height {
+                quality.label = quality_label_from_parts(height, quality.bitrate);
+                enriched += 1;
+            }
+        }
+    });
+    enriched
+}
+
+/// Probe the first video stream of a URL with ffprobe, sending the same
+/// browser UA + Referer the download will use (the HLS demuxer forwards both
+/// to segment requests, so hot-link-protected CDNs answer). Bounded by an
+/// I/O timeout, a probe-size cap, and a hard process timeout so a wedged CDN
+/// can't hang the inspection step.
+fn probe_stream_video_info(ffprobe: &Path, url: &str, referer: &str) -> Option<ProbedVideoInfo> {
+    let mut command = cmd(ffprobe);
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-user_agent")
+        .arg(BROWSER_USER_AGENT)
+        .arg("-headers")
+        .arg(format!("Referer: {}\r\n", normalized_referer(referer)))
+        .arg("-rw_timeout")
+        .arg("15000000")
+        .arg("-probesize")
+        .arg("4000000")
+        .arg("-analyzeduration")
+        .arg("4000000")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=width,height,codec_name,bit_rate")
+        .arg("-of")
+        .arg("json")
+        .arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = run_command_with_timeout(command, Duration::from_secs(20))?;
+    if !output.status.success() {
+        log_warn(
+            "download.inspect.probe.error",
+            "ffprobe could not size a stream candidate",
+            json!({
+                "url": url,
+                "code": output.status.code(),
+                "stderr": truncate_log_text(String::from_utf8_lossy(&output.stderr).trim()),
+            }),
+        );
+        return None;
+    }
+
+    let payload: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let stream = payload.get("streams")?.as_array()?.first()?;
+    let width = stream.get("width").and_then(Value::as_u64);
+    let height = stream.get("height").and_then(Value::as_u64);
+    let codec = stream
+        .get("codec_name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let bitrate_kbps = stream
+        .get("bit_rate")
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|text| text.parse::<f64>().ok())
+                .or_else(|| value.as_f64())
+        })
+        .filter(|value| *value > 0.0)
+        .map(|bps| bps / 1000.0);
+    height?;
+    Some(ProbedVideoInfo {
+        width,
+        height,
+        codec,
+        bitrate_kbps,
+    })
+}
+
+/// Spawn `command` (stdout/stderr must already be piped) and wait at most
+/// `timeout` for it to exit, killing it on overrun. Output pipes are drained
+/// on background threads so a chatty child can't deadlock on a full pipe.
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Option<std::process::Output> {
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(mut pipe) = stdout {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(mut pipe) = stderr {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+
+    Some(std::process::Output {
+        status,
+        stdout: stdout_handle.join().unwrap_or_default(),
+        stderr: stderr_handle.join().unwrap_or_default(),
+    })
 }
 
 fn inspect_download_format_list(
@@ -631,16 +839,22 @@ fn pick_progressive_preview_url(payload: &Value) -> Option<String> {
     best.map(|(_, url)| url)
 }
 
+fn quality_label_from_parts(height: u64, bitrate: Option<f64>) -> String {
+    match bitrate {
+        Some(value) if value > 0.0 => format!("{height}p - {value:.0} kbps"),
+        _ => format!("{height}p"),
+    }
+}
+
 fn stream_quality_label(format: &Value, height: Option<u64>, bitrate: Option<f64>) -> String {
+    if let Some(height) = height {
+        return quality_label_from_parts(height, bitrate);
+    }
     let resolution = format.get("resolution").and_then(Value::as_str);
     let format_note = format.get("format_note").and_then(Value::as_str);
-    let base = height
-        .map(|value| format!("{value}p"))
-        .or_else(|| {
-            resolution
-                .filter(|value| !value.is_empty() && *value != "audio only")
-                .map(ToString::to_string)
-        })
+    let base = resolution
+        .filter(|value| !value.is_empty() && *value != "audio only")
+        .map(ToString::to_string)
         .or_else(|| {
             format_note
                 .filter(|value| !value.is_empty())
@@ -783,7 +997,7 @@ fn run_stream_download(
         .arg("--newline")
         .arg("--progress")
         .arg("--progress-template")
-        .arg("download:AMV_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
+        .arg(AMV_PROGRESS_TEMPLATE)
         .arg("--print")
         .arg("after_move:AMV_FILE|%(filepath)s")
         .arg("--concurrent-fragments")
@@ -821,8 +1035,10 @@ fn run_stream_download(
 
     let last_destination = Arc::new(Mutex::new(String::new()));
     let last_output_file = Arc::new(Mutex::new(String::new()));
+    let speed_tracker = Arc::new(Mutex::new(SpeedTracker::default()));
     let stderr_destination = Arc::clone(&last_destination);
     let stderr_output_file = Arc::clone(&last_output_file);
+    let stderr_speed_tracker = Arc::clone(&speed_tracker);
     let stderr_window = window.clone();
     let stderr_job_id = job_id.clone();
     let stderr_handle = thread::spawn(move || -> String {
@@ -833,6 +1049,7 @@ fn run_stream_download(
                 stderr_job_id.as_deref(),
                 &stderr_destination,
                 &stderr_output_file,
+                &stderr_speed_tracker,
                 &line,
             );
             tail.push_str(&line);
@@ -846,7 +1063,7 @@ fn run_stream_download(
     });
 
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        handle_downloader_line(&window, job_id.as_deref(), &last_destination, &last_output_file, &line);
+        handle_downloader_line(&window, job_id.as_deref(), &last_destination, &last_output_file, &speed_tracker, &line);
     }
 
     let status = child.wait().map_err(|error| error.to_string())?;
@@ -1042,7 +1259,7 @@ fn run_media_download(
         .arg("--newline")
         .arg("--progress")
         .arg("--progress-template")
-        .arg("download:AMV_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
+        .arg(AMV_PROGRESS_TEMPLATE)
         .arg("--print")
         .arg("after_move:AMV_FILE|%(filepath)s")
         .arg("--no-playlist")
@@ -1096,8 +1313,10 @@ fn run_media_download(
 
     let last_destination = Arc::new(Mutex::new(String::new()));
     let last_output_file = Arc::new(Mutex::new(String::new()));
+    let speed_tracker = Arc::new(Mutex::new(SpeedTracker::default()));
     let stderr_destination = Arc::clone(&last_destination);
     let stderr_output_file = Arc::clone(&last_output_file);
+    let stderr_speed_tracker = Arc::clone(&speed_tracker);
     let stderr_window = window.clone();
     let stderr_job_id = job_id.clone();
     let stderr_handle = thread::spawn(move || -> String {
@@ -1108,6 +1327,7 @@ fn run_media_download(
                 stderr_job_id.as_deref(),
                 &stderr_destination,
                 &stderr_output_file,
+                &stderr_speed_tracker,
                 &line,
             );
             tail.push_str(&line);
@@ -1121,7 +1341,7 @@ fn run_media_download(
     });
 
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        handle_downloader_line(&window, job_id.as_deref(), &last_destination, &last_output_file, &line);
+        handle_downloader_line(&window, job_id.as_deref(), &last_destination, &last_output_file, &speed_tracker, &line);
     }
 
     let status = child.wait().map_err(|error| error.to_string())?;
@@ -1382,11 +1602,93 @@ fn parse_already_downloaded_path(line: &str) -> Option<&str> {
     rest.strip_suffix(" has already been downloaded")
 }
 
+/// Computes the real aggregate download speed from yt-dlp's raw
+/// `downloaded_bytes` counter over a short sliding window of wall-clock
+/// samples. yt-dlp's own `_speed_str` is per-fragment-thread and reads a few
+/// B/s at fragment boundaries under `--concurrent-fragments`, which made the
+/// queue show absurd speeds for HLS downloads.
+#[derive(Default)]
+struct SpeedTracker {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl SpeedTracker {
+    const WINDOW: Duration = Duration::from_secs(6);
+    const MIN_SPAN_SECS: f64 = 0.5;
+    const MAX_SAMPLES: usize = 256;
+
+    fn record(&mut self, bytes: u64) -> Option<f64> {
+        self.record_at(Instant::now(), bytes)
+    }
+
+    fn record_at(&mut self, now: Instant, bytes: u64) -> Option<f64> {
+        if let Some(&(_, last_bytes)) = self.samples.back() {
+            // The counter went backwards: yt-dlp moved on to the next file of
+            // the same job (e.g. separate audio after video). Start over.
+            if bytes < last_bytes {
+                self.samples.clear();
+            }
+        }
+        self.samples.push_back((now, bytes));
+        while self.samples.len() > 2 {
+            let Some(&(oldest, _)) = self.samples.front() else {
+                break;
+            };
+            if self.samples.len() > Self::MAX_SAMPLES
+                || now.duration_since(oldest) > Self::WINDOW
+            {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+        let &(first_at, first_bytes) = self.samples.front()?;
+        let &(last_at, last_bytes) = self.samples.back()?;
+        let span = last_at.duration_since(first_at).as_secs_f64();
+        if span < Self::MIN_SPAN_SECS {
+            return None;
+        }
+        Some(last_bytes.saturating_sub(first_bytes) as f64 / span)
+    }
+}
+
+fn format_byte_size(bytes: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes.max(0.0);
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{value:.0}{}", UNITS[unit])
+    } else {
+        format!("{value:.2}{}", UNITS[unit])
+    }
+}
+
+fn format_transfer_speed(bytes_per_second: f64) -> String {
+    format!("{}/s", format_byte_size(bytes_per_second))
+}
+
+fn format_eta_seconds(seconds: f64) -> String {
+    let total = seconds.round().max(0.0) as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes:02}:{secs:02}")
+    }
+}
+
 fn handle_downloader_line(
     window: &tauri::Window,
     job_id: Option<&str>,
     last_destination: &Arc<Mutex<String>>,
     last_output_file: &Arc<Mutex<String>>,
+    speed_tracker: &Arc<Mutex<SpeedTracker>>,
     line: &str,
 ) {
     if let Some(file) = line.strip_prefix("AMV_FILE|") {
@@ -1400,7 +1702,7 @@ fn handle_downloader_line(
         update_download_path(last_output_file, dest);
     }
 
-    let (stage, percent, message) = if let Some(progress) = parse_amv_progress(line) {
+    let (stage, percent, message) = if let Some(progress) = parse_amv_progress(line, speed_tracker) {
         progress
     } else if let Some(file) = line.strip_prefix("AMV_FILE|") {
         (
@@ -1447,7 +1749,10 @@ fn handle_downloader_line(
     );
 }
 
-fn parse_amv_progress(line: &str) -> Option<(String, Option<f32>, String)> {
+fn parse_amv_progress(
+    line: &str,
+    speed_tracker: &Arc<Mutex<SpeedTracker>>,
+) -> Option<(String, Option<f32>, String)> {
     let rest = line.strip_prefix("AMV_PROGRESS|")?;
     let mut parts = rest.split('|');
     let status = parts.next().unwrap_or("downloading").trim();
@@ -1456,19 +1761,49 @@ fn parse_amv_progress(line: &str) -> Option<(String, Option<f32>, String)> {
     let total = parts.next().unwrap_or("").trim();
     let speed = parts.next().unwrap_or("").trim();
     let eta = parts.next().unwrap_or("").trim();
+    // Raw numeric fields from AMV_PROGRESS_TEMPLATE; "NA" when unknown.
+    let raw_downloaded = parts.next().and_then(parse_u64_text);
+    let raw_total = parts
+        .next()
+        .and_then(parse_u64_text)
+        .or_else(|| parts.next().and_then(parse_u64_text));
+
+    let computed_speed = raw_downloaded.and_then(|bytes| {
+        speed_tracker
+            .lock()
+            .ok()
+            .and_then(|mut tracker| tracker.record(bytes))
+    });
+
+    let downloaded_text = nonempty_display(downloaded)
+        .or_else(|| raw_downloaded.map(|bytes| format_byte_size(bytes as f64)));
+    // total_bytes is unknown for HLS; fall back to yt-dlp's running
+    // estimate, marked as approximate.
+    let total_text = nonempty_display(total)
+        .or_else(|| raw_total.map(|bytes| format!("~{}", format_byte_size(bytes as f64))));
+    let speed_text = computed_speed
+        .filter(|value| *value > 0.0)
+        .map(format_transfer_speed)
+        .or_else(|| nonempty_display(speed));
+    let eta_text = match (computed_speed, raw_total, raw_downloaded) {
+        (Some(speed), Some(total), Some(done)) if speed > 1.0 && total > done => {
+            Some(format_eta_seconds((total - done) as f64 / speed))
+        }
+        _ => nonempty_display(eta),
+    };
 
     let mut details = Vec::new();
-    if !downloaded.is_empty() && downloaded != "N/A" {
-        if !total.is_empty() && total != "N/A" {
+    if let Some(downloaded) = downloaded_text {
+        if let Some(total) = total_text {
             details.push(format!("{downloaded} of {total}"));
         } else {
-            details.push(downloaded.to_string());
+            details.push(downloaded);
         }
     }
-    if !speed.is_empty() && speed != "N/A" {
-        details.push(speed.to_string());
+    if let Some(speed) = speed_text {
+        details.push(speed);
     }
-    if !eta.is_empty() && eta != "N/A" {
+    if let Some(eta) = eta_text {
         details.push(format!("ETA {eta}"));
     }
     let message = if details.is_empty() {
@@ -1482,6 +1817,27 @@ fn parse_amv_progress(line: &str) -> Option<(String, Option<f32>, String)> {
     }
     .to_string();
     Some((stage, percent, message))
+}
+
+/// yt-dlp renders unknown pre-formatted fields as "N/A" and unknown template
+/// fields as "NA" (the outtmpl placeholder) — treat both as absent.
+fn nonempty_display(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "N/A" || trimmed == "NA" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_u64_text(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    // yt-dlp renders missing template fields as "NA"; floats (e.g.
+    // total_bytes_estimate) survive the %d conversion but be tolerant anyway.
+    trimmed
+        .parse::<u64>()
+        .ok()
+        .or_else(|| trimmed.parse::<f64>().ok().filter(|v| *v >= 0.0).map(|v| v as u64))
 }
 
 fn parse_percent_text(value: &str) -> Option<f32> {
@@ -1517,6 +1873,121 @@ pub(crate) fn format_spec_is_audio_only(spec: &str) -> bool {
         let alt = alt.trim();
         alt == "bestaudio" || alt.starts_with("bestaudio[") || alt.starts_with("audio")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracker() -> Arc<Mutex<SpeedTracker>> {
+        Arc::new(Mutex::new(SpeedTracker::default()))
+    }
+
+    #[test]
+    fn speed_tracker_computes_aggregate_speed() {
+        let mut tracker = SpeedTracker::default();
+        let base = Instant::now();
+        assert_eq!(tracker.record_at(base, 0), None, "one sample is not a speed");
+        let speed = tracker
+            .record_at(base + Duration::from_secs(2), 4 * 1024 * 1024)
+            .expect("two samples spanning 2s must produce a speed");
+        assert!((speed - 2.0 * 1024.0 * 1024.0).abs() < 1.0, "expected ~2MiB/s, got {speed}");
+    }
+
+    #[test]
+    fn speed_tracker_resets_when_counter_goes_backwards() {
+        let mut tracker = SpeedTracker::default();
+        let base = Instant::now();
+        tracker.record_at(base, 10_000_000);
+        tracker.record_at(base + Duration::from_secs(1), 20_000_000);
+        // New file in the same job: counter restarts near zero. The window
+        // must reset instead of reporting a huge negative/zero-clamped span.
+        assert_eq!(tracker.record_at(base + Duration::from_secs(2), 1_000), None);
+        let speed = tracker
+            .record_at(base + Duration::from_secs(3), 1_001_000)
+            .expect("speed after reset");
+        assert!((speed - 1_000_000.0).abs() < 1.0, "expected ~1MB/s, got {speed}");
+    }
+
+    #[test]
+    fn speed_tracker_ignores_samples_outside_window() {
+        let mut tracker = SpeedTracker::default();
+        let base = Instant::now();
+        tracker.record_at(base, 0);
+        tracker.record_at(base + Duration::from_secs(60), 1_000);
+        // Old sample fell out of the 6s window, leaving a single fresh one.
+        let speed = tracker.record_at(base + Duration::from_secs(61), 2_048_000);
+        assert!(
+            speed.is_some_and(|value| value > 1_000_000.0),
+            "speed must reflect only the recent window, got {speed:?}"
+        );
+    }
+
+    #[test]
+    fn format_byte_size_picks_unit() {
+        assert_eq!(format_byte_size(512.0), "512B");
+        assert_eq!(format_byte_size(2.5 * 1024.0), "2.50KiB");
+        assert_eq!(format_byte_size(246.78 * 1024.0 * 1024.0), "246.78MiB");
+    }
+
+    #[test]
+    fn format_eta_rolls_over_to_hours() {
+        assert_eq!(format_eta_seconds(35.0), "00:35");
+        assert_eq!(format_eta_seconds(95.0), "01:35");
+        assert_eq!(format_eta_seconds(3_700.0), "1:01:40");
+    }
+
+    #[test]
+    fn parse_amv_progress_legacy_six_fields() {
+        let line = "AMV_PROGRESS|downloading|  42.0%|246.78MiB|N/A|844.08B/s|00:00";
+        let (stage, percent, message) = parse_amv_progress(line, &tracker()).expect("parsed");
+        assert_eq!(stage, "downloading");
+        assert_eq!(percent, Some(42.0));
+        assert_eq!(message, "246.78MiB - 844.08B/s - ETA 00:00");
+    }
+
+    #[test]
+    fn parse_amv_progress_uses_estimate_when_total_unknown() {
+        let line = "AMV_PROGRESS|downloading|  50.0%|100.00MiB|N/A|844.08B/s|00:00|104857600|NA|209715200";
+        let (_, _, message) = parse_amv_progress(line, &tracker()).expect("parsed");
+        // Single sample -> no computed speed yet, falls back to yt-dlp's
+        // string, but the total estimate is picked up.
+        assert_eq!(message, "100.00MiB of ~200.00MiB - 844.08B/s - ETA 00:00");
+    }
+
+    #[test]
+    fn parse_amv_progress_finished_maps_to_finalizing() {
+        let line = "AMV_PROGRESS|finished|100%|246.78MiB|246.78MiB|N/A|N/A";
+        let (stage, percent, message) = parse_amv_progress(line, &tracker()).expect("parsed");
+        assert_eq!(stage, "finalizing");
+        assert_eq!(percent, Some(100.0));
+        assert_eq!(message, "246.78MiB of 246.78MiB");
+    }
+
+    #[test]
+    fn parse_amv_progress_finished_line_recovers_bytes_from_raw_field() {
+        // Exact shape emitted by the bundled yt-dlp on the final progress
+        // tick: the pre-formatted downloaded string degrades to "NA" but the
+        // raw counter is still present.
+        let line = "AMV_PROGRESS|finished|100.0%|NA|   4.17MiB|8.22MiB/s|NA|4372373|4372373|NA";
+        let (stage, _, message) = parse_amv_progress(line, &tracker()).expect("parsed");
+        assert_eq!(stage, "finalizing");
+        assert_eq!(message, "4.17MiB of 4.17MiB - 8.22MiB/s");
+    }
+
+    #[test]
+    fn parse_u64_text_handles_na_and_floats() {
+        assert_eq!(parse_u64_text("NA"), None);
+        assert_eq!(parse_u64_text("N/A"), None);
+        assert_eq!(parse_u64_text(" 12345 "), Some(12345));
+        assert_eq!(parse_u64_text("12345.7"), Some(12345));
+    }
+
+    #[test]
+    fn quality_label_prefers_height() {
+        assert_eq!(quality_label_from_parts(1080, None), "1080p");
+        assert_eq!(quality_label_from_parts(720, Some(1850.4)), "720p - 1850 kbps");
+    }
 }
 
 fn audio_warning_for_download(saved_file: &Path, user_picked_audio_only: bool) -> Option<String> {
