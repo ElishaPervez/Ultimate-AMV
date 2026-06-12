@@ -11,6 +11,7 @@ mod clips;
 mod config;
 mod discord;
 mod downloads;
+mod eyedropper;
 mod logging;
 mod preview;
 mod python_env;
@@ -451,6 +452,7 @@ pub fn run() {
             tsukyio::tsukyio_set_session_key,
             discord_set_state,
             discord_clear,
+            eyedropper::sample_screen_color,
             write_file
         ])
         .run(tauri::generate_context!())

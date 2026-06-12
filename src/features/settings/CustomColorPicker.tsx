@@ -1,5 +1,15 @@
 import React from "react";
+import { createPortal } from "react-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { HexColorPicker } from "react-colorful";
+import { Pipette } from "lucide-react";
+
+// Chromium's EyeDropper API (Chrome/Edge/WebView2 95+) — not in TS's lib.dom yet
+declare global {
+  interface Window {
+    EyeDropper?: new () => { open: (options?: { signal?: AbortSignal }) => Promise<{ sRGBHex: string }> };
+  }
+}
 
 interface CustomColorPickerProps {
   label: string;
@@ -104,9 +114,106 @@ function parseHsl(hslStr: string): string | null {
   return null;
 }
 
+// EyeDropper results are "#rrggbb" on Windows, but some platforms emit
+// "rgba(...)" instead (WICG/eyedropper-api#28) — accept both.
+function normalizeSampledColor(value: string): string | null {
+  const lower = value.trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(lower)) return lower;
+  return parseRgb(lower);
+}
+
 export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColorPickerProps) {
   const [isOpen, setIsOpen] = React.useState(false);
   const popoverRef = React.useRef<HTMLDivElement | null>(null);
+  const [isSampling, setIsSampling] = React.useState(false);
+  const samplingRef = React.useRef(false);
+  const [overlayActive, setOverlayActive] = React.useState(false);
+  const [chip, setChip] = React.useState<{ x: number; y: number } | null>(null);
+  const [liveHex, setLiveHex] = React.useState<string | null>(null);
+  const colorBeforeSampleRef = React.useRef(color);
+  const sampleTickRef = React.useRef(0);
+
+  // The confirming click can reach the document after sampling settles;
+  // release the outside-click guard a beat later so that click can't
+  // close the popover before the user sees the sampled color.
+  const releaseSamplingGuard = () => {
+    window.setTimeout(() => {
+      samplingRef.current = false;
+    }, 100);
+  };
+
+  const stopOverlay = () => {
+    setOverlayActive(false);
+    setIsSampling(false);
+    setChip(null);
+    setLiveHex(null);
+    releaseSamplingGuard();
+  };
+
+  const beginScreenPick = async () => {
+    if (samplingRef.current) return;
+    samplingRef.current = true;
+    setIsSampling(true);
+    if (typeof window.EyeDropper === "function") {
+      const startedAt = performance.now();
+      try {
+        const result = await new window.EyeDropper().open();
+        const sampled = normalizeSampledColor(result.sRGBHex);
+        if (sampled) onChange(sampled);
+        setIsSampling(false);
+        releaseSamplingGuard();
+        return;
+      } catch {
+        // A genuine Esc-cancel takes human-scale time. WebView2 ships the
+        // EyeDropper API surface but no picking UI — open() rejects within
+        // a few ms — so an instant rejection means "not implemented here":
+        // fall back to sampling the app window natively.
+        if (performance.now() - startedAt > 250) {
+          setIsSampling(false);
+          releaseSamplingGuard();
+          return;
+        }
+      }
+    }
+    colorBeforeSampleRef.current = color;
+    setOverlayActive(true);
+  };
+
+  const overlayMove = (event: React.PointerEvent) => {
+    setChip({ x: event.clientX, y: event.clientY });
+    const now = performance.now();
+    if (now - sampleTickRef.current < 33) return;
+    sampleTickRef.current = now;
+    invoke<string>("sample_screen_color")
+      .then((hex) => {
+        if (!samplingRef.current) return;
+        const sampled = normalizeSampledColor(hex);
+        if (sampled) {
+          setLiveHex(sampled);
+          onChange(sampled);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const overlayConfirm = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    invoke<string>("sample_screen_color")
+      .then((hex) => {
+        const sampled = normalizeSampledColor(hex);
+        if (sampled) onChange(sampled);
+      })
+      .catch(() => {
+        // keep the last live sample already applied via onChange
+      })
+      .finally(stopOverlay);
+  };
+
+  const overlayCancel = () => {
+    onChange(colorBeforeSampleRef.current);
+    stopOverlay();
+  };
 
   const rgb = hexToRgb(color);
   const hsl = hexToHsl(color);
@@ -128,6 +235,7 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
   // Close popover on click outside
   React.useEffect(() => {
     const listener = (event: MouseEvent | TouchEvent) => {
+      if (samplingRef.current) return;
       if (!popoverRef.current || popoverRef.current.contains(event.target as Node)) {
         return;
       }
@@ -141,6 +249,18 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
       document.removeEventListener("touchstart", listener);
     };
   }, [onBlur]);
+
+  // Esc cancels overlay sampling and restores the pre-sampling color
+  React.useEffect(() => {
+    if (!overlayActive) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      overlayCancel();
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [overlayActive]);
 
   return (
     <div className="custom-color-picker-container" style={{ position: "relative", display: "flex", flexDirection: "column", gap: "6px", width: "100%" }}>
@@ -226,6 +346,43 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
         >
           {/* Main Color Picker Wheel */}
           <HexColorPicker color={color} onChange={onChange} style={{ width: "218px", height: "160px" }} />
+
+          {/* Screen eyedropper — EyeDropper API when functional, native overlay fallback */}
+          <button
+            type="button"
+            onClick={beginScreenPick}
+            disabled={isSampling}
+            aria-label={`Pick ${label} from screen`}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "6px",
+              padding: "7px 10px",
+              background: isSampling ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.04)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: "6px",
+              color: "rgba(255,255,255,0.85)",
+              fontSize: "11px",
+              fontWeight: 600,
+              letterSpacing: "0.3px",
+              cursor: isSampling ? "default" : "pointer",
+              outline: "none",
+              transition: "background 0.15s, border-color 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              if (isSampling) return;
+              e.currentTarget.style.background = "rgba(255,255,255,0.08)";
+              e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = isSampling ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.04)";
+              e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
+            }}
+          >
+            <Pipette size={12} />
+            <span>{isSampling ? "Click any color on screen…" : "Pick from screen"}</span>
+          </button>
 
           {/* Quick presets */}
           <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -370,6 +527,53 @@ export function CustomColorPicker({ label, color, onChange, onBlur }: CustomColo
           </div>
         </div>
       )}
+
+      {/* Native sampling overlay — covers the window; pointer position picks the
+          composited screen pixel underneath (wallpaper, video, thumbnails, all of it) */}
+      {overlayActive &&
+        createPortal(
+          <div
+            aria-label={`Sampling ${label}: click a color to apply it`}
+            onPointerMove={overlayMove}
+            onClick={overlayConfirm}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              overlayCancel();
+            }}
+            style={{ position: "fixed", inset: 0, zIndex: 99999, cursor: "crosshair" }}
+          >
+            {chip && (
+              <div
+                style={{
+                  position: "fixed",
+                  left: chip.x + 16,
+                  top: chip.y + 16,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  padding: "6px 10px",
+                  background: "rgba(12, 12, 14, 0.92)",
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  borderRadius: "8px",
+                  boxShadow: "0 8px 20px rgba(0,0,0,0.45)",
+                  pointerEvents: "none",
+                }}
+              >
+                <span
+                  style={{
+                    width: "18px",
+                    height: "18px",
+                    borderRadius: "4px",
+                    background: liveHex ?? "transparent",
+                    border: "1px solid rgba(255,255,255,0.25)",
+                  }}
+                />
+                <span style={{ fontSize: "11px", fontFamily: "monospace", color: "#fff" }}>{liveHex ?? "…"}</span>
+              </div>
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
