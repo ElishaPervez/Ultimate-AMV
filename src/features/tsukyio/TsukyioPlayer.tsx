@@ -14,8 +14,9 @@ import type { TsukyioItem } from "../../types/tsukyio";
 // even though the mp4 is decodable, so the Rust backend proxies it from an
 // app-trusted origin, adds auth server-side, and forwards Range so seeking
 // works. The API key never appears in this URL. Audio assets get a hidden
-// <audio> engine driving a custom flat player; video gets a native
-// <video controls>.
+// <audio> engine driving a custom flat player; video gets the same custom
+// control set as an overlay bar (native <video controls> replaced so the
+// player matches the app aesthetic, mirroring SceneViewerModal).
 
 type LoadState =
   | { status: "loading" }
@@ -145,19 +146,19 @@ export function TsukyioPlayer({
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const [load, setLoad] = React.useState<LoadState>({ status: "loading" });
 
-  // ---- Custom audio player UI state ----------------------------------------
-  // These mirror the <audio> element's live state for rendering only. The
-  // element remains the single source of truth: every setter here is driven by
-  // a media event (play/pause/timeupdate/durationchange/loadedmetadata/ended/
-  // volumechange), and every control writes back to the element imperatively.
-  // We do NOT persist from here — the existing `volumechange` listener in the
-  // source effect owns persistence. We only REFLECT volume/muted so the UI
-  // shows the restored level.
+  // ---- Custom player UI state -----------------------------------------------
+  // These mirror the active media element's live state (audio OR video) for
+  // rendering only. The element remains the single source of truth: every
+  // setter here is driven by a media event (play/pause/timeupdate/
+  // durationchange/loadedmetadata/ended/volumechange), and every control writes
+  // back to the element imperatively. We do NOT persist from here — the
+  // existing `volumechange` listener in the source effect owns persistence. We
+  // only REFLECT volume/muted so the UI shows the restored level.
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [currentTime, setCurrentTime] = React.useState(0);
   const [duration, setDuration] = React.useState(0);
-  const [audioVolume, setAudioVolume] = React.useState(DEFAULT_PLAYER_PREFS.volume);
-  const [audioMuted, setAudioMuted] = React.useState(DEFAULT_PLAYER_PREFS.muted);
+  const [mediaVolume, setMediaVolume] = React.useState(DEFAULT_PLAYER_PREFS.volume);
+  const [mediaMuted, setMediaMuted] = React.useState(DEFAULT_PLAYER_PREFS.muted);
   // True only while the user is actively dragging the seek thumb. While set, we
   // suppress `timeupdate`-driven currentTime writes so the element's playback
   // position can't yank the thumb out from under the pointer.
@@ -165,6 +166,13 @@ export function TsukyioPlayer({
   const isScrubbingRef = React.useRef(false);
   const wasPlayingBeforeScrubRef = React.useRef(false);
   const scrubRef = React.useRef<HTMLDivElement | null>(null);
+
+  // The active playback element for this clip — only one of the two refs is
+  // ever mounted (audio engine or <video>), so all control handlers and the
+  // event-sync effect go through this instead of assuming audio.
+  function getMedia(): HTMLMediaElement | null {
+    return isAudio ? audioRef.current : videoRef.current;
+  }
 
   // Mirror `autoPlay` into a ref so the source effect (keyed only on
   // item.id/streamSrc, so it doesn't tear down + rebind on an autoPlay change)
@@ -262,20 +270,21 @@ export function TsukyioPlayer({
     };
   }, [item.id, streamSrc]);
 
-  // Sync the custom audio-player UI from the <audio> element's events. This is
-  // the AUDIO branch's presentational mirror only — the element stays the
-  // source of truth. Keyed to the same deps as the source effect so it
-  // re-binds to the fresh per-clip element (the audio uses `key={streamSrc}`)
-  // and tears every listener down on unmount / clip switch. Fully StrictMode-
-  // safe: the cleanup removes exactly the listeners this run added.
+  // Sync the custom player UI from the active media element's events (audio
+  // engine or <video> — both branches use the same custom controls). This is a
+  // presentational mirror only — the element stays the source of truth. Keyed
+  // to the same deps as the source effect so it re-binds to the fresh per-clip
+  // element (both elements use `key={streamSrc}`) and tears every listener
+  // down on unmount / clip switch. Fully StrictMode-safe: the cleanup removes
+  // exactly the listeners this run added.
   //
   // It also seeds the UI from the element's CURRENT values on attach. Because
   // the source effect above runs first (same deps, declared earlier) it has
   // already restored the persisted volume/muted, so reading them here reflects
   // the restored level — and the subsequent `volumechange` keeps it in sync.
   React.useEffect(() => {
-    if (!isAudio || !streamSrc) return undefined;
-    const media = audioRef.current;
+    if (!streamSrc) return undefined;
+    const media: HTMLMediaElement | null = isAudio ? audioRef.current : videoRef.current;
     if (!media) return undefined;
 
     // Seed from the element's current state so the UI is correct immediately,
@@ -283,8 +292,8 @@ export function TsukyioPlayer({
     setIsPlaying(!media.paused && !media.ended);
     setCurrentTime(media.currentTime);
     setDuration(media.duration);
-    setAudioVolume(clamp01(media.volume));
-    setAudioMuted(media.muted);
+    setMediaVolume(clamp01(media.volume));
+    setMediaMuted(media.muted);
 
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
@@ -305,8 +314,8 @@ export function TsukyioPlayer({
       setCurrentTime(media.currentTime);
     };
     const onVolumeChange = () => {
-      setAudioVolume(clamp01(media.volume));
-      setAudioMuted(media.muted);
+      setMediaVolume(clamp01(media.volume));
+      setMediaMuted(media.muted);
     };
 
     media.addEventListener("play", onPlay);
@@ -357,7 +366,7 @@ export function TsukyioPlayer({
     const onUp = () => {
       setIsScrubbing(false);
       isScrubbingRef.current = false;
-      const media = audioRef.current;
+      const media = getMedia();
       if (media && wasPlayingBeforeScrubRef.current) void media.play()?.catch(() => {});
     };
     window.addEventListener("mousemove", onMove);
@@ -387,20 +396,21 @@ export function TsukyioPlayer({
     });
   }
 
-  // ---- Custom audio control handlers ---------------------------------------
-  // Each writes to the <audio> element imperatively; the element's events then
-  // drive the UI state back through the sync effect. Volume/mute writes flow
-  // through the element so the existing `volumechange` persistence listener
-  // (in the source effect) picks them up — we add NO second persistence path.
-  function toggleAudioPlay() {
-    const media = audioRef.current;
+  // ---- Custom control handlers ----------------------------------------------
+  // Each writes to the active media element imperatively; the element's events
+  // then drive the UI state back through the sync effect. Volume/mute writes
+  // flow through the element so the existing `volumechange` persistence
+  // listener (in the source effect) picks them up — we add NO second
+  // persistence path.
+  function toggleMediaPlay() {
+    const media = getMedia();
     if (!media) return;
     if (media.paused || media.ended) void media.play()?.catch(() => {});
     else media.pause();
   }
 
-  function toggleAudioMute() {
-    const media = audioRef.current;
+  function toggleMediaMute() {
+    const media = getMedia();
     if (!media) return;
     const nextMuted = !media.muted;
     media.muted = nextMuted;
@@ -409,12 +419,12 @@ export function TsukyioPlayer({
     if (!nextMuted && media.volume === 0) media.volume = DEFAULT_PLAYER_PREFS.volume;
     // Reflect immediately (don't wait for the async `volumechange`) so the icon
     // and slider flip the instant the user clicks.
-    setAudioMuted(nextMuted);
-    setAudioVolume(clamp01(media.volume));
+    setMediaMuted(nextMuted);
+    setMediaVolume(clamp01(media.volume));
   }
 
-  function setAudioVolumeFromSlider(next: number) {
-    const media = audioRef.current;
+  function setMediaVolumeFromSlider(next: number) {
+    const media = getMedia();
     if (!media) return;
     const value = clamp01(next);
     media.volume = value;
@@ -427,12 +437,12 @@ export function TsukyioPlayer({
     // waits for the async `volumechange` round-trip (most visible when dragging
     // up from a muted/zero state). The `volumechange` listener then re-sets the
     // same values — a harmless no-op.
-    setAudioVolume(value);
-    if (value > 0) setAudioMuted(false);
+    setMediaVolume(value);
+    if (value > 0) setMediaMuted(false);
   }
 
   function seekFromPointer(event: MouseEvent | React.MouseEvent, track: HTMLDivElement) {
-    const media = audioRef.current;
+    const media = getMedia();
     if (!media || !isKnownDuration(duration)) return;
     const rect = track.getBoundingClientRect();
     const x = Math.min(Math.max(0, event.clientX - rect.left), rect.width);
@@ -443,7 +453,7 @@ export function TsukyioPlayer({
   }
 
   function onScrubMouseDown(event: React.MouseEvent<HTMLDivElement>) {
-    const media = audioRef.current;
+    const media = getMedia();
     if (!media || !isKnownDuration(duration)) return;
     wasPlayingBeforeScrubRef.current = !media.paused && !media.ended;
     media.pause();
@@ -453,7 +463,7 @@ export function TsukyioPlayer({
   }
 
   function onScrubKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    const media = audioRef.current;
+    const media = getMedia();
     // Gate on the same condition as the pointer path (duration known AND the
     // clip is actually ready), so arrow keys can't seek a not-yet-loaded clip.
     if (!media || !isKnownDuration(duration) || load.status !== "ready") return;
@@ -475,8 +485,21 @@ export function TsukyioPlayer({
     ? Math.min(100, Math.max(0, (currentTime / duration) * 100))
     : 0;
 
+  // Stage state classes drive the video control bar's visibility: the bar is
+  // hidden during playback and revealed on hover, while paused, or mid-scrub
+  // (the pointer can leave the stage during a drag).
+  const stageClass = [
+    "scene-viewer-stage",
+    "tsukyio-player-stage",
+    isAudio ? "is-audio" : "",
+    !isAudio && !isPlaying ? "is-paused" : "",
+    isScrubbing ? "is-scrubbing" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className={`scene-viewer-stage tsukyio-player-stage ${isAudio ? "is-audio" : ""}`}>
+    <div className={stageClass}>
       {!streamSrc ? (
         <div className="scene-viewer-error direct-stream-error">
           <AlertTriangle size={16} />
@@ -504,7 +527,7 @@ export function TsukyioPlayer({
               <button
                 type="button"
                 className="scene-viewer-button tsukyio-audio-play"
-                onClick={toggleAudioPlay}
+                onClick={toggleMediaPlay}
                 disabled={load.status !== "ready"}
                 aria-label={isPlaying ? "Pause" : "Play"}
               >
@@ -521,7 +544,7 @@ export function TsukyioPlayer({
 
               <div
                 ref={scrubRef}
-                className={`scene-viewer-scrub tsukyio-audio-scrub ${
+                className={`scene-viewer-scrub tsukyio-player-scrub ${
                   isScrubbing ? "is-scrubbing" : ""
                 } ${seekDisabled ? "is-disabled" : ""}`}
                 onMouseDown={seekDisabled ? undefined : onScrubMouseDown}
@@ -545,15 +568,15 @@ export function TsukyioPlayer({
                 </div>
               </div>
 
-              <div className="tsukyio-audio-volume">
+              <div className="tsukyio-player-volume">
                 <button
                   type="button"
                   className="scene-viewer-button"
-                  onClick={toggleAudioMute}
+                  onClick={toggleMediaMute}
                   disabled={load.status !== "ready"}
-                  aria-label={audioMuted || audioVolume === 0 ? "Unmute" : "Mute"}
+                  aria-label={mediaMuted || mediaVolume === 0 ? "Unmute" : "Mute"}
                 >
-                  {audioMuted || audioVolume === 0 ? (
+                  {mediaMuted || mediaVolume === 0 ? (
                     <VolumeX size={16} strokeWidth={2.2} />
                   ) : (
                     <Volume2 size={16} strokeWidth={2.2} />
@@ -561,14 +584,14 @@ export function TsukyioPlayer({
                 </button>
                 <input
                   type="range"
-                  className="tsukyio-audio-vol-slider"
+                  className="tsukyio-player-vol-slider"
                   min={0}
                   max={1}
                   step={0.01}
-                  value={audioMuted ? 0 : audioVolume}
+                  value={mediaMuted ? 0 : mediaVolume}
                   disabled={load.status !== "ready"}
                   onChange={(event) =>
-                    setAudioVolumeFromSlider(Number(event.currentTarget.value))
+                    setMediaVolumeFromSlider(Number(event.currentTarget.value))
                   }
                   aria-label="Volume"
                 />
@@ -584,16 +607,93 @@ export function TsukyioPlayer({
         </>
       ) : (
         <>
+          {/* Native `controls` removed — the overlay bar below replaces them
+              so the player matches the app aesthetic (same custom control set
+              as audio, presented like SceneViewerModal's). Clicking the
+              picture toggles playback, like a real player. */}
           <video
             key={streamSrc}
             ref={videoRef}
-            controls
             playsInline
             preload="auto"
+            onClick={load.status === "ready" ? toggleMediaPlay : undefined}
             onCanPlay={handleReady}
             onLoadedData={handleReady}
             onError={(event) => handleError(event.currentTarget)}
           />
+          {load.status === "ready" && (
+            <div className="scene-viewer-controls tsukyio-video-controls">
+              <button
+                type="button"
+                className="scene-viewer-button"
+                onClick={toggleMediaPlay}
+                aria-label={isPlaying ? "Pause" : "Play"}
+              >
+                {isPlaying ? (
+                  <Pause size={15} strokeWidth={2.2} />
+                ) : (
+                  <Play size={15} strokeWidth={2.2} />
+                )}
+              </button>
+
+              <span className="scene-viewer-time">
+                {formatTime(currentTime)} / {knownDuration ? formatTime(duration) : "--:--"}
+              </span>
+
+              <div
+                ref={scrubRef}
+                className={`scene-viewer-scrub tsukyio-player-scrub ${
+                  isScrubbing ? "is-scrubbing" : ""
+                } ${seekDisabled ? "is-disabled" : ""}`}
+                onMouseDown={seekDisabled ? undefined : onScrubMouseDown}
+                onKeyDown={onScrubKeyDown}
+                role="slider"
+                tabIndex={seekDisabled ? -1 : 0}
+                aria-label="Seek"
+                aria-valuemin={0}
+                aria-valuemax={knownDuration ? Math.floor(duration) : 0}
+                aria-valuenow={Math.floor(currentTime)}
+                aria-valuetext={`${formatTime(currentTime)} of ${
+                  knownDuration ? formatTime(duration) : "unknown"
+                }`}
+                aria-disabled={seekDisabled}
+              >
+                <div className="scene-viewer-scrub-track">
+                  <div
+                    className="scene-viewer-scrub-fill"
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="tsukyio-player-volume">
+                <button
+                  type="button"
+                  className="scene-viewer-button"
+                  onClick={toggleMediaMute}
+                  aria-label={mediaMuted || mediaVolume === 0 ? "Unmute" : "Mute"}
+                >
+                  {mediaMuted || mediaVolume === 0 ? (
+                    <VolumeX size={15} strokeWidth={2.2} />
+                  ) : (
+                    <Volume2 size={15} strokeWidth={2.2} />
+                  )}
+                </button>
+                <input
+                  type="range"
+                  className="tsukyio-player-vol-slider"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={mediaMuted ? 0 : mediaVolume}
+                  onChange={(event) =>
+                    setMediaVolumeFromSlider(Number(event.currentTarget.value))
+                  }
+                  aria-label="Volume"
+                />
+              </div>
+            </div>
+          )}
           {load.status === "loading" && (
             <div className="scene-viewer-loading" role="status">
               <Loader2 className="is-spinning" size={24} strokeWidth={2.1} />

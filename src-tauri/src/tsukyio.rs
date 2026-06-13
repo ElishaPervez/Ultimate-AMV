@@ -25,7 +25,10 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::Instant,
 };
 
@@ -36,6 +39,8 @@ use tauri::{Emitter, Manager, UriSchemeContext, UriSchemeResponder, Window, Wry}
 use crate::{log_error, log_info, log_warn, sanitize_path_segment};
 
 const TSUKYIO_BASE: &str = "https://tsukyio.com/api";
+/// Bare public origin, for proxied non-API resources (thumbnails).
+const TSUKYIO_ORIGIN: &str = "https://tsukyio.com";
 const USER_AGENT: &str = "UltimateAMV-Tsukyio/1.0";
 
 /// Custom URI scheme the preview media loads from. On Windows the webview maps
@@ -56,6 +61,11 @@ const PROXY_CHUNK_CAP: u64 = 4 * 1024 * 1024;
 /// must buffer the whole thing — but refuse outright if upstream advertises a
 /// `Content-Length` larger than this so a pathological body can't OOM us.
 const PROXY_MAX_FULL_BODY: u64 = 256 * 1024 * 1024;
+
+/// Hard ceiling for a proxied thumbnail body. Real vault thumbnails are a few
+/// hundred KB; anything past this is not a thumbnail and gets refused rather
+/// than buffered.
+const THUMB_MAX_BODY: usize = 20 * 1024 * 1024;
 
 /// Holds the current Tsukyio Bearer key for the proxy protocol handler. The
 /// frontend pushes the key here via `tsukyio_set_session_key` whenever it loads
@@ -99,28 +109,39 @@ pub(crate) fn tsukyio_set_session_key(
     state.set(key);
 }
 
-/// Builds a reqwest client carrying the user's Bearer key. Mirrors the
-/// construction style used in tools.rs / downloads.rs (a fresh client per
-/// call is fine — these are infrequent, user-driven requests).
-fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
-    let trimmed = api_key.trim();
-    if trimmed.is_empty() {
-        return Err("No Tsukyio API key set. Add your key in Settings.".to_string());
+/// Shared reqwest client for every Tsukyio call (JSON API, downloads, the
+/// stream/thumbnail proxies). Built once so its connection pool + TLS session
+/// survive across requests — the streaming proxy issues one request per Range,
+/// so a per-call client would pay a fresh handshake on every seek. Auth is NOT
+/// baked into the defaults: the key can change at runtime in Settings, so each
+/// call site attaches the current Bearer key via `bearer_value`.
+fn shared_client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
     }
     let mut headers = reqwest::header::HeaderMap::new();
-    let bearer = format!("Bearer {trimmed}");
-    let value = reqwest::header::HeaderValue::from_str(&bearer)
-        .map_err(|_| "The Tsukyio API key contains invalid characters.".to_string())?;
-    headers.insert(reqwest::header::AUTHORIZATION, value);
     headers.insert(
         reqwest::header::ACCEPT,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .default_headers(headers)
         .build()
-        .map_err(|error| format!("Could not build Tsukyio HTTP client: {error}"))
+        .map_err(|error| format!("Could not build Tsukyio HTTP client: {error}"))?;
+    Ok(CLIENT.get_or_init(|| client).clone())
+}
+
+/// Validates the user's API key and renders it as an `Authorization` header
+/// value for a single request.
+fn bearer_value(api_key: &str) -> Result<reqwest::header::HeaderValue, String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err("No Tsukyio API key set. Add your key in Settings.".to_string());
+    }
+    reqwest::header::HeaderValue::from_str(&format!("Bearer {trimmed}"))
+        .map_err(|_| "The Tsukyio API key contains invalid characters.".to_string())
 }
 
 /// Maps an HTTP status to a friendly error. 401/403 → bad key, 429 → rate
@@ -151,9 +172,11 @@ fn status_error(status: reqwest::StatusCode, body: &str) -> String {
 /// parsed JSON body. The vault always replies `{ "success": bool, "data": ... }`,
 /// so callers get the whole object back and read `.data` on the frontend.
 async fn get_json(api_key: &str, url: &str) -> Result<Value, String> {
-    let client = build_client(api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(api_key)?;
     let response = client
         .get(url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -195,7 +218,8 @@ pub(crate) async fn tsukyio_browse(
 ) -> Result<Value, String> {
     let limit = limit.unwrap_or(24);
     let offset = offset.unwrap_or(0);
-    let client = build_client(&api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
     // Use reqwest's query builder so values are percent-encoded correctly
     // (relPaths carry spaces and slashes).
     let mut query: Vec<(&str, String)> = vec![
@@ -217,6 +241,7 @@ pub(crate) async fn tsukyio_browse(
     let response = client
         .get(format!("{TSUKYIO_BASE}/vault/all"))
         .query(&query)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -238,7 +263,8 @@ pub(crate) async fn tsukyio_search(
     q: String,
     category: Option<String>,
 ) -> Result<Value, String> {
-    let client = build_client(&api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
     let mut query: Vec<(&str, String)> = vec![("q", q.clone())];
     if let Some(cat) = category.as_deref().filter(|c| !c.trim().is_empty() && *c != "all") {
         query.push(("category", cat.to_string()));
@@ -251,6 +277,7 @@ pub(crate) async fn tsukyio_search(
     let response = client
         .get(format!("{TSUKYIO_BASE}/vault/search"))
         .query(&query)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -268,7 +295,8 @@ pub(crate) async fn tsukyio_search(
 
 #[tauri::command]
 pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Value, String> {
-    let client = build_client(&api_key)?;
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
     log_info(
         "tsukyio.deep_search.start",
         "Deep-searching Tsukyio clips",
@@ -277,6 +305,7 @@ pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Va
     let response = client
         .get(format!("{TSUKYIO_BASE}/vault/deep-search"))
         .query(&[("q", q.as_str())])
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not reach Tsukyio: {error}"))?;
@@ -292,23 +321,55 @@ pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Va
         .map_err(|error| format!("Could not parse Tsukyio response: {error}"))
 }
 
+/// True when `ext` looks like a real file extension (short, alphanumeric)
+/// rather than a dotted name fragment like "verylongext" or "v1.2 final".
+fn is_real_extension(ext: &str) -> bool {
+    let ext = ext.trim();
+    !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// Picks a sensible file extension for a downloaded asset. The vault encodes
 /// the real extension in the item's `path`/`name`; default to .mp4 (video) so
 /// the file is at least openable when no extension is present.
 fn extension_for(name: &str, path_hint: &str) -> String {
     for source in [path_hint, name] {
         if let Some(ext) = Path::new(source).extension().and_then(|e| e.to_str()) {
-            let ext = ext.trim().to_ascii_lowercase();
-            if !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-                return ext;
+            if is_real_extension(ext) {
+                return ext.trim().to_ascii_lowercase();
             }
         }
     }
     "mp4".to_string()
 }
 
+/// Strips a recognized extension from a vault item name, so composing the
+/// final `{stem}.{ext}` path doesn't double it (`clip.mp4` → `clip.mp4.mp4`).
+fn stem_for(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && is_real_extension(ext) => stem,
+        _ => name,
+    }
+}
+
 fn emit_progress(window: &Window, payload: Value) {
     let _ = window.emit("tsukyio-download-progress", payload);
+}
+
+/// Set by `tsukyio_cancel_download`, checked per chunk by the download loop
+/// (same pattern as tools.rs). A single flag suffices: the panel drives vault
+/// downloads one at a time, and each new download resets it.
+static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Asks the in-flight `tsukyio_download` to stop. The download loop deletes
+/// its `.part` temp and reports a `cancelled` progress event.
+#[tauri::command]
+pub(crate) fn tsukyio_cancel_download() {
+    log_info(
+        "tsukyio.download.cancel",
+        "Tsukyio download cancel requested",
+        Value::Null,
+    );
+    CANCEL_FLAG.store(true, Ordering::SeqCst);
 }
 
 /// Streams `GET /vault/download/{id}` (a plain authenticated GET) to disk under
@@ -324,7 +385,9 @@ pub(crate) async fn tsukyio_download(
     path_hint: Option<String>,
     dest_dir: Option<String>,
 ) -> Result<String, String> {
-    let client = build_client(&api_key)?;
+    CANCEL_FLAG.store(false, Ordering::SeqCst);
+    let client = shared_client()?;
+    let auth = bearer_value(&api_key)?;
 
     let base = resolve_vault_root(dest_dir.as_deref());
     let category_folder = category
@@ -337,7 +400,7 @@ pub(crate) async fn tsukyio_download(
         .map_err(|error| format!("Could not create download folder: {error}"))?;
 
     let ext = extension_for(&name, path_hint.as_deref().unwrap_or(""));
-    let stem = sanitize_path_segment(&name, &asset_id, 120);
+    let stem = sanitize_path_segment(stem_for(&name), &asset_id, 120);
     // Pick a non-colliding final path: two different assets can share the same
     // display name, and `File::create` truncates, so a naive `{stem}.{ext}`
     // would silently overwrite an existing different file.
@@ -357,6 +420,7 @@ pub(crate) async fn tsukyio_download(
     let url = format!("{TSUKYIO_BASE}/vault/download/{asset_id}");
     let response = client
         .get(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .map_err(|error| format!("Could not start Tsukyio download: {error}"))?;
@@ -389,6 +453,20 @@ pub(crate) async fn tsukyio_download(
     );
 
     while let Some(chunk) = stream.next().await {
+        if CANCEL_FLAG.load(Ordering::SeqCst) {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            log_info(
+                "tsukyio.download.cancelled",
+                "Tsukyio download cancelled",
+                json!({ "assetId": &asset_id }),
+            );
+            emit_progress(
+                &window,
+                json!({ "type": "cancelled", "assetId": &asset_id }),
+            );
+            return Err("Download cancelled.".to_string());
+        }
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -587,6 +665,32 @@ fn asset_id_from_uri(uri: &str) -> Option<String> {
     Some(percent_decode(segment))
 }
 
+/// Extracts the upstream thumbnail path from a `<scheme>/thumb/<segment>`
+/// request URI (same shape variants as `asset_id_from_uri`). The frontend packs
+/// the whole upstream path (itself per-segment percent-encoded, slashes intact)
+/// into ONE encoded segment, so a single decode here yields a splice-ready
+/// upstream path like `/api/v/links/Precuts/My%20Folder/clip.jpg`.
+fn thumb_path_from_uri(uri: &str) -> Option<String> {
+    let after_scheme = uri.splitn(2, "://").nth(1).unwrap_or(uri);
+    let no_query = after_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let mut segments = no_query.split('/').filter(|s| !s.is_empty());
+    let mut path: Option<&str> = None;
+    while let Some(seg) = segments.next() {
+        if seg == "thumb" {
+            path = segments.next();
+            break;
+        }
+    }
+    let segment = path?;
+    if segment.is_empty() {
+        return None;
+    }
+    Some(percent_decode(segment))
+}
+
 /// Minimal percent-decoder for a single path segment (we only need to undo the
 /// encoding the webview applies to the id). Invalid escapes are passed through.
 fn percent_decode(input: &str) -> String {
@@ -633,6 +737,36 @@ pub(crate) fn handle_stream_protocol(
     let app = ctx.app_handle().clone();
 
     let uri = request.uri().to_string();
+
+    // Thumbnail proxy route (`<scheme>/thumb/<encoded upstream path>`). Some
+    // vault thumbnails are served from API routes whose responses carry
+    // `Cross-Origin-Resource-Policy: same-origin` — WebView2 enforces CORP on
+    // cross-origin `<img>` loads, so the bytes arrive (200) but are never
+    // painted and the card renders a black box. Re-serving them from this
+    // app-trusted origin sidesteps CORP exactly like the stream proxy
+    // sidesteps the missing-CORS stream responses. Unlike streams this does
+    // NOT require a key (the thumbnails are public); the key is attached when
+    // present in case the vault tightens auth later.
+    if let Some(thumb_path) = thumb_path_from_uri(&uri) {
+        let key = app.state::<TsukyioSession>().get();
+        tauri::async_runtime::spawn(async move {
+            let response = proxy_thumbnail(key.as_deref(), &thumb_path).await;
+            let response = match response {
+                Ok(response) => response,
+                Err((status, message)) => {
+                    log_warn(
+                        "tsukyio.thumb.error",
+                        "Tsukyio thumbnail proxy failed",
+                        json!({ "path": &thumb_path, "status": status, "error": &message }),
+                    );
+                    proxy_error(status)
+                }
+            };
+            responder.respond(response);
+        });
+        return;
+    }
+
     let asset_id = match asset_id_from_uri(&uri) {
         Some(id) => id,
         None => {
@@ -721,12 +855,14 @@ async fn proxy_stream(
         None => format!("bytes={}-", requested.start),
     };
 
-    let client = build_client(api_key).map_err(|e| (401u16, e))?;
+    let client = shared_client().map_err(|e| (500u16, e))?;
+    let auth = bearer_value(api_key).map_err(|e| (401u16, e))?;
 
     let response = client
         .get(format!("{TSUKYIO_BASE}/stream"))
         // Percent-encode the id correctly instead of splicing it raw into the URL.
         .query(&[("id", asset_id)])
+        .header(reqwest::header::AUTHORIZATION, auth)
         .header(reqwest::header::RANGE, &upstream_range)
         // The stream endpoint serves media; override the JSON Accept default.
         .header(reqwest::header::ACCEPT, "*/*")
@@ -765,7 +901,9 @@ async fn proxy_stream(
         // support — does not happen against this endpoint in practice). We must
         // NOT cap here: a capped 200 silently truncates the file and breaks
         // playback/seeking. Read the ENTIRE body and relay it as a plain 200.
-        // Guard against a pathological huge body using the advertised length.
+        // Guard against a pathological huge body: fail fast when the advertised
+        // length is over the ceiling, and enforce the same ceiling inside the
+        // read loop for chunked bodies that advertise no length at all.
         if let Some(len) = upstream_content_length {
             if len > PROXY_MAX_FULL_BODY {
                 return Err((
@@ -777,11 +915,22 @@ async fn proxy_stream(
                 ));
             }
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
-        let body: Vec<u8> = bytes.to_vec();
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
+            if body.len() as u64 + chunk.len() as u64 > PROXY_MAX_FULL_BODY {
+                return Err((
+                    502u16,
+                    format!(
+                        "Tsukyio stream too large to buffer without range support \
+                         (exceeded the {PROXY_MAX_FULL_BODY}-byte ceiling)."
+                    ),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
         let body_len = body.len() as u64;
         return tauri::http::Response::builder()
             .status(200)
@@ -838,6 +987,89 @@ async fn proxy_stream(
         .map_err(|e| (500u16, format!("Could not build stream response: {e}")))
 }
 
+/// Fetches a vault thumbnail upstream and relays it to the webview. `encoded_path`
+/// is the upstream path with its segments already percent-encoded (spaces etc.)
+/// and slashes intact — splice-ready. Bounded by `THUMB_MAX_BODY`; upstream's
+/// long-lived Cache-Control is passed through so the webview caches the image
+/// instead of re-proxying it on every grid render.
+async fn proxy_thumbnail(
+    api_key: Option<&str>,
+    encoded_path: &str,
+) -> Result<tauri::http::Response<Vec<u8>>, (u16, String)> {
+    // Only the two routes vault thumbnails actually live under, no traversal
+    // (checked on the fully-decoded form so a double-encoded `..` can't slip
+    // through to upstream). The origin is pinned, so this can never proxy
+    // anything but tsukyio.com regardless.
+    let fully_decoded = percent_decode(encoded_path);
+    if !(encoded_path.starts_with("/api/") || encoded_path.starts_with("/files/"))
+        || fully_decoded.contains("..")
+    {
+        return Err((400u16, format!("Invalid thumbnail path: {encoded_path}")));
+    }
+
+    let client = shared_client().map_err(|e| (500u16, e))?;
+    let auth = match api_key {
+        Some(key) => Some(bearer_value(key).map_err(|e| (401u16, e))?),
+        None => None,
+    };
+
+    let mut request = client
+        .get(format!("{TSUKYIO_ORIGIN}{encoded_path}"))
+        // Image endpoint; override the shared client's JSON Accept default.
+        .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8");
+    if let Some(auth) = auth {
+        request = request.header(reqwest::header::AUTHORIZATION, auth);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| (502u16, format!("Could not reach Tsukyio thumbnail: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err((status.as_u16(), format!("Upstream thumbnail returned {status}")));
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string());
+    let cache_control = response
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "public, max-age=86400".to_string());
+
+    if let Some(len) = response.content_length() {
+        if len > THUMB_MAX_BODY as u64 {
+            return Err((502u16, format!("Thumbnail too large ({len} bytes)")));
+        }
+    }
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| (502u16, format!("Could not read Tsukyio thumbnail body: {e}")))?;
+        if body.len() + chunk.len() > THUMB_MAX_BODY {
+            // A truncated image is useless — refuse instead of serving junk.
+            return Err((502u16, "Thumbnail exceeded the size ceiling".to_string()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let body_len = body.len();
+    tauri::http::Response::builder()
+        .status(200)
+        .header(tauri::http::header::CONTENT_TYPE, content_type)
+        .header(tauri::http::header::CACHE_CONTROL, cache_control)
+        .header(tauri::http::header::CONTENT_LENGTH, body_len.to_string())
+        .body(body)
+        .map_err(|e| (500u16, format!("Could not build thumbnail response: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,6 +1081,21 @@ mod tests {
         assert_eq!(extension_for("song.mp3", ""), "mp3");
         // Reject junk that isn't really an extension.
         assert_eq!(extension_for("a.b.c.verylongext", ""), "mp4");
+    }
+
+    #[test]
+    fn stem_strips_only_real_extensions() {
+        // The vault's `name` usually carries the extension; the stem must not,
+        // or the composed `{stem}.{ext}` doubles it (clip.mp4.mp4).
+        assert_eq!(stem_for("clip.mp4"), "clip");
+        assert_eq!(stem_for("song.mp3"), "song");
+        assert_eq!(stem_for("clip"), "clip");
+        // A junk suffix isn't an extension and stays part of the stem.
+        assert_eq!(stem_for("a.b.c.verylongext"), "a.b.c.verylongext");
+        // Dotted version fragments survive too.
+        assert_eq!(stem_for("opening v1.2 final"), "opening v1.2 final");
+        // A bare dot-name has no stem to keep.
+        assert_eq!(stem_for(".mp4"), ".mp4");
     }
 
     #[test]
@@ -906,6 +1153,30 @@ mod tests {
         // No /stream/ segment → None.
         assert_eq!(asset_id_from_uri("tsukyio://other/abc"), None);
         assert_eq!(asset_id_from_uri("tsukyio://stream/"), None);
+    }
+
+    #[test]
+    fn thumb_path_parsed_from_various_uri_shapes() {
+        // The whole upstream path arrives as ONE encoded segment; a single
+        // decode yields the splice-ready (still per-segment-encoded) path.
+        assert_eq!(
+            thumb_path_from_uri("tsukyio://thumb/%2Fapi%2Fv%2Flinks%2FPrecuts%2FMy%2520Folder%2Fclip.jpg")
+                .as_deref(),
+            Some("/api/v/links/Precuts/My%20Folder/clip.jpg")
+        );
+        assert_eq!(
+            thumb_path_from_uri("http://tsukyio.localhost/thumb/%2Ffiles%2Fthumbnails%2Fa.jpg")
+                .as_deref(),
+            Some("/files/thumbnails/a.jpg")
+        );
+        // Query strings and fragments are stripped.
+        assert_eq!(
+            thumb_path_from_uri("http://tsukyio.localhost/thumb/%2Fapi%2Fx.jpg?t=1#y").as_deref(),
+            Some("/api/x.jpg")
+        );
+        // A stream URI is not a thumb URI.
+        assert_eq!(thumb_path_from_uri("tsukyio://stream/abc123"), None);
+        assert_eq!(thumb_path_from_uri("tsukyio://thumb/"), None);
     }
 
     #[test]

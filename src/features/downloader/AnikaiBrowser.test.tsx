@@ -89,7 +89,6 @@ function setupDefaultMocks() {
 
 const defaultProps = {
   active: true,
-  sidebarExpanded: false,
   enqueueDownload: vi.fn(() => 'job-id-1'),
 }
 

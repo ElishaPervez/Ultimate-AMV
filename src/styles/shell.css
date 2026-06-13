@@ -277,6 +277,132 @@
   background: rgba(255, 255, 255, 0.04);
   font-size: 12.5px;
 }
+
+/* Dark-text toggle: label and switch sit together as one unit (no
+   space-between — that floated the switch to its grid column's far edge,
+   visually orphaned from the label). */
+.bg-control-toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+/* Compact switch sized for this row. No in-track ON/OFF text — at this scale
+   the knob covers it; the knob position and accent fill carry the state. */
+.bg-toggle {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: background 200ms ease, border-color 200ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bg-toggle[data-on="true"] {
+  background: linear-gradient(
+    120deg,
+    rgb(var(--theme-accent-rgb)),
+    rgb(var(--theme-accent-2-rgb))
+  );
+  border-color: rgb(var(--theme-accent-rgb) / 0.85);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.bg-toggle:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px #050507,
+    0 0 0 4px rgb(var(--theme-accent-rgb) / 0.7);
+}
+
+.bg-toggle-knob {
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #e9eef3;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transform: translate(0, -50%);
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.4, 0.5, 1),
+    background 200ms ease;
+}
+
+.bg-toggle[data-on="true"] .bg-toggle-knob {
+  transform: translate(16px, -50%);
+  background: #ffffff;
+}
+
+/* Dismissible "wallpaper looks bright" suggestion (never a forced override).
+   Amber-tinted so it reads as advice, not the red legibility warning. */
+.bg-bright-suggest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  background: rgba(251, 191, 36, 0.08);
+  font-size: 12.5px;
+}
+
+.bg-bright-suggest > svg {
+  flex-shrink: 0;
+  color: var(--amber);
+}
+
+.bg-bright-suggest-text {
+  flex: 1;
+  min-width: 0;
+  color: #ecdfc0;
+}
+
+.bg-bright-suggest-accept {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.14);
+  color: #fbd38d;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bg-bright-suggest-accept:hover {
+  background: rgba(251, 191, 36, 0.22);
+  color: #ffe3a3;
+}
+
+.bg-bright-suggest-dismiss {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8896a3;
+  cursor: pointer;
+}
+
+.bg-bright-suggest-dismiss:hover {
+  color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.06);
+}
 .bg-customizer-actions .install-btn:hover:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.07);
@@ -529,17 +655,7 @@
   background:
     linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 28%),
     rgba(9, 11, 13, 0.88);
-  transition:
-    --sidebar-width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    --sidebar-label-width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    --sidebar-gap 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    grid-template-columns 300ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.app-shell.is-compact {
-  --sidebar-width: var(--sidebar-compact-width);
-  --sidebar-label-width: 0px;
-  --sidebar-gap: 0px;
+  transition: grid-template-columns 300ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* ============================================================
@@ -558,64 +674,13 @@
   background: #1A1D21;
 }
 
-.brand-strip {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: 40px minmax(0, var(--sidebar-label-width));
-  column-gap: var(--sidebar-gap);
-  align-items: center;
-  justify-self: center;
-  width: calc(40px + var(--sidebar-gap) + var(--sidebar-label-width));
-  overflow: hidden;
-  transition:
-    width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    grid-template-columns 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    column-gap 300ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.collapse-button {
-  display: none;
-}
-
-.brand-cluster {
-  display: none;
-}
-
 .icon-button,
-.nav-icon,
 .surface-mark {
   display: grid;
   place-items: center;
 }
 
-.brand-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  opacity: 1;
-}
-
-.brand-name,
-.brand-subtitle {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: clip;
-}
-
-.brand-name {
-  font-size: 16px;
-  font-weight: 800;
-}
-
-.brand-subtitle {
-  font-size: 12px;
-  color: var(--muted);
-}
-
 .icon-button,
-.settings-button,
-.nav-button,
 .tool-button {
   border: 0;
   color: inherit;
@@ -633,146 +698,6 @@
 .icon-button:hover {
   border-color: rgb(var(--theme-accent-rgb) / 0.55);
   color: var(--cyan);
-}
-
-.nav-list {
-  position: relative;
-  z-index: 3;
-  display: grid;
-  grid-template-columns: 1fr;
-  align-self: start;
-  justify-self: center;
-  gap: 8px;
-  width: 100%;
-  padding-top: 0;
-  transition:
-    width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    grid-template-columns 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    gap 300ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.nav-button {
-  --nav-accent: var(--accent);
-  position: relative;
-  z-index: 1;
-  grid-column: 1 / -1;
-  width: 100%;
-  min-height: 52px;
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  align-items: center;
-  padding: 0 10px;
-  overflow: hidden;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: #8896a3;
-  gap: 10px;
-  transition: all 160ms ease;
-}
-
-.nav-button:nth-child(2) {
-  --nav-accent: var(--accent);
-}
-
-.nav-button:nth-child(3) {
-  --nav-accent: var(--accent);
-}
-
-.nav-button:nth-child(4) {
-  --nav-accent: var(--accent);
-}
-
-.nav-button:hover {
-  background: #2a2d31;
-  color: #fff;
-}
-
-.nav-button.is-active {
-  background: #00A67D;
-  color: #fff;
-}
-
-.nav-text {
-  min-width: 0;
-  width: var(--sidebar-label-width);
-  display: flex;
-  align-items: center;
-  padding: 0;
-  font-size: 14px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: clip;
-  transition:
-    width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    padding 300ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.nav-icon {
-  color: inherit;
-  background: transparent;
-  border: none;
-}
-
-.sidebar-footer {
-  display: grid;
-  justify-items: center;
-  gap: 8px;
-}
-
-.settings-button {
-  justify-self: center;
-  width: calc(var(--sidebar-label-width) + 40px);
-  min-height: 52px;
-  display: grid;
-  grid-template-columns: var(--sidebar-label-width) 40px;
-  align-items: center;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.025);
-  transition:
-    width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    min-height 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    grid-template-columns 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-radius 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 160ms ease,
-    background 160ms ease,
-    color 160ms ease;
-}
-
-.settings-button span {
-  min-width: 0;
-  width: var(--sidebar-label-width);
-  display: flex;
-  align-items: center;
-  padding: 0 10px 0 12px;
-  font-size: 13px;
-  font-weight: 720;
-  opacity: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: clip;
-  transition:
-    width 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    padding 300ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.settings-button svg {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: center;
-  align-self: center;
-}
-
-.settings-button:hover,
-.settings-button.is-active {
-  color: var(--ink);
-  border-color: rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.045);
 }
 
 /* ============================================================
@@ -913,121 +838,18 @@
 }
 
 /* ============================================================
-   28. COMPACT SIDEBAR OVERRIDES
-   ============================================================ */
-
-.is-compact .brand-strip {
-  grid-template-columns: 40px minmax(0, 0px);
-  column-gap: 0;
-  justify-content: center;
-  width: 40px;
-}
-
-.is-compact .brand-cluster {
-  pointer-events: none;
-}
-
-.is-compact .collapse-button {
-  justify-self: center;
-}
-
-.is-compact .sidebar {
-  width: 100%;
-}
-
-.is-compact .nav-list {
-  grid-template-columns: 0px 40px;
-  align-self: center;
-  justify-self: center;
-  gap: 15px;
-  width: 40px;
-  padding-top: 0;
-  transform: translateY(-7vh);
-}
-
-.is-compact .nav-button {
-  width: 40px;
-  min-height: 40px;
-  grid-template-columns: 0px 40px;
-  border-radius: 12px;
-}
-
-.is-compact .nav-text {
-  width: 0;
-  padding: 0;
-}
-
-.is-compact .nav-icon {
-  border-left-color: transparent;
-}
-
-.is-compact .settings-button {
-  width: 40px;
-  min-height: 40px;
-  grid-template-columns: 40px;
-  justify-self: center;
-  place-items: center;
-  border-radius: 12px;
-}
-
-.is-compact .settings-button span {
-  display: none;
-}
-
-.is-compact .settings-button svg {
-  grid-column: 1;
-  grid-row: 1;
-  justify-self: center;
-  align-self: center;
-}
-
-.is-expanded .settings-button span {
-  opacity: 1;
-}
-
-/* ============================================================
    29. RESPONSIVE: max-width 860px
    ============================================================ */
 
 @media (max-width: 860px) {
-  .app-shell,
-  .app-shell.is-expanded {
+  .app-shell {
     height: 100vh;
     grid-template-columns: 64px minmax(0, 1fr);
-  }
-
-  .brand-copy {
-    display: none;
-  }
-
-  .brand-strip {
-    grid-template-columns: 1fr;
   }
 
   .sidebar {
     width: 64px;
     padding: 14px 10px;
-  }
-
-  .nav-list {
-    grid-template-columns: 40px;
-    gap: 9px;
-    width: 40px;
-    padding-top: 0;
-  }
-
-  .nav-button {
-    width: 40px;
-    min-height: 40px;
-    grid-template-columns: 40px;
-  }
-
-  .nav-text {
-    display: none;
-  }
-
-  .nav-icon {
-    border: 0;
   }
 
   .canvas {
@@ -1188,7 +1010,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 6px;
+  /* No horizontal padding: the collapse toggle leads this row and must sit at
+     the exact same x-offset as in the collapsed rail (see 8b). */
+  padding: 0;
   margin-bottom: 12px;
 }
 
@@ -1287,17 +1111,35 @@
   transform: rotate(180deg);
 }
 
+.sidebar-subnav-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition: grid-template-rows 200ms ease, visibility 0ms 200ms;
+}
+
+.sidebar-subnav-wrap.is-open {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition: grid-template-rows 200ms ease, visibility 0ms;
+}
+
 .sidebar-subnav {
   display: flex;
   flex-direction: column;
-  padding: 4px 0 4px 28px;
+  padding: 0 0 0 28px;
   gap: 2px;
-  animation: subnav-in 200ms ease both;
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 200ms ease, transform 200ms ease, padding 200ms ease;
 }
 
-@keyframes subnav-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to   { opacity: 1; transform: none; }
+.sidebar-subnav-wrap.is-open .sidebar-subnav {
+  padding: 4px 0 4px 28px;
+  opacity: 1;
+  transform: none;
 }
 
 .sidebar-subitem {
@@ -1387,141 +1229,6 @@
   border-color: rgba(255, 255, 255, 0.12);
 }
 
-.sidebar-theme-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 0 6px;
-  position: relative;
-}
-
-.sidebar-theme-label {
-  font-size: 10px;
-  font-weight: 700;
-  color: #6b7280;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  user-select: none;
-}
-
-.sidebar-theme-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 8px;
-  background: #1a1d21;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  color: #e5e7eb;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  width: 100%;
-  transition: border-color 160ms ease, background 160ms ease;
-}
-
-.sidebar-theme-select:hover {
-  border-color: rgba(255, 255, 255, 0.14);
-  background: #1e2126;
-}
-
-.sidebar-theme-name {
-  flex: 1;
-  text-align: left;
-  min-width: 0;
-}
-
-.sidebar-theme-chevron {
-  transition: transform 200ms ease;
-  opacity: 0.5;
-}
-
-.sidebar-theme-chevron.is-open {
-  transform: rotate(180deg);
-}
-
-.sidebar-theme-dropdown {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 6px;
-  right: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px;
-  border-radius: 10px;
-  background: #1a1d21;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
-  z-index: 30;
-}
-
-.sidebar-theme-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 8px;
-  border-radius: 6px;
-  border: none;
-  background: transparent;
-  color: #9ca3af;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  text-align: left;
-  transition: background 160ms ease, color 160ms ease;
-}
-
-.sidebar-theme-option:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: #e5e7eb;
-}
-
-.sidebar-theme-option.is-active {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.sidebar-theme-swatch {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.sidebar-theme-name-text {
-  flex: 1;
-  text-align: left;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-theme-tag {
-  flex-shrink: 0;
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 2px 5px;
-  border-radius: 4px;
-  color: rgb(var(--theme-accent-rgb));
-  background: rgb(var(--theme-accent-rgb) / 0.12);
-  border: 1px solid rgb(var(--theme-accent-rgb) / 0.25);
-}
-
-.sidebar-theme-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #34d399;
-  flex-shrink: 0;
-}
-
 .sidebar-help-card {
   display: flex;
   flex-direction: column;
@@ -1587,12 +1294,203 @@
   filter: none;
 }
 
-.workspace-header {
-  padding: 2rem 2rem 0 2rem;
+/* ============================================================
+   8b. COLLAPSIBLE SIDEBAR (compact icon rail)
+   The shell column animates between the expanded and rail widths
+   via --sidebar-width (the .app-shell grid transition already
+   covers it). Collapsed, the grouped nav is swapped for a flat
+   one-click icon rail with hover tooltips; both directions get a
+   staggered slide/fade so the swap reads as one fluid motion.
+   ============================================================ */
+
+.app-shell.is-sidebar-collapsed {
+  --sidebar-width: var(--sidebar-rail-width);
 }
 
-.workspace-header h1 {
-  margin: 0;
-  font-size: 2rem;
-  color: white;
+/* Tooltips poke out past the rail into the workspace: the sidebar must paint
+   above its sibling and never clip. Expanded, clipping is back ON so labels
+   can't spill while the width is still animating open. */
+.sidebar {
+  z-index: 5;
 }
+
+.sidebar:not(.is-collapsed) {
+  overflow: hidden;
+}
+
+/* The toggle's position and size are IDENTICAL in both sidebar states (same
+   left offset, same box) so rapid repeated clicks never need re-aiming — the
+   left edge is the only part of the sidebar that doesn't move while the width
+   animates. Only the icon glyph changes.
+
+   Width matches .sidebar-rail-btn exactly: the live sidebar rule is
+   `.app-shell .sidebar` (flex, 14px side padding → a 36px content box in the
+   64px rail), so a 36px box flush at the content edge is what keeps this
+   pixel-aligned with the rail icons below it. */
+.sidebar-collapse-btn {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.sidebar-collapse-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #e5e7eb;
+}
+
+.sidebar.is-collapsed .sidebar-brand {
+  justify-content: flex-start;
+  margin-bottom: 4px;
+}
+
+/* flex: 1 — the sidebar is a flex column (`.app-shell .sidebar`), so the rail
+   must grow to fill the remaining height for its spacer to pin Settings/Logs
+   to the bottom. */
+.sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar-rail > * {
+  animation: sidebar-rail-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.sidebar-rail-spacer {
+  flex: 1;
+  animation: none;
+}
+
+.sidebar-rail-divider {
+  flex: 0 0 1px;
+  width: 24px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 5px 0;
+}
+
+/* 36px = the sidebar's content width (64px rail minus 14px padding each
+   side), so the button fills the box exactly — same left edge as the collapse
+   toggle above, no overflow, no centering math to drift. */
+.sidebar-rail-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 40px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.sidebar-rail-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e5e7eb;
+}
+
+.sidebar-rail-btn.is-active {
+  background: #1f2328;
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* Accent edge marking the active rail icon (sits in the sidebar padding). */
+.sidebar-rail-btn.is-active::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow);
+}
+
+/* App-styled hover/focus tooltip to the right of a rail icon. */
+.sidebar-rail-tip {
+  position: absolute;
+  left: calc(100% + 14px);
+  top: 50%;
+  transform: translate(-6px, -50%);
+  padding: 5px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(16, 18, 22, 0.96);
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 60;
+}
+
+.sidebar-rail-btn:hover .sidebar-rail-tip,
+.sidebar-rail-btn:focus-visible .sidebar-rail-tip {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+@keyframes sidebar-rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Re-entry choreography for the expanded nav: each block fades/slides in with
+   a slight cascade (also plays once on app launch, which reads as intended
+   polish). Labels stay on one line so nothing wraps mid-width-animation. */
+.sidebar:not(.is-collapsed) > .sidebar-home,
+.sidebar:not(.is-collapsed) > .sidebar-section-label,
+.sidebar:not(.is-collapsed) > .sidebar-group,
+.sidebar:not(.is-collapsed) > .sidebar-footer-static {
+  animation: sidebar-expand-in 240ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.sidebar:not(.is-collapsed) > .sidebar-home { animation-delay: 30ms; }
+.sidebar:not(.is-collapsed) > .sidebar-section-label { animation-delay: 55ms; }
+.sidebar:not(.is-collapsed) > .sidebar-group { animation-delay: 80ms; }
+.sidebar:not(.is-collapsed) > .sidebar-group + .sidebar-group { animation-delay: 105ms; }
+.sidebar:not(.is-collapsed) > .sidebar-footer-static { animation-delay: 130ms; }
+
+.sidebar-home span,
+.sidebar-group-header span,
+.sidebar-subitem span,
+.sidebar-footer-btn span {
+  white-space: nowrap;
+}
+
+@keyframes sidebar-expand-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+

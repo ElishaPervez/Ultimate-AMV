@@ -1,8 +1,0 @@
-{
-  "id": "ultimate-amv-old",
-  "name": "Ultimate-AMV Old",
-  "description": "The classic Ultimate AMV look — the original dark glass UI with the cyan accent and the legacy audio extraction panel.",
-  "author": "Ultimate AMV",
-  "version": "1.0.0",
-  "entry": "theme.css"
-}

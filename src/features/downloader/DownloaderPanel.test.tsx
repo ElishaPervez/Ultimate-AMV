@@ -63,14 +63,14 @@ describe('DownloaderPanel', () => {
 
   it('renders the downloader workspace container', async () => {
     const { container } = render(
-      <DownloaderPanel active={true} activeTab="anime" sidebarExpanded={false} />
+      <DownloaderPanel active={true} activeTab="anime" />
     )
     expect(container.querySelector('.downloader-workspace')).toBeInTheDocument()
   })
 
   it('shows anime panel as active when activeTab is "anime"', async () => {
     const { container } = render(
-      <DownloaderPanel active={true} activeTab="anime" sidebarExpanded={false} />
+      <DownloaderPanel active={true} activeTab="anime" />
     )
     const animePanel = container.querySelector('.downloader-panel.is-active')
     expect(animePanel).toBeInTheDocument()
@@ -78,7 +78,7 @@ describe('DownloaderPanel', () => {
 
   it('shows youtube panel as active when activeTab is "youtube"', async () => {
     const { container } = render(
-      <DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />
+      <DownloaderPanel active={true} activeTab="youtube" />
     )
     // The first .is-active panel should contain the YouTube UI
     await waitFor(() => {
@@ -88,7 +88,7 @@ describe('DownloaderPanel', () => {
 
   it('hides anime panel when activeTab is "youtube"', async () => {
     const { container } = render(
-      <DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />
+      <DownloaderPanel active={true} activeTab="youtube" />
     )
     const hiddenPanels = container.querySelectorAll('.downloader-panel.is-hidden')
     expect(hiddenPanels.length).toBeGreaterThan(0)
@@ -97,21 +97,21 @@ describe('DownloaderPanel', () => {
   it('calls download_history invoke on mount', async () => {
     const historyHandler = vi.fn(async () => [])
     mockInvoke('download_history', historyHandler)
-    render(<DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="youtube" />)
     await waitFor(() => {
       expect(historyHandler).toHaveBeenCalledOnce()
     })
   })
 
   it('renders the download queue panel', async () => {
-    render(<DownloaderPanel active={true} activeTab="anime" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="anime" />)
     await waitFor(() => {
       expect(screen.getByRole('complementary', { name: 'Download queue' })).toBeInTheDocument()
     })
   })
 
   it('shows empty queue message initially', async () => {
-    render(<DownloaderPanel active={true} activeTab="anime" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="anime" />)
     await waitFor(() => {
       expect(screen.getByText('No queued downloads.')).toBeInTheDocument()
     })
@@ -121,7 +121,7 @@ describe('DownloaderPanel', () => {
     // We cannot easily queue an item without the full flow,
     // so we test that the listener is registered (listen is called)
     const { mockListenFn } = await import('../../../tests/setup/tauri')
-    render(<DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="youtube" />)
     await waitFor(() => {
       const calls = mockListenFn.mock.calls.map(([name]) => name)
       expect(calls).toContain('download-progress')
@@ -135,7 +135,7 @@ describe('DownloaderPanel', () => {
     mockInvoke('warmup_clip_server', async () => undefined)
 
     // Render in youtube tab so we can interact with queue
-    render(<DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="youtube" />)
 
     // The only way to test cancel without full e2e is to check the queue handles it
     // via the cancelQueuedDownload function. We verify cancel_download is invokable.
@@ -160,14 +160,14 @@ describe('DownloaderPanel', () => {
         sourcePage: null,
       },
     ])
-    render(<DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="youtube" />)
     await waitFor(() => {
       expect(screen.getByText('Past YouTube Video')).toBeInTheDocument()
     })
   })
 
   it('shows History section in youtube tab', async () => {
-    render(<DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />)
+    render(<DownloaderPanel active={true} activeTab="youtube" />)
     await waitFor(() => {
       expect(screen.getByText('History')).toBeInTheDocument()
     })
@@ -177,7 +177,7 @@ describe('DownloaderPanel', () => {
     mockInvoke('download_history', async () => { throw new Error('DB error') })
     // Should not throw — component catches and logs the error
     expect(() => {
-      render(<DownloaderPanel active={true} activeTab="youtube" sidebarExpanded={false} />)
+      render(<DownloaderPanel active={true} activeTab="youtube" />)
     }).not.toThrow()
   })
 })

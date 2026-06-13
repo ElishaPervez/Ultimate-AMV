@@ -137,25 +137,56 @@ function encodeThumbnailPath(path: string): string {
     .join("/");
 }
 
+// Local-proxy URL for a vault thumbnail path that the webview cannot load
+// directly. The per-segment-encoded path is packed into ONE URI segment
+// (slashes included) so the Rust handler (`thumb_path_from_uri`) recovers it
+// with a single decode. Same per-platform scheme branch as `streamUrl` below.
+function thumbProxyUrl(encodedPath: string): string {
+  const segment = encodeURIComponent(encodedPath);
+  const isWindows = navigator.userAgent.includes("Windows");
+  return isWindows
+    ? `http://tsukyio.localhost/thumb/${segment}`
+    : `tsukyio://thumb/${segment}`;
+}
+
+// Route a vault thumbnail path (e.g. `/files/thumbnails/...` or
+// `/api/v/links/...`) to a URL the webview will actually PAINT:
+//
+// - `/files/...` is public static with no cross-origin restrictions — load it
+//   straight from the public origin (no proxy hop).
+// - `/api/...` responses carry `Cross-Origin-Resource-Policy: same-origin`.
+//   WebView2 enforces CORP on cross-origin <img> loads, so the request
+//   succeeds (200) but the bytes are never handed to the renderer — the card
+//   shows a black box. Serve those through the app-trusted `tsukyio://` proxy
+//   (same trick as stream playback), which fetches upstream from Rust where
+//   CORP doesn't apply.
+function routeVaultThumbnail(path: string): string {
+  const encoded = encodeThumbnailPath(path);
+  if (path.startsWith("/api/")) return thumbProxyUrl(encoded);
+  return TSUKYIO_ORIGIN + encoded;
+}
+
 // Normalize a thumbnail URL into something the webview can actually load.
 //
 // Clip thumbnails come back glued to the vault's PRIVATE dev host
-// (`https://localhost:3133/files/thumbnails/...`), and the asset-detail endpoint
+// (`https://localhost:3133/files/thumbnails/...` or
+// `https://localhost:3133/api/v/links/...`), and the asset-detail endpoint
 // returns the same path RELATIVE (`/files/thumbnails/...`). The path itself is
 // real and publicly served from `https://tsukyio.com`, so rather than discard
 // these (which left every clip card iconless), rewrite them onto the public
-// origin. Folder / search thumbnails are already real MAL CDN URLs and pass
-// through untouched.
+// origin (or through the local proxy when CORP blocks a direct load — see
+// `routeVaultThumbnail`). Folder / search thumbnails are already real MAL CDN
+// URLs and pass through untouched.
 function usableThumbnail(url: string | null | undefined): string | null {
   if (!url || typeof url !== "string") return null;
   const trimmed = url.trim();
   if (!trimmed) return null;
-  // Relative path → serve from the public origin.
-  if (trimmed.startsWith("/")) return TSUKYIO_ORIGIN + encodeThumbnailPath(trimmed);
-  // Any localhost host (the dev box, any port) → swap to the public origin,
-  // keep and encode the path.
+  // Relative path → serve from the public origin / proxy.
+  if (trimmed.startsWith("/")) return routeVaultThumbnail(trimmed);
+  // Any localhost host (the dev box, any port) → swap to the public origin /
+  // proxy, keep and encode the path.
   const localhost = trimmed.match(/^https?:\/\/localhost(?::\d+)?(\/.*)$/i);
-  if (localhost) return TSUKYIO_ORIGIN + encodeThumbnailPath(localhost[1]);
+  if (localhost) return routeVaultThumbnail(localhost[1]);
   // Already a real absolute http(s) URL (e.g. MAL CDN) → use as-is.
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return null;
@@ -366,6 +397,9 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
   // Separate guard for the background stats fetch so a slow stats response
   // can't clobber a newer one (and so it never interferes with browse/search).
   const statsToken = React.useRef(0);
+  // Asset ids the user asked to cancel, so `startDownload`'s rejection handler
+  // can tell a cancel apart from a real failure (clip export's pattern).
+  const cancellingRef = React.useRef<Set<string>>(new Set());
 
   const currentPath = crumbs.length > 0 ? crumbs[crumbs.length - 1].relPath : "";
   const isSearching = activeSearch.trim().length > 0;
@@ -580,6 +614,9 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
           next[p.assetId] = { status: "downloading", percent };
         } else if (p.type === "done") {
           next[p.assetId] = { status: "done", percent: 100, path: p.path };
+        } else if (p.type === "cancelled") {
+          // A cancelled download leaves no trace — back to a plain Download button.
+          delete next[p.assetId];
         } else if (p.type === "error") {
           next[p.assetId] = { status: "error", percent: 0, message: p.message };
         }
@@ -706,6 +743,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
 
   async function startDownload(item: TsukyioItem) {
     if (!apiKey) return;
+    cancellingRef.current.delete(item.id);
     setDownloads((prev) => ({
       ...prev,
       [item.id]: { status: "downloading", percent: 0 },
@@ -720,12 +758,28 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         destDir: downloadPath || null,
       });
     } catch (e) {
+      // A user-initiated cancel rejects too — clear the entry instead of
+      // surfacing it as a failure (the `cancelled` event does the same, so
+      // either arrival order converges on the cleared state).
+      if (cancellingRef.current.delete(item.id)) {
+        setDownloads((prev) => {
+          const next = { ...prev };
+          delete next[item.id];
+          return next;
+        });
+        return;
+      }
       const message = readBridgeError(e);
       setDownloads((prev) => ({
         ...prev,
         [item.id]: { status: "error", percent: 0, message },
       }));
     }
+  }
+
+  function cancelDownload(item: TsukyioItem) {
+    cancellingRef.current.add(item.id);
+    void invoke("tsukyio_cancel_download").catch(() => {});
   }
 
   // ---- Render: not-yet-loaded / empty-state ----------------------------
@@ -745,7 +799,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
     return (
       <div className="tsukyio-panel">
         <div className="tsukyio-connect">
-          <div className="tsukyio-connect-card glass">
+          <div className="tsukyio-connect-card glass u-material">
             <div className="tsukyio-brand-mark" aria-hidden="true">T</div>
             <h2>Connect the Tsukyio Vault</h2>
             <p>
@@ -796,6 +850,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         </a>
       </header>
 
+      <div className="tsukyio-console u-material">
       <div className={`tsukyio-toolbar ${isHome ? "is-home" : ""}`}>
         <div className="tsukyio-search">
           <Search size={15} className="tsukyio-search-icon" />
@@ -874,6 +929,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
           )}
         </div>
       )}
+      </div>
 
       {isHome ? (
         // Discovery home: full-width tiles, NO dock.
@@ -911,6 +967,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
                     onOpenFolder={openSearchFolder}
                     onPreview={selectPreview}
                     onDownload={(item) => void startDownload(item)}
+                    onCancel={cancelDownload}
                   />
                 ) : (
                   <div className="tsukyio-empty">
@@ -936,6 +993,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
                         active={previewItem?.id === item.id}
                         onPreview={() => selectPreview(item)}
                         onDownload={() => void startDownload(item)}
+                        onCancel={() => cancelDownload(item)}
                       />
                     ),
                   )}
@@ -989,6 +1047,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
               nonce={selectNonce}
               fullscreenRef={fullscreenRef}
               onDownload={() => previewItem && void startDownload(previewItem)}
+              onCancel={() => previewItem && cancelDownload(previewItem)}
               onReveal={(path) => void invoke("reveal_in_folder", { path })}
               onClear={clearPreview}
               onCollapse={collapseDock}
@@ -1017,6 +1076,7 @@ interface TsukyioDockProps {
   // Shared ref the player registers its fullscreen function into (null = audio).
   fullscreenRef: React.MutableRefObject<(() => void) | null>;
   onDownload: () => void;
+  onCancel: () => void;
   onReveal: (path: string) => void;
   onClear: () => void;
   onCollapse: () => void;
@@ -1029,6 +1089,7 @@ function TsukyioDock({
   nonce,
   fullscreenRef,
   onDownload,
+  onCancel,
   onReveal,
   onClear,
   onCollapse,
@@ -1132,15 +1193,23 @@ function TsukyioDock({
                 <Folder size={14} />
                 <span>Reveal file</span>
               </button>
+            ) : downloading ? (
+              <button
+                type="button"
+                className="install-btn is-secondary tsukyio-dl-btn"
+                onClick={onCancel}
+              >
+                <X size={14} />
+                <span>Cancel {download?.percent ?? 0}%</span>
+              </button>
             ) : (
               <button
                 type="button"
                 className="install-btn tsukyio-dl-btn"
-                disabled={downloading}
                 onClick={onDownload}
               >
                 <Download size={14} />
-                <span>{downloading ? `${download?.percent ?? 0}%` : failed ? "Retry download" : "Download"}</span>
+                <span>{failed ? "Retry download" : "Download"}</span>
               </button>
             )}
           </div>
@@ -1210,6 +1279,7 @@ interface SearchResultsProps {
   onOpenFolder: (folder: SearchFolder) => void;
   onPreview: (item: TsukyioItem) => void;
   onDownload: (item: TsukyioItem) => void;
+  onCancel: (item: TsukyioItem) => void;
 }
 
 function SearchResults({
@@ -1221,6 +1291,7 @@ function SearchResults({
   onOpenFolder,
   onPreview,
   onDownload,
+  onCancel,
 }: SearchResultsProps) {
   return (
     <div className="tsukyio-sections">
@@ -1282,6 +1353,7 @@ function SearchResults({
                   active={activeId === item.id}
                   onPreview={() => onPreview(item)}
                   onDownload={() => onDownload(item)}
+                  onCancel={() => onCancel(item)}
                 />
               ))}
             </div>
@@ -1325,9 +1397,10 @@ interface ClipCardProps {
   active?: boolean;
   onPreview: () => void;
   onDownload: () => void;
+  onCancel: () => void;
 }
 
-function ClipCard({ item, download, active, onPreview, onDownload }: ClipCardProps) {
+function ClipCard({ item, download, active, onPreview, onDownload, onCancel }: ClipCardProps) {
   const thumb = usableThumbnail(item.thumbnail);
   const isAudio = item.type === "audio";
   const size = typeof item.size === "number" ? formatBytes(item.size) : "";
@@ -1384,18 +1457,29 @@ function ClipCard({ item, download, active, onPreview, onDownload }: ClipCardPro
             <Folder size={14} />
             <span>Reveal file</span>
           </button>
+        ) : downloading ? (
+          <button
+            type="button"
+            className="install-btn is-secondary tsukyio-dl-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCancel();
+            }}
+          >
+            <X size={14} />
+            <span>Cancel {download?.percent ?? 0}%</span>
+          </button>
         ) : (
           <button
             type="button"
             className="install-btn tsukyio-dl-btn"
-            disabled={downloading}
             onClick={(e) => {
               e.stopPropagation();
               onDownload();
             }}
           >
             <Download size={14} />
-            <span>{downloading ? `${download?.percent ?? 0}%` : failed ? "Retry download" : "Download"}</span>
+            <span>{failed ? "Retry download" : "Download"}</span>
           </button>
         )}
         {failed && <span className="tsukyio-dl-error" title={download?.message}>{download?.message}</span>}

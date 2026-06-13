@@ -1,6 +1,5 @@
-import React from "react";
-
 export type SectionId =
+  | "home"
   | "clip-hunting"
   | "downloader"
   | "tsukyio"
@@ -10,13 +9,6 @@ export type SectionId =
   | "bg-removal"
   | "logs"
   | "settings";
-
-export type NavItem = {
-  id: SectionId;
-  label: string;
-  short: string;
-  icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
-};
 
 export type AppThemeId = "cyan" | "mint" | "violet" | "rose" | "amber" | "custom";
 
@@ -31,8 +23,6 @@ export type AppConfig = {
   theme: AppThemeId;
   theme_color_a: string;
   theme_color_b: string;
-  /** Active engine (CSS) theme id — separate axis from the accent `theme`. */
-  ui_theme: string;
   background_image: string;
   background_scale: number;
   background_offset_x: number;
@@ -42,6 +32,9 @@ export type AppConfig = {
   background_video: string;
   background_video_source: string;
   background_video_fps: number;
+  /** "1"/"true" = flip workspace text dark for bright wallpapers. Stored as a
+   * string by set_config; parsed tolerantly in readBackgroundState. */
+  background_bright_text: string | boolean;
   audio_output_format: "wav" | "mp3";
   clip_hover_preview: boolean;
   tsukyio_api_key: string;
@@ -57,4 +50,7 @@ export type BackgroundState = {
   videoPath: string;
   videoSource: string;
   videoFps: number;
+  /** Dark workspace text for bright wallpapers (user-opted, suggested by the
+   * customizer's brightness sniff — never forced). */
+  brightText: boolean;
 };

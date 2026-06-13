@@ -821,6 +821,17 @@
   text-transform: uppercase;
 }
 
+/* Field eyebrows above form controls (BG remover model/format/hardware).
+   A class (not inline styles) so the has-app-bg legibility rules in
+   base.css §3 can reach them. */
+.conversion-field-label {
+  color: rgba(147, 161, 173, 0.82);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .conversion-hero h2 {
   margin: 7px 0 8px;
   max-width: 780px;
@@ -1061,6 +1072,17 @@
   align-self: start;
   border-left: 1px solid rgba(255, 255, 255, 0.07);
   padding: 0 0 28px 24px;
+}
+
+/* BG remover left column: stacked source/preview/tips cards. Carries the
+   wallpaper material (styles/material.css) — keep it ONE surface; don't
+   give the cards inside it their own backdrop filters. */
+.bgremove-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-self: start;
 }
 
 .conversion-icon {

@@ -5,7 +5,6 @@ import {
   AudioLines,
   Clapperboard,
   ChevronDown,
-  Compass,
   Download,
   Film,
   FolderKanban,
@@ -15,22 +14,22 @@ import {
   Library,
   MessageCircle,
   Music2,
+  PanelLeftClose,
+  PanelLeftOpen,
   ScrollText,
   Settings,
   Sparkles,
   Tv,
 } from "lucide-react";
-import { isAudioBusy, onAudioBusyChange } from "../lib/audioBusy";
 import { readBackgroundState } from "../lib/background";
 import { APP_THEMES, DEFAULT_BG_STATE } from "../lib/constants";
 import { setDiscordPanel } from "../lib/discord";
 import { logFrontend, safeLogValue } from "../lib/log";
 import { applyAppTheme, hasExplicitAccent, isHexColor, readThemeColors } from "../lib/theme";
 import { parseBridgePayload } from "../utils/bridge";
-import type { AppConfig, BackgroundState, NavItem, SectionId } from "../types/app";
+import type { AppConfig, BackgroundState, SectionId } from "../types/app";
 import type { DownloaderTab } from "../types/download";
 import { NewAudioExtractionPanel } from "../features/audio/NewAudioExtractionPanel";
-import { AudioExtractionPanel } from "../features/audio/AudioExtractionPanel";
 import { MediaToAudioPanel } from "../features/audio/MediaToAudioPanel";
 import { ClipExtractorPanel } from "../features/clips/ClipExtractorPanel";
 import { DownloaderPanel } from "../features/downloader/DownloaderPanel";
@@ -41,24 +40,114 @@ import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
+import { HomePanel } from "../features/home/HomePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
-import { useActiveTheme } from "../themes/engine/ThemeProvider";
 import { WindowChrome } from "./WindowChrome";
 
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
 const GITHUB_ISSUES_URL = "https://github.com/ElishaPervez/Ultimate-AMV/issues";
 
-const primaryItems: NavItem[] = [
-  { id: "audio-extraction", label: "Vocal Separation", short: "Vocals", icon: AudioLines },
-  { id: "clip-hunting", label: "Scene Splitter", short: "Splitter", icon: Compass },
-  { id: "downloader", label: "Downloader", short: "Download", icon: Download },
-  { id: "tsukyio", label: "Tsukyio Vault", short: "Vault", icon: Library },
-  { id: "bg-removal", label: "BG Remover", short: "Matting", icon: Sparkles },
-  { id: "audio-conversion", label: "Audio Conversion", short: "Audio", icon: Music2 },
-  { id: "video-conversion", label: "Video Conversion", short: "Video", icon: Film },
-];
+// localStorage key for the persisted sidebar collapsed state. Survives across
+// sessions so the user's compact-rail choice sticks.
+const SIDEBAR_COLLAPSED_KEY = "ui.sidebar.collapsed";
+
+function loadSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Ignore storage failures; the in-memory state still drives the UI.
+  }
+}
+
+type RailItem = {
+  id: SectionId;
+  label: string;
+  Icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
+};
+
+type RailEntry =
+  | { kind: "item"; item: RailItem }
+  | { kind: "divider" }
+  | { kind: "spacer" };
+
+// The collapsed sidebar is a FLAT icon rail: every destination is one click,
+// with the grouped hierarchy reserved for the expanded sidebar (a collapsed
+// group tree would force two clicks per navigation through flyouts). Order
+// mirrors the expanded nav: Home, the Media group, the Downloads group, then
+// Settings/Logs pinned to the bottom past a flexible spacer.
+const RAIL_ENTRIES: RailEntry[] = (() => {
+  const groups: RailItem[][] = [
+    [{ id: "home", label: "Home", Icon: Home }],
+    [
+      { id: "audio-extraction", label: "Vocal Separation", Icon: AudioLines },
+      { id: "clip-hunting", label: "Scene Splitter", Icon: Clapperboard },
+      { id: "bg-removal", label: "BG Remover", Icon: Sparkles },
+      { id: "audio-conversion", label: "Audio Conversion", Icon: Music2 },
+      { id: "video-conversion", label: "Video Conversion", Icon: Film },
+    ],
+    [
+      { id: "downloader", label: "Downloader", Icon: Tv },
+      { id: "tsukyio", label: "Tsukyio Vault", Icon: Library },
+    ],
+  ];
+  const footer: RailItem[] = [
+    { id: "settings", label: "Settings", Icon: Settings },
+    { id: "logs", label: "Logs", Icon: ScrollText },
+  ];
+  const entries: RailEntry[] = [];
+  groups.forEach((group, gi) => {
+    if (gi > 0) entries.push({ kind: "divider" });
+    group.forEach((item) => entries.push({ kind: "item", item }));
+  });
+  entries.push({ kind: "spacer" });
+  footer.forEach((item) => entries.push({ kind: "item", item }));
+  return entries;
+})();
+
+// One icon button of the collapsed rail. The label lives in a hover/focus
+// tooltip (the rail has no room for text); the stagger delay drives the
+// cascading slide-in when the rail mounts.
+function RailButton({
+  item,
+  delayMs,
+  active,
+  onSelect,
+}: {
+  item: RailItem;
+  delayMs: number;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`sidebar-rail-btn ${active ? "is-active" : ""}`}
+      style={{ animationDelay: `${delayMs}ms` }}
+      onClick={onSelect}
+      aria-label={item.label}
+    >
+      <item.Icon size={17} strokeWidth={2} />
+      <span className="sidebar-rail-tip" role="tooltip">
+        {item.label}
+      </span>
+    </button>
+  );
+}
 
 const panelMeta: Record<SectionId, { kicker: string; title: string; stats: string[] }> = {
+  home: {
+    kicker: "Start",
+    title: "Home",
+    stats: ["Overview", "Tools", "Shortcuts"],
+  },
   "clip-hunting": {
     kicker: "Splitter",
     title: "Scene Splitter",
@@ -107,8 +196,7 @@ const panelMeta: Record<SectionId, { kicker: string; title: string; stats: strin
 };
 
 export function App() {
-  const [expanded, setExpanded] = React.useState(true);
-  const [active, setActive] = React.useState<SectionId>("clip-hunting");
+  const [active, setActive] = React.useState<SectionId>("home");
   const [downloaderTab, setDownloaderTab] = React.useState<DownloaderTab>("anime");
   const [bgRemoveTab, setBgRemoveTab] = React.useState<"video" | "image">("video");
   const [bgState, setBgState] = React.useState<BackgroundState>(DEFAULT_BG_STATE);
@@ -119,51 +207,46 @@ export function App() {
   // SettingsPanel's refreshConfig would race the still-in-flight set_config
   // write and re-fetch the pre-change colors from disk.
   const [themeColors, setThemeColors] = React.useState(() => readThemeColors(null));
-  // Engine (CSS) theme — separate axis from the accent colors above. The
-  // sidebar Theme dropdown drives this; accent presets live in Settings ->
-  // Appearance.
-  const { themes: engineThemes, activeId: activeThemeId, switchTheme: switchEngineTheme, refresh: refreshEngineThemes } = useActiveTheme();
-  const [themePickerOpen, setThemePickerOpen] = React.useState(false);
-  const themePickerOpenRef = React.useRef(false);
-  React.useEffect(() => {
-    themePickerOpenRef.current = themePickerOpen;
-  }, [themePickerOpen]);
-  const themePickerRef = React.useRef<HTMLDivElement | null>(null);
-  const currentThemeName = React.useMemo(() => {
-    const match = engineThemes.find((t) => t.id === activeThemeId);
-    return match?.name ?? activeThemeId;
-  }, [engineThemes, activeThemeId]);
-  // Documented CSS-only-rule exception: the two flagship themes are genuinely
-  // "old UI vs new UI" — when "ultimate-amv-old" is active we render the legacy
-  // AudioExtractionPanel; every other theme uses NewAudioExtractionPanel. This
-  // is the ONLY component branch keyed on the engine theme.
-  //
-  // The CSS swap is instant on theme change, but the audio *component* swap is
-  // DEFERRED while a vocal-separation extraction is in flight: unmounting the
-  // running panel would tear down its audio-progress listener and orphan the
-  // job. We hold the committed choice until the panel reports idle, then catch
-  // up to the active theme. The audio screen itself doesn't have to be visible
-  // for an extraction to be running, so this guard is theme- not nav-scoped.
-  const desiredLegacyAudioPanel = activeThemeId === "ultimate-amv-old";
-  const [useLegacyAudioPanel, setUseLegacyAudioPanel] = React.useState(desiredLegacyAudioPanel);
-  React.useEffect(() => {
-    if (!isAudioBusy()) {
-      // Idle: follow the theme immediately.
-      setUseLegacyAudioPanel(desiredLegacyAudioPanel);
-      return;
-    }
-    // Busy: hold the current panel and commit the pending choice when the
-    // in-flight extraction reports done.
-    const off = onAudioBusyChange((busy) => {
-      if (!busy) setUseLegacyAudioPanel(desiredLegacyAudioPanel);
-    });
-    return off;
-  }, [desiredLegacyAudioPanel]);
   const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({
     media: true,
     downloads: false,
   });
+  // Whether the sidebar is collapsed to the compact icon rail. Persisted so
+  // it sticks across sessions.
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(loadSidebarCollapsed);
+  const toggleSidebar = React.useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      saveSidebarCollapsed(next);
+      return next;
+    });
+  }, []);
+  // When EXPANDING, pre-open the group that owns the active section so the
+  // highlighted item is visible instead of hidden behind a collapsed group
+  // (rail navigation can land anywhere without touching openGroups).
+  React.useEffect(() => {
+    if (sidebarCollapsed) return;
+    if (active === "downloader" || active === "tsukyio") {
+      setOpenGroups((g) => (g.downloads ? g : { ...g, downloads: true }));
+    } else if (active !== "settings" && active !== "logs" && active !== "home") {
+      setOpenGroups((g) => (g.media ? g : { ...g, media: true }));
+    }
+    // Only when the collapsed state flips, not on every navigation — keeping
+    // groups closed while browsing the expanded sidebar stays the user's call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarCollapsed]);
+  // Home-card jumps also expand the sidebar group containing the target, so
+  // the active subitem is visible instead of hidden behind a collapsed group.
+  const handleHomeNavigate = React.useCallback((id: SectionId) => {
+    setActive(id);
+    if (id === "downloader" || id === "tsukyio") {
+      setOpenGroups((g) => ({ ...g, downloads: true }));
+    } else if (id !== "settings" && id !== "logs" && id !== "home") {
+      setOpenGroups((g) => ({ ...g, media: true }));
+    }
+  }, []);
   const activeMeta = panelMeta[active];
+  const isHome = active === "home";
   const isAudioExtraction = active === "audio-extraction";
   const isClipHunting = active === "clip-hunting";
   const isDownloader = active === "downloader";
@@ -179,12 +262,10 @@ export function App() {
     const root = document.documentElement;
     const hasBg = Boolean(liveBg.videoPath) || Boolean(liveBg.imagePath);
     root.classList.toggle("has-app-bg", hasBg);
-    if (hasBg) {
-      root.style.setProperty("--app-bg-blur", `${Math.max(0, liveBg.blur)}px`);
-    } else {
-      root.style.removeProperty("--app-bg-blur");
-    }
-  }, [liveBg.imagePath, liveBg.videoPath, liveBg.blur]);
+    // Dark workspace ink for bright wallpapers (styles/bright-ink.css). Only
+    // meaningful while a wallpaper is actually set.
+    root.classList.toggle("bright-ink", hasBg && liveBg.brightText);
+  }, [liveBg.imagePath, liveBg.videoPath, liveBg.brightText]);
 
   React.useEffect(() => {
     setDiscordPanel(activeMeta?.title ?? "Idle");
@@ -201,12 +282,11 @@ export function App() {
         const payload = parseBridgePayload<AppConfig>(raw);
         const colors = readThemeColors(payload);
         setThemeColors(colors);
-        // The accent color is an orthogonal sub-axis applied on top of whichever
-        // engine theme is active. Only push the inline `:root` override when the
-        // user has DELIBERATELY picked an accent (preset or custom) through
-        // Settings -> Appearance — inline styles beat any cascade layer, so on a
-        // fresh/legacy config we leave them off and let the active engine theme's
-        // own accent (defined in its theme.css `theme` layer) show.
+        // The accent color is a sub-axis applied on top of the app's look. Only
+        // push the inline `:root` override when the user has DELIBERATELY picked
+        // an accent (preset or custom) through Settings -> Appearance — inline
+        // styles beat any cascade layer, so on a fresh/legacy config we leave
+        // them off and let the theme stylesheet's own accent show.
         if (hasExplicitAccent(payload)) {
           applyAppTheme(colors);
         }
@@ -236,51 +316,9 @@ export function App() {
     };
   }, []);
 
-  React.useEffect(() => {
-    if (!themePickerOpen) return;
-    const handler = (event: MouseEvent) => {
-      if (themePickerRef.current && !themePickerRef.current.contains(event.target as Node)) {
-        setThemePickerOpen(false);
-      }
-    };
-    const escapeHandler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setThemePickerOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", escapeHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", escapeHandler);
-    };
-  }, [themePickerOpen]);
-
-  const handleToggleThemePicker = React.useCallback(() => {
-    setThemePickerOpen((prev) => {
-      const next = !prev;
-      if (next) {
-        // Re-scan disk on open so external drop-in themes added while the app is
-        // running show up without a restart. Fire-and-forget: refresh() swallows
-        // scan errors and never disturbs the current selection; the guard drops
-        // the result if the picker was closed again before the scan resolved.
-        void refreshEngineThemes(() => themePickerOpenRef.current);
-      }
-      return next;
-    });
-  }, [refreshEngineThemes]);
-
-  const handleSelectEngineTheme = React.useCallback(
-    (id: string) => {
-      setThemePickerOpen(false);
-      // Engine (CSS) theme and accent color are orthogonal axes: switching the
-      // engine theme must not touch the accent. An explicit custom accent
-      // persists across themes (and still wins over the theme); if the user
-      // never set one, each theme's own `theme.css` accent shows through.
-      void switchEngineTheme(id);
-    },
-    [switchEngineTheme],
-  );
-
-  const modeTabs = isAudioExtraction
+  const modeTabs = isHome
+    ? ([{ id: "home", label: "Home" }] as const)
+    : isAudioExtraction
     ? ([{ id: "extract", label: "Extract" }] as const)
     : isBgRemoval
       ? ([
@@ -328,19 +366,66 @@ export function App() {
           }}
         />
       )}
-      <section className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
-        <aside className="sidebar" aria-label="Primary navigation">
-          {/* Brand */}
+      <section className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
+        <aside
+          className={`sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}
+          aria-label="Primary navigation"
+        >
+          {/* Brand + collapse toggle. The toggle leads the row, pinned to the
+              LEFT edge with identical geometry in both states — the left edge
+              is the only part of the sidebar that doesn't move during the
+              width animation, so the button stays under the cursor and can be
+              clicked repeatedly without re-aiming. */}
           <div className="sidebar-brand">
-            <span className="sidebar-brand-text">Ultimate AMV</span>
-            <span className="sidebar-brand-badge">v0.12</span>
+            <button
+              type="button"
+              className="sidebar-collapse-btn"
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!sidebarCollapsed}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            </button>
+            {!sidebarCollapsed && (
+              <>
+                <span className="sidebar-brand-text">Ultimate AMV</span>
+                <span className="sidebar-brand-badge">{`v${__APP_VERSION__}`}</span>
+              </>
+            )}
           </div>
 
+          {sidebarCollapsed ? (
+            /* Compact icon rail: flat one-click nav, labels in tooltips. */
+            <nav className="sidebar-rail" aria-label="Primary navigation (compact)">
+              {RAIL_ENTRIES.map((entry, i) =>
+                entry.kind === "divider" ? (
+                  <span
+                    key={`divider-${i}`}
+                    className="sidebar-rail-divider"
+                    aria-hidden="true"
+                    style={{ animationDelay: `${i * 16}ms` }}
+                  />
+                ) : entry.kind === "spacer" ? (
+                  <span key="spacer" className="sidebar-rail-spacer" aria-hidden="true" />
+                ) : (
+                  <RailButton
+                    key={entry.item.id}
+                    item={entry.item}
+                    delayMs={i * 16}
+                    active={active === entry.item.id}
+                    onSelect={() => setActive(entry.item.id)}
+                  />
+                ),
+              )}
+            </nav>
+          ) : (
+            <>
           {/* Home */}
           <button
             type="button"
-            className={`sidebar-home ${active === "clip-hunting" ? "is-active" : ""}`}
-            onClick={() => setActive("clip-hunting")}
+            className={`sidebar-home ${active === "home" ? "is-active" : ""}`}
+            onClick={() => setActive("home")}
           >
             <Home size={18} strokeWidth={2} />
             <span>Home</span>
@@ -360,7 +445,7 @@ export function App() {
               <span>Media</span>
               <ChevronDown size={14} className={`sidebar-chevron ${openGroups.media ? "is-open" : ""}`} />
             </button>
-            {openGroups.media && (
+            <div className={`sidebar-subnav-wrap ${openGroups.media ? "is-open" : ""}`}>
               <div className="sidebar-subnav">
                 <button
                   type="button"
@@ -403,7 +488,7 @@ export function App() {
                   <span>Video Conversion</span>
                 </button>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Downloads Group */}
@@ -417,7 +502,7 @@ export function App() {
               <span>Downloads</span>
               <ChevronDown size={14} className={`sidebar-chevron ${openGroups.downloads ? "is-open" : ""}`} />
             </button>
-            {openGroups.downloads && (
+            <div className={`sidebar-subnav-wrap ${openGroups.downloads ? "is-open" : ""}`}>
               <div className="sidebar-subnav">
                 <button
                   type="button"
@@ -436,7 +521,7 @@ export function App() {
                   <span>Tsukyio Vault</span>
                 </button>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Footer */}
@@ -460,42 +545,9 @@ export function App() {
               </button>
             </div>
 
-            <div className="sidebar-theme-row" ref={themePickerRef}>
-              <span className="sidebar-theme-label">Theme</span>
-              <button
-                type="button"
-                className="sidebar-theme-select"
-                onClick={handleToggleThemePicker}
-              >
-                <span className="sidebar-theme-dot" />
-                <span className="sidebar-theme-name">{currentThemeName}</span>
-                <ChevronDown size={12} className={`sidebar-theme-chevron ${themePickerOpen ? "is-open" : ""}`} />
-              </button>
-              {themePickerOpen && (
-                <div className="sidebar-theme-dropdown">
-                  {engineThemes.map((theme) => (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      className={`sidebar-theme-option ${theme.id === activeThemeId ? "is-active" : ""}`}
-                      onClick={() => handleSelectEngineTheme(theme.id)}
-                      title={theme.description ?? theme.name}
-                    >
-                      <span
-                        className="sidebar-theme-swatch"
-                        style={{ background: "var(--accent-gradient)" }}
-                      />
-                      <span className="sidebar-theme-name-text">{theme.name}</span>
-                      {!theme.builtin && <span className="sidebar-theme-tag">drop-in</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
             <div className="sidebar-help-card">
               <div className="sidebar-help-title">Need help?</div>
-              <div className="sidebar-help-text">24/7 assistance available</div>
+              <div className="sidebar-help-text">Get support or report a bug</div>
               <div className="sidebar-help-actions">
                 <button
                   type="button"
@@ -528,12 +580,11 @@ export function App() {
               </div>
             </div>
           </div>
+            </>
+          )}
         </aside>
 
         <section className="workspace">
-          <div className="workspace-header">
-            <h1>{activeMeta.title}</h1>
-          </div>
           <div className="canvas">
             <div className="canvas-grid" aria-hidden="true" />
             <div className="focus-panel glass">
@@ -579,20 +630,24 @@ export function App() {
                   <ClipExtractorPanel active={isClipHunting} />
                 </div>
                 <div className={`panel-view spring-motion ${isDownloader ? "is-active" : "is-hidden"}`} aria-hidden={!isDownloader}>
-                  <DownloaderPanel active={isDownloader} activeTab={downloaderTab} sidebarExpanded={expanded} />
+                  <DownloaderPanel active={isDownloader} activeTab={downloaderTab} />
                 </div>
                 <div className={`panel-view spring-motion ${isAudioExtraction ? "is-active" : "is-hidden"}`} aria-hidden={!isAudioExtraction}>
-                  {useLegacyAudioPanel ? <AudioExtractionPanel /> : <NewAudioExtractionPanel />}
+                  <NewAudioExtractionPanel />
                 </div>
                 <div className={`panel-view spring-motion ${isBgRemoval ? "is-active" : "is-hidden"}`} aria-hidden={!isBgRemoval}>
-                  <BgRemovePanel activeTab={bgRemoveTab} />
+                  {/* Both isolate tabs stay mounted so switching tabs never
+                      discards an in-flight job or generated preview. */}
+                  <BgRemovePanel mode="video" active={isBgRemoval && bgRemoveTab === "video"} onRequestTab={setBgRemoveTab} />
+                  <BgRemovePanel mode="image" active={isBgRemoval && bgRemoveTab === "image"} onRequestTab={setBgRemoveTab} />
                 </div>
                 <div className={`panel-view spring-motion ${isTsukyio ? "is-active" : "is-hidden"}`} aria-hidden={!isTsukyio}>
                   <TsukyioPanel active={isTsukyio} onOpenSettings={() => setActive("settings")} />
                 </div>
                 {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && (
                   <div className="panel-view is-active spring-motion">
-                    {isAudioConversion ? <MediaToAudioPanel />
+                    {isHome ? <HomePanel onNavigate={handleHomeNavigate} />
+                      : isAudioConversion ? <MediaToAudioPanel />
                       : isVideoConversion ? <VideoToVideoPanel />
                         : isLogs ? <LogsPanel />
                           : isSettings ? <SettingsPanel themeColors={themeColors} />

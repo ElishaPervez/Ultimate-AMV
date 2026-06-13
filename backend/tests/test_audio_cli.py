@@ -26,8 +26,10 @@ class TestSetConfig(unittest.TestCase):
             "background_video": "",
             "background_video_source": "",
             "background_video_fps": 30,
+            "background_bright_text": False,
             "audio_output_format": "wav",
             "clip_hover_preview": False,
+            "tsukyio_api_key": "",
         }
         payload.update(overrides)
         mock_emit.assert_called_once_with(payload)

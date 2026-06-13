@@ -5,13 +5,22 @@ reference/
 # document the vault API — reference only. MUST NOT be committed to the public repo.
 Tsukyio-AE-Extension-development/
 
-# Local agent/editor state.
+# Local agent/editor state. docs/agent/ holds the workflow rules split
+# out of CLAUDE.md — same privacy as CLAUDE.md itself, keep local-only.
 .claude/
 .vscode/
 .idea/
 .codex
+.antigravitycli/
 CLAUDE.md
 AGENTS.md
+docs/agent/
+# Agent notes doc — same privacy as CLAUDE.md, keep local-only.
+docs/CLAUDE-NOTES.md
+# Project-manager tool sidecar metadata. Local-only.
+.pm.json
+# Local LLM scratch dump. Not part of the project.
+llm_1000_lines.txt
 
 # OS files.
 .DS_Store
@@ -58,6 +67,8 @@ src-tauri/target/
 src-tauri/gen/
 
 # App-generated media and model artifacts.
+cache/
+extra/
 downloads/
 output/
 outputs/
@@ -103,4 +114,6 @@ graphify-out/
 experiments/*.png
 experiments/*.jpg
 experiments/*.jpeg
+experiments/*.webp
 experiments/debug_*/
+experiments/_scratch_*/

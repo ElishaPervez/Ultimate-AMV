@@ -1,0 +1,131 @@
+/* ============================================================
+   HOME / LANDING PANEL
+   ------------------------------------------------------------
+   Full-canvas landing page: hero on top, then a tile grid that
+   stretches to fill the remaining workspace height. The hero IS the
+   page title (panels have no generic title header).
+   ============================================================ */
+
+.home-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  height: 100%;
+  min-height: 0;
+  padding: 34px 36px 28px;
+  overflow-y: auto;
+}
+
+.home-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.home-hero-title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 750;
+  letter-spacing: -0.015em;
+  color: #ffffff;
+}
+
+.home-hero-sub {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #9ca3af;
+  max-width: 70ch;
+}
+
+.home-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-auto-rows: minmax(190px, 1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.home-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 20px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.home-card:hover {
+  border-color: rgb(var(--theme-accent-rgb) / 0.45);
+  background: rgb(var(--theme-accent-rgb) / 0.06);
+  transform: translateY(-2px);
+}
+
+.home-card-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.home-card-icon {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgb(var(--theme-accent-rgb) / 0.12);
+  color: rgb(var(--theme-accent-rgb));
+}
+
+.home-card-group {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #6b7280;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.home-card-title {
+  margin-top: 4px;
+  font-size: 15.5px;
+  font-weight: 650;
+  color: #e9ecef;
+}
+
+.home-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #9ca3af;
+}
+
+.home-card-open {
+  margin-top: auto;
+  padding-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgb(var(--theme-accent-rgb));
+  opacity: 0.55;
+  transition: opacity 160ms ease, gap 160ms ease;
+}
+
+.home-card:hover .home-card-open {
+  opacity: 1;
+  gap: 9px;
+}

@@ -75,6 +75,7 @@ BACKGROUND_DEFAULTS = {
     "background_video": "",
     "background_video_source": "",
     "background_video_fps": 30,
+    "background_bright_text": False,
 }
 
 
@@ -90,7 +91,6 @@ def _config_payload(cfg):
         "theme": cfg.get("theme", "cyan"),
         "theme_color_a": cfg.get("theme_color_a", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[0]),
         "theme_color_b": cfg.get("theme_color_b", THEME_PRESETS.get(cfg.get("theme", "cyan"), THEME_PRESETS["cyan"])[1]),
-        "ui_theme": cfg.get("ui_theme", "ultimate-amv"),
         "background_image": cfg.get("background_image", BACKGROUND_DEFAULTS["background_image"]),
         "background_scale": float(cfg.get("background_scale", BACKGROUND_DEFAULTS["background_scale"])),
         "background_offset_x": float(cfg.get("background_offset_x", BACKGROUND_DEFAULTS["background_offset_x"])),
@@ -100,6 +100,7 @@ def _config_payload(cfg):
         "background_video": cfg.get("background_video", BACKGROUND_DEFAULTS["background_video"]),
         "background_video_source": cfg.get("background_video_source", BACKGROUND_DEFAULTS["background_video_source"]),
         "background_video_fps": int(cfg.get("background_video_fps", BACKGROUND_DEFAULTS["background_video_fps"])),
+        "background_bright_text": bool(cfg.get("background_bright_text", BACKGROUND_DEFAULTS["background_bright_text"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
@@ -184,22 +185,6 @@ def set_config(key, value):
             return 1
         cfg[key] = value.lower()
         cfg["theme"] = "custom"
-    elif key == "ui_theme":
-        # Engine (CSS) theme id. Separate axis from the accent `theme` above.
-        # Keep it a simple folder-name-safe token; the actual existence check
-        # happens in the frontend/Rust theme loader, which falls back to the
-        # default when a persisted id no longer exists on disk.
-        normalized = (value or "").strip()
-        if (
-            not normalized
-            or len(normalized) > 128
-            or "/" in normalized
-            or "\\" in normalized
-            or "\0" in normalized
-        ):
-            emit({"type": "error", "message": "ui_theme must be a non-empty theme id"})
-            return 1
-        cfg["ui_theme"] = normalized
     elif key == "background_image":
         cfg["background_image"] = value
     elif key in {"background_scale", "background_offset_x", "background_offset_y"}:
@@ -233,6 +218,8 @@ def set_config(key, value):
             emit({"type": "error", "message": "background_video_fps must be an integer"})
             return 1
         cfg["background_video_fps"] = max(15, min(60, number))
+    elif key == "background_bright_text":
+        cfg["background_bright_text"] = value.strip().lower() in {"1", "true"}
     elif key == "audio_output_format":
         normalized = (value or "").strip().lower()
         if normalized not in {"wav", "mp3"}:

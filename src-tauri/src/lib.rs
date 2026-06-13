@@ -11,11 +11,11 @@ mod clips;
 mod config;
 mod discord;
 mod downloads;
+mod eyedropper;
 mod logging;
 mod preview;
 mod python_env;
 mod sniffer;
-mod themes;
 mod tools;
 mod tsukyio;
 mod video_cmds;
@@ -100,8 +100,14 @@ fn reveal_in_folder(#[allow(unused_variables)] app: tauri::AppHandle, path: Stri
     let result: Result<(), String> = {
         #[cfg(target_os = "windows")]
         {
+            use std::os::windows::process::CommandExt;
+            // raw_arg: Command::arg would quote the whole thing when the path
+            // has spaces (`"/select,C:\..."`), which explorer can't parse — it
+            // silently opens Documents instead. Explorer also rejects forward
+            // slashes in the /select target.
+            let native = path.replace('/', "\\");
             cmd("explorer")
-                .arg(format!("/select,{}", path))
+                .raw_arg(format!("/select,\"{}\"", native))
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -406,8 +412,6 @@ pub fn run() {
             clips::scene_clip_render,
             config::get_config,
             config::set_config,
-            themes::list_themes,
-            themes::read_theme_css,
             background_img::save_background_image,
             background_img::clear_background_image,
             wallpaper::wallpaper_transcode,
@@ -445,9 +449,11 @@ pub fn run() {
             tsukyio::tsukyio_search,
             tsukyio::tsukyio_deep_search,
             tsukyio::tsukyio_download,
+            tsukyio::tsukyio_cancel_download,
             tsukyio::tsukyio_set_session_key,
             discord_set_state,
             discord_clear,
+            eyedropper::sample_screen_color,
             write_file
         ])
         .run(tauri::generate_context!())

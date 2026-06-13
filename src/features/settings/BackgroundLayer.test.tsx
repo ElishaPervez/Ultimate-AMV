@@ -18,6 +18,7 @@ const emptyState: BackgroundState = {
   videoPath: '',
   videoSource: '',
   videoFps: 30,
+  brightText: false,
 }
 
 const withImageState: BackgroundState = {
@@ -30,6 +31,7 @@ const withImageState: BackgroundState = {
   videoPath: '',
   videoSource: '',
   videoFps: 30,
+  brightText: false,
 }
 
 describe('BackgroundLayer', () => {
