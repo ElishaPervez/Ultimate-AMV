@@ -1510,8 +1510,8 @@ fn generate_source_proxy(
     let encoder_decision = if use_nvenc { "nvenc" } else { "x264" };
 
     // Cache key folds in the resolution target + encoder decision + protocol
-    // version. Bump "source-proxy-v4" to invalidate every cached proxy.
-    let proxy_key = short_stable_id(&[&source_key, "240p", encoder_decision, "source-proxy-v4"]);
+    // version. Bump "source-proxy-v3" to invalidate every cached proxy.
+    let proxy_key = short_stable_id(&[&source_key, "240p", encoder_decision, "source-proxy-v3"]);
     let output = cache_dir.join(format!("{proxy_key}.mp4"));
 
     // >1024-byte cache hit short-circuit (matches every other app cache).
@@ -1524,18 +1524,6 @@ fn generate_source_proxy(
     }
 
     let duration = probe_duration(&ffprobe, &input).unwrap_or(0.0);
-
-    // Decide whether the source codec is GPU-decodable so we can engage the
-    // full-VRAM cuda pipeline (Tier 1). Only h264/hevc/av1 are reliably NVDEC
-    // decodable here; everything else (vp9 profiles, exotic codecs, mpeg2,
-    // etc.) routes through the sw-decode nvenc rung. A probe failure (no
-    // ffprobe / unreadable stream) conservatively disables the cuda tier.
-    let codec = if ensure_tool(&ffprobe).is_ok() {
-        crate::video_cmds::probe_video_codec(&ffprobe, &input).ok()
-    } else {
-        None
-    };
-    let gpu_decodable = matches!(codec.as_deref(), Some("h264" | "hevc" | "av1"));
 
     // Atomic write: encode to a per-process tmp file, then rename into place so
     // a concurrent reader never sees a half-written proxy.
@@ -1551,71 +1539,38 @@ fn generate_source_proxy(
         None,
     );
 
-    // 3-tier dispatch. The cuda pipeline (Tier 1) decodes + scales + uploads
-    // entirely in VRAM; the sw-decode nvenc rung (Tier 2) is the previous
-    // behavior for exotic codecs; libx264 (Tier 3) is the universal floor that
-    // needs zero GPU and keeps the feature ungated per the CPU/GPU parity rule.
-    // A user cancel (PID kill) must NOT fall through tiers — it surfaces as a
-    // cancellation, not an encoder failure, so short-circuit on it everywhere.
-    let tiers: &[ProxyTier] = match (use_nvenc, gpu_decodable) {
-        (true, true) => &[ProxyTier::GpuCuda, ProxyTier::NvencSwDecode, ProxyTier::Libx264],
-        (true, false) => &[ProxyTier::NvencSwDecode, ProxyTier::Libx264],
-        (false, _) => &[ProxyTier::Libx264],
-    };
+    let primary = run_source_proxy_job(
+        &window, &ffmpeg, &input, &tmp_output, duration, &source_path, use_nvenc, &color,
+    );
 
-    let mut last_error: Option<String> = None;
-    for (idx, tier) in tiers.iter().enumerate() {
-        // Each tier writes to the SAME tmp_output; clear any partial bytes the
-        // previous failed tier left behind before trying the next one.
-        let _ = fs::remove_file(&tmp_output);
-        match run_source_proxy_job(
-            &window, &ffmpeg, &input, &tmp_output, duration, &source_path, *tier, &color,
-        ) {
-            Ok(()) => {
-                last_error = None;
-                break;
-            }
-            Err(error) => {
-                if error.contains("cancelled") {
-                    let _ = fs::remove_file(&tmp_output);
-                    return Err(error);
-                }
-                let next = tiers.get(idx + 1);
-                if let Some(next_tier) = next {
-                    log_warn(
-                        "clip.source_proxy.fallback",
-                        "Source proxy tier failed; falling back",
-                        json!({
-                            "failed_tier": format!("{tier:?}"),
-                            "next_tier": format!("{next_tier:?}"),
-                            "error": &error,
-                        }),
-                    );
-                }
-                last_error = Some(error);
-            }
+    if let Err(error) = primary {
+        // NVENC can refuse exotic sources where libx264 still succeeds; mirror
+        // generate_scene_clip's fallback. A user cancel (PID kill) must NOT be
+        // retried — it surfaces as a cancellation, not an encoder failure.
+        if error.contains("cancelled") {
+            let _ = fs::remove_file(&tmp_output);
+            return Err(error);
         }
-    }
-
-    if let Some(error) = last_error {
-        let _ = fs::remove_file(&tmp_output);
-        return Err(error);
+        if use_nvenc {
+            log_warn(
+                "clip.source_proxy.fallback",
+                "NVENC proxy build failed; retrying with libx264",
+                json!({ "error": &error }),
+            );
+            let _ = fs::remove_file(&tmp_output);
+            run_source_proxy_job(
+                &window, &ffmpeg, &input, &tmp_output, duration, &source_path, false, &color,
+            )?;
+        } else {
+            let _ = fs::remove_file(&tmp_output);
+            return Err(error);
+        }
     }
 
     fs::rename(&tmp_output, &output)
         .map_err(|error| format!("Could not finalize source proxy: {error}"))?;
 
     Ok(output.to_string_lossy().to_string())
-}
-
-// Which ffmpeg argument shape run_source_proxy_job emits. Tier 1 is the fast
-// full-VRAM cuda pipeline; Tier 2 is sw-decode -> nvenc for codecs NVDEC can't
-// decode; Tier 3 is the universal libx264 software floor (zero GPU).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProxyTier {
-    GpuCuda,
-    NvencSwDecode,
-    Libx264,
 }
 
 fn run_source_proxy_job(
@@ -1625,40 +1580,18 @@ fn run_source_proxy_job(
     output: &Path,
     duration: f64,
     source_path: &str,
-    tier: ProxyTier,
+    use_nvenc: bool,
     color: &ColorMetadata,
 ) -> Result<(), String> {
     // Whole-file transcode (NO -ss) so the proxy timeline matches the source
-    // 1:1. The decode prefix + -vf + encoder block all differ per tier; the
-    // tail (audio, mux flags, progress) is shared below.
+    // 1:1. -hwaccel auto = universal HW decode (NVDEC/QSV/D3D11VA/software),
+    // not NVIDIA-gated, degrading cleanly per the CPU/GPU parity rule.
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
-    ];
-
-    // Decode prefix.
-    match tier {
-        ProxyTier::GpuCuda => {
-            // Full-VRAM pipeline: NVDEC keeps decoded frames as cuda hwframes
-            // (-hwaccel_output_format cuda) so scale_cuda runs on the GPU with
-            // no download/re-upload round-trip. -hwaccel auto silently picked
-            // dxva2 here, which copies every frame to RAM and scales on the CPU.
-            args.extend([
-                "-hwaccel".to_string(),
-                "cuda".to_string(),
-                "-hwaccel_output_format".to_string(),
-                "cuda".to_string(),
-            ]);
-        }
-        ProxyTier::NvencSwDecode | ProxyTier::Libx264 => {
-            // -hwaccel auto = universal HW decode (NVDEC/QSV/D3D11VA/software),
-            // not NVIDIA-gated, degrading cleanly per the CPU/GPU parity rule.
-            args.extend(["-hwaccel".to_string(), "auto".to_string()]);
-        }
-    }
-
-    args.extend([
+        "-hwaccel".to_string(),
+        "auto".to_string(),
         "-i".to_string(),
         input.to_string_lossy().to_string(),
         // Optional audio: silent sources skip the audio stream without failing.
@@ -1666,105 +1599,56 @@ fn run_source_proxy_job(
         "0:v:0".to_string(),
         "-map".to_string(),
         "0:a:0?".to_string(),
-    ]);
+        // 240p cap (never upscale via the min() guard). setparams chained on so
+        // the proxy carries the same color tags as the export (scale preserves
+        // color; setparams only labels). Single quotes keep the inner comma an
+        // expression arg, not a filter-chain separator.
+        "-vf".to_string(),
+        format!("scale=-2:'min(240,ih)',{}", setparams_filter(color)),
+    ];
 
-    // Video filter. 240p cap (never upscale via the min() guard). setparams
-    // carries the export's color tags onto the proxy (scale preserves color;
-    // setparams only labels). Single quotes keep the inner comma an expression
-    // arg, not a filter-chain separator.
-    let vf = match tier {
-        ProxyTier::GpuCuda => {
-            // CRITICAL: setparams MUST be prepended BEFORE scale_cuda. It runs
-            // on the CPU AVFrame before the GPU upload and stamps the color VUI.
-            // Dropping it and relying on the output -color_* flags alone
-            // HARD-FAILS (exit 127, "Impossible to convert ... cuda -> auto_scale")
-            // on any source with unknown/unspecified color VUI — the common
-            // untagged-anime case this app defaults to bt709. With the VUI
-            // stamped, ffmpeg won't try to insert an impossible CPU auto_scale
-            // on a cuda hwframe. Do NOT "optimize" setparams away.
-            format!(
-                "{},scale_cuda=-2:'min(240,ih)':format=yuv420p",
-                setparams_filter(color)
-            )
-        }
-        ProxyTier::NvencSwDecode | ProxyTier::Libx264 => {
-            format!("scale=-2:'min(240,ih)',{}", setparams_filter(color))
-        }
-    };
-    args.extend(["-vf".to_string(), vf]);
-
-    // Encoder block.
-    match tier {
-        ProxyTier::GpuCuda => {
-            // Same h264_nvenc flags as the sw-decode rung, but WITHOUT
-            // -pix_fmt yuv420p: scale_cuda's format=yuv420p already sets the
-            // output format, and a stray -pix_fmt forces an auto_scale
-            // conversion of a cuda hwframe, which breaks the pipeline.
-            // Short fixed GOP, no scene-cut, forced IDR, no B-frames so every
-            // currentTime seek lands cleanly near a keyframe for tight offset loops.
-            args.extend([
-                "-c:v".to_string(),
-                "h264_nvenc".to_string(),
-                "-preset".to_string(),
-                "p4".to_string(),
-                "-rc".to_string(),
-                "vbr".to_string(),
-                "-cq".to_string(),
-                "30".to_string(),
-                "-g".to_string(),
-                "12".to_string(),
-                "-no-scenecut".to_string(),
-                "1".to_string(),
-                "-forced-idr".to_string(),
-                "1".to_string(),
-                "-bf".to_string(),
-                "0".to_string(),
-            ]);
-        }
-        ProxyTier::NvencSwDecode => {
-            // Short fixed GOP, no scene-cut, forced IDR, no B-frames so every
-            // currentTime seek lands cleanly near a keyframe for tight offset loops.
-            args.extend([
-                "-c:v".to_string(),
-                "h264_nvenc".to_string(),
-                "-preset".to_string(),
-                "p4".to_string(),
-                "-rc".to_string(),
-                "vbr".to_string(),
-                "-cq".to_string(),
-                "30".to_string(),
-                "-g".to_string(),
-                "12".to_string(),
-                "-no-scenecut".to_string(),
-                "1".to_string(),
-                "-forced-idr".to_string(),
-                "1".to_string(),
-                "-bf".to_string(),
-                "0".to_string(),
-                "-pix_fmt".to_string(),
-                "yuv420p".to_string(),
-            ]);
-        }
-        ProxyTier::Libx264 => {
-            args.extend([
-                "-c:v".to_string(),
-                "libx264".to_string(),
-                "-preset".to_string(),
-                "veryfast".to_string(),
-                "-crf".to_string(),
-                "30".to_string(),
-                "-g".to_string(),
-                "12".to_string(),
-                "-keyint_min".to_string(),
-                "12".to_string(),
-                "-sc_threshold".to_string(),
-                "0".to_string(),
-                "-bf".to_string(),
-                "0".to_string(),
-                "-pix_fmt".to_string(),
-                "yuv420p".to_string(),
-            ]);
-        }
+    if use_nvenc {
+        // Short fixed GOP, no scene-cut, forced IDR, no B-frames so every
+        // currentTime seek lands cleanly near a keyframe for tight offset loops.
+        args.extend([
+            "-c:v".to_string(),
+            "h264_nvenc".to_string(),
+            "-preset".to_string(),
+            "p4".to_string(),
+            "-rc".to_string(),
+            "vbr".to_string(),
+            "-cq".to_string(),
+            "30".to_string(),
+            "-g".to_string(),
+            "12".to_string(),
+            "-no-scenecut".to_string(),
+            "1".to_string(),
+            "-forced-idr".to_string(),
+            "1".to_string(),
+            "-bf".to_string(),
+            "0".to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "veryfast".to_string(),
+            "-crf".to_string(),
+            "30".to_string(),
+            "-g".to_string(),
+            "12".to_string(),
+            "-keyint_min".to_string(),
+            "12".to_string(),
+            "-sc_threshold".to_string(),
+            "0".to_string(),
+            "-bf".to_string(),
+            "0".to_string(),
+            "-pix_fmt".to_string(),
+            "yuv420p".to_string(),
+        ]);
     }
 
     // Output-side color tags matching the in-graph setparams above.
@@ -1795,9 +1679,10 @@ fn run_source_proxy_job(
         json!({ "sourcePath": source_path, "percent": 0.0, "stage": "starting" }),
     );
 
-    let label = match tier {
-        ProxyTier::GpuCuda | ProxyTier::NvencSwDecode => "Building preview proxy",
-        ProxyTier::Libx264 => "Building preview proxy (libx264)",
+    let label = if use_nvenc {
+        "Building preview proxy"
+    } else {
+        "Building preview proxy (libx264)"
     };
     let result = crate::video_cmds::run_ffmpeg_with_progress_tap(
         window,

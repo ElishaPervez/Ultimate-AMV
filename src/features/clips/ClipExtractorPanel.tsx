@@ -2010,57 +2010,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return null;
   }, [mergeOrder, displayedClips]);
 
-  /* STABILIZED VIRTUOSO PROPS — react-virtuoso publishes EVERY prop into its
-   * internal stores on each render (useLayoutEffect -> publish), and several of
-   * those streams have NO distinct-by-value guard. The most dangerous is
-   * `scrollerRef`: its stream is bare, and react-virtuoso's internal scroller
-   * effect lists the (user) scrollerRef callback in its dependency array, so a
-   * FRESH callback identity each render re-runs that effect — firing the
-   * callback with (null) on cleanup then (el) on re-attach. Our scrollerRef
-   * drives `setScrollerEl`, so the (null) is a real state change -> panel
-   * re-render -> fresh callback -> effect re-runs -> setScrollerEl(null) again:
-   * an infinite "Maximum update depth exceeded" loop (only reachable once a real
-   * Virtuoso is mounted, i.e. featherweight-active in the running app).
-   *
-   * Giving these props STABLE identities (the scrollerRef is the load-bearing
-   * one; memoizing `style`/`components`/`computeItemKey` removes the rest of the
-   * per-render republish churn) makes Virtuoso's scroller effect run exactly once
-   * for a given scroll element, so it can no longer toggle scrollerEl. These are
-   * IDENTITY-only changes — the values handed to Virtuoso are byte-identical to
-   * the previous inline literals, so flag-off behavior is unchanged. */
-  const virtuosoStyle = React.useMemo(
-    () => ({ '--clip-cols': gridCols }) as React.CSSProperties,
-    [gridCols],
-  );
-  const virtuosoComponents = React.useMemo(
-    () => ({ Scroller: ClipPreviewScroller }),
-    [],
-  );
-  const computeRowKey = React.useCallback(
-    (index: number, row: ClipPreviewItem[]) => `row-${gridCols}-${index}-${row[0]?.id ?? ""}`,
-    [gridCols],
-  );
-  // STABLE scrollerRef — `setScrollerEl` is a stable useState setter, so this
-  // callback's identity never changes. Virtuoso's scroller effect now attaches
-  // once per scroll element instead of re-running every panel render.
-  const handleScrollerRef = React.useCallback((el: HTMLElement | Window | null) => {
-    setScrollerEl((el as HTMLElement | null) ?? null);
-  }, []);
-  // VALUE-GUARDED rangeChanged — Virtuoso already emits this only when the range
-  // genuinely changes (it is distinct-by-value internally), but it hands us a
-  // FRESH {startIndex,endIndex} object each genuine fire. Only commit a new state
-  // object when the indices actually differ from the last committed range, so an
-  // identical range can never trigger a redundant re-render (and the dependent
-  // activeGridClipIds / geometry recompute). Stable identity so the event
-  // subscription is registered once.
-  const handleRangeChanged = React.useCallback((range: { startIndex: number; endIndex: number }) => {
-    setVisibleRowRange((prev) =>
-      prev && prev.startIndex === range.startIndex && prev.endIndex === range.endIndex
-        ? prev
-        : { startIndex: range.startIndex, endIndex: range.endIndex },
-    );
-  }, []);
-
   async function startPreviewMerge() {
     if (mergeOrderedClips.length < 2 || isExtracting || isPreviewMerging) return;
 
@@ -2664,15 +2613,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             data={clipRows}
             overscan={1000}
             increaseViewportBy={1000}
-            style={virtuosoStyle}
-            components={virtuosoComponents}
-            computeItemKey={computeRowKey}
+            style={{ '--clip-cols': gridCols } as React.CSSProperties}
+            components={{ Scroller: ClipPreviewScroller }}
+            computeItemKey={(index, row) => `row-${gridCols}-${index}-${row[0]?.id ?? ""}`}
             /* DEV TOOLS: capture the real scroll element so the viewport-fill
-             * video-budget ResizeObserver can measure it. Stable callback (see
-             * handleScrollerRef) so Virtuoso's scroller effect attaches once and
-             * can't toggle scrollerEl null<->el in a render loop. */
-            scrollerRef={handleScrollerRef}
-            rangeChanged={handleRangeChanged}
+             * video-budget ResizeObserver can measure it. */
+            scrollerRef={(el) => {
+              setScrollerEl((el as HTMLElement | null) ?? null);
+            }}
+            rangeChanged={setVisibleRowRange}
             itemContent={(_index, row) => (
               <div
                 className="clip-preview-grid-row"
