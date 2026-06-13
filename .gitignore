@@ -15,6 +15,12 @@ Tsukyio-AE-Extension-development/
 CLAUDE.md
 AGENTS.md
 docs/agent/
+# Agent notes doc — same privacy as CLAUDE.md, keep local-only.
+docs/CLAUDE-NOTES.md
+# Project-manager tool sidecar metadata. Local-only.
+.pm.json
+# Local LLM scratch dump. Not part of the project.
+llm_1000_lines.txt
 
 # OS files.
 .DS_Store
