@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Scene Detection &amp; Preview Caching — Approaches &amp; Tradeoffs</title>
+<style>
+  :root {
+    --bg-0: #0c0f14;
+    --bg-1: #11161e;
+    --card: #161d27;
+    --card-2: #1b232f;
+    --line: #28323f;
+    --line-soft: #20283340;
+    --ink: #e9eff6;
+    --ink-mid: #aeb9c6;
+    --ink-dim: #6f7d8c;
+    --us: #58a6ff;        /* our approach */
+    --them: #bc8cff;      /* AMVerge */
+    --good: #3fb950;
+    --good-bg: #1f3a26;
+    --mid: #d6a020;
+    --mid-bg: #3a2f12;
+    --bad: #f0594f;
+    --bad-bg: #3a1d1d;
+    --neutral-bg: #232c38;
+    --accent: #2dd4bf;
+    --radius: 14px;
+    --shadow: 0 8px 30px rgba(0,0,0,.45);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 700px at 80% -10%, #1a2433 0%, transparent 55%),
+      radial-gradient(900px 600px at -10% 10%, #16202c 0%, transparent 50%),
+      linear-gradient(180deg, var(--bg-0), var(--bg-1));
+    background-attachment: fixed;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px 120px; }
+
+  /* ---------- Sticky nav ---------- */
+  nav.toc {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px) saturate(1.2);
+    background: linear-gradient(180deg, rgba(12,15,20,.92), rgba(12,15,20,.72));
+    border-bottom: 1px solid var(--line);
+  }
+  nav.toc .inner {
+    max-width: 1180px; margin: 0 auto; padding: 11px 24px;
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  }
+  nav.toc a {
+    color: var(--ink-mid); text-decoration: none; font-size: 13px;
+    padding: 6px 12px; border-radius: 999px; border: 1px solid transparent;
+    transition: .15s;
+  }
+  nav.toc a:hover { color: var(--ink); background: var(--card-2); border-color: var(--line); }
+  nav.toc .brand { font-weight: 700; color: var(--ink); font-size: 13px; margin-right: 8px; letter-spacing: .2px; }
+  nav.toc .brand b { color: var(--accent); }
+
+  /* ---------- Hero ---------- */
+  header.hero { padding: 64px 0 28px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 14px;
+  }
+  h1 { font-size: 40px; line-height: 1.12; margin: 0 0 16px; letter-spacing: -.5px; }
+  h1 .grad { background: linear-gradient(90deg, var(--us), var(--them)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: 17px; color: var(--ink-mid); max-width: 760px; }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  .meta-row { display:flex; gap:18px; flex-wrap:wrap; margin-top:22px; font-size:12.5px; color:var(--ink-dim); }
+  .meta-row span b { color: var(--ink-mid); font-weight:600; }
+
+  /* ---------- Key insight banner ---------- */
+  .insight {
+    margin: 30px 0 8px; padding: 22px 24px;
+    border: 1px solid #2c5e57; border-left: 4px solid var(--accent);
+    border-radius: var(--radius);
+    background: linear-gradient(100deg, rgba(45,212,191,.10), rgba(45,212,191,.02));
+  }
+  .insight h3 { margin: 0 0 8px; font-size: 16px; color: var(--accent); display:flex; align-items:center; gap:9px; }
+  .insight p { margin: 0; color: var(--ink); font-size: 15.5px; }
+  .insight .conv { color: var(--accent); font-weight: 700; }
+
+  /* ---------- Sections ---------- */
+  section { padding-top: 54px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 13px; color: var(--bg-0);
+    background: linear-gradient(135deg, var(--us), var(--them));
+    width: 30px; height: 30px; border-radius: 9px; display:grid; place-items:center;
+    font-weight: 700; flex: none;
+  }
+  h2 { font-size: 26px; margin: 0; letter-spacing: -.3px; }
+  .sec-sub { color: var(--ink-dim); font-size: 14px; margin: 4px 0 26px 44px; }
+
+  h3.block { font-size: 18px; margin: 34px 0 14px; display:flex; align-items:center; gap:10px; }
+  h3.block .tick { width: 7px; height: 20px; border-radius: 3px; background: var(--accent); display:inline-block; }
+
+  /* ---------- Two-column compare ---------- */
+  .vs { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+  @media (max-width: 820px){ .vs { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 20px 22px; box-shadow: var(--shadow);
+  }
+  .panel.us { border-top: 3px solid var(--us); }
+  .panel.them { border-top: 3px solid var(--them); }
+  .panel .tag {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 6px; display:inline-block; margin-bottom: 12px;
+  }
+  .panel.us .tag { background: rgba(88,166,255,.14); color: var(--us); }
+  .panel.them .tag { background: rgba(188,140,255,.14); color: var(--them); }
+  .panel h4 { margin: 0 0 12px; font-size: 16px; }
+  .panel ul { margin: 0; padding-left: 18px; }
+  .panel li { margin: 7px 0; font-size: 14px; color: var(--ink-mid); }
+  .panel li b { color: var(--ink); font-weight: 600; }
+  code, .chip {
+    font-family: var(--mono); font-size: 12px;
+    background: #0e141c; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; color: #9fd2ff;
+  }
+
+  /* ---------- Heatmap matrix ---------- */
+  .matrix-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--line); box-shadow: var(--shadow); }
+  table.matrix { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 760px; background: var(--card); }
+  table.matrix th, table.matrix td { padding: 12px 13px; text-align: left; border-bottom: 1px solid var(--line-soft); border-right: 1px solid var(--line-soft); vertical-align: top; }
+  table.matrix thead th {
+    background: var(--card-2); color: var(--ink-mid); font-weight: 600; font-size: 12px;
+    position: sticky; left: auto; border-bottom: 1px solid var(--line);
+  }
+  table.matrix tbody th {
+    font-weight: 600; color: var(--ink); background: var(--card-2); white-space: nowrap;
+    position: sticky; left: 0; z-index: 2;
+  }
+  table.matrix tbody th .sub { display:block; font-weight: 400; font-size: 11px; color: var(--ink-dim); margin-top: 2px; }
+  td.g  { background: var(--good-bg); }
+  td.m  { background: var(--mid-bg); }
+  td.b  { background: var(--bad-bg); }
+  td.n  { background: var(--neutral-bg); }
+  td .v { font-weight: 700; display:block; font-size: 12.5px; }
+  td.g .v { color: #6fe08a; }
+  td.m .v { color: #ecc25b; }
+  td.b .v { color: #ff8b84; }
+  td.n .v { color: var(--ink-mid); }
+  td .d { color: var(--ink-mid); font-size: 11.5px; }
+  tr.row-us  th { box-shadow: inset 4px 0 0 var(--us); }
+  tr.row-them th { box-shadow: inset 4px 0 0 var(--them); }
+  tr.row-new th { box-shadow: inset 4px 0 0 var(--accent); }
+  tr.row-new th::after { content:"PROPOSED"; display:block; font-family:var(--mono); font-size:9px; letter-spacing:1px; color:var(--accent); margin-top:3px; }
+
+  /* ---------- Legend ---------- */
+  .legend { display:flex; gap: 18px; flex-wrap: wrap; margin: 14px 0 0; font-size: 12.5px; color: var(--ink-dim); }
+  .legend .k { display:flex; align-items:center; gap:7px; }
+  .sw { width: 13px; height: 13px; border-radius: 4px; display:inline-block; border:1px solid #ffffff14; }
+  .sw.g{background:var(--good-bg);} .sw.m{background:var(--mid-bg);} .sw.b{background:var(--bad-bg);} .sw.n{background:var(--neutral-bg);}
+  .sw.us{background:var(--us);} .sw.them{background:var(--them);} .sw.new{background:var(--accent);}
+
+  /* ---------- Quadrant ---------- */
+  .quad-wrap { display:grid; grid-template-columns: 1.3fr 1fr; gap: 22px; align-items:center; margin-top: 8px; }
+  @media (max-width: 820px){ .quad-wrap { grid-template-columns: 1fr; } }
+  .quad {
+    position: relative; aspect-ratio: 1.25/1; background:
+      linear-gradient(0deg, rgba(63,185,80,.05), rgba(240,89,79,.05)),
+      var(--card);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); overflow:hidden;
+  }
+  .quad .grid-line { position:absolute; background: var(--line-soft); }
+  .quad .vx { left:50%; top:0; bottom:0; width:1px; }
+  .quad .hz { top:50%; left:0; right:0; height:1px; }
+  .quad .axis { position:absolute; font-size:11px; color:var(--ink-dim); font-family:var(--mono); letter-spacing:.5px; }
+  .quad .ax-x { bottom:8px; right:12px; } .quad .ax-x2 { bottom:8px; left:12px; }
+  .quad .ax-y { top:8px; left:10px; } .quad .ax-y2 { bottom:26px; left:10px; }
+  .dot { position:absolute; transform: translate(-50%,50%); display:flex; flex-direction:column; align-items:center; gap:5px; }
+  .dot .pt { width:16px; height:16px; border-radius:50%; border:2px solid #0c0f14; box-shadow:0 0 0 3px rgba(255,255,255,.05); }
+  .dot .lbl { font-size:11px; color:var(--ink); background:#0c0f14cc; padding:2px 7px; border-radius:6px; white-space:nowrap; border:1px solid var(--line); }
+  .pt.us{background:var(--us);} .pt.them{background:var(--them);} .pt.new{background:var(--accent);}
+  .quad-note { font-size:13.5px; color:var(--ink-mid); }
+  .quad-note b{color:var(--ink);}
+
+  /* ---------- Options ---------- */
+  .opts { display:grid; gap: 14px; margin-top: 8px; }
+  .opt { background: var(--card); border:1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; display:grid; grid-template-columns: auto 1fr; gap: 16px; }
+  .opt .badge { font-family:var(--mono); font-size:12px; font-weight:700; width:34px; height:34px; border-radius:9px; display:grid; place-items:center; flex:none; }
+  .opt.pick { border-color:#2c5e57; background: linear-gradient(100deg, rgba(45,212,191,.07), transparent); }
+  .opt.pick .badge { background: var(--accent); color:#06241f; }
+  .opt.ok .badge { background: rgba(88,166,255,.16); color: var(--us); }
+  .opt.no .badge { background: var(--bad-bg); color: var(--bad); }
+  .opt h4 { margin:0 0 5px; font-size:15.5px; display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .opt .pill { font-family:var(--mono); font-size:10px; letter-spacing:.8px; text-transform:uppercase; padding:2px 8px; border-radius:999px; }
+  .pill.pick{background:var(--accent);color:#06241f;} .pill.ok{background:rgba(88,166,255,.16);color:var(--us);} .pill.no{background:var(--bad-bg);color:var(--bad);}
+  .opt p { margin: 4px 0; font-size:13.5px; color: var(--ink-mid); }
+  .opt .pc { display:flex; gap:22px; flex-wrap:wrap; margin-top:9px; font-size:12.5px; }
+  .opt .pc .pro b{color:var(--good);} .opt .pc .con b{color:var(--bad);}
+  .opt .pc ul{margin:4px 0 0; padding-left:16px;} .opt .pc li{margin:2px 0; color:var(--ink-mid);}
+
+  /* ---------- Verdict ---------- */
+  .verdict { margin-top: 22px; padding: 20px 22px; border-radius: var(--radius);
+    background: linear-gradient(120deg, rgba(45,212,191,.10), rgba(88,166,255,.05));
+    border: 1px solid #2c5e57; }
+  .verdict .h { font-family:var(--mono); font-size:12px; letter-spacing:1.5px; text-transform:uppercase; color:var(--accent); margin-bottom:8px; display:flex; align-items:center; gap:8px;}
+  .verdict p { margin:0; font-size:15px; color:var(--ink); }
+  .verdict p b { color:#7ff0dd; }
+
+  /* ---------- Root-cause diagram ---------- */
+  .rc { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin: 10px 0 4px; }
+  @media (max-width:820px){ .rc{grid-template-columns:1fr;} }
+  .timeline { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:18px 20px; box-shadow:var(--shadow); }
+  .timeline h5 { margin:0 0 14px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .timeline h5 .dotc{width:9px;height:9px;border-radius:50%;}
+  .track { position:relative; height:46px; background:#0e141c; border-radius:8px; border:1px solid var(--line); margin-bottom:10px; overflow:hidden; }
+  .gop { position:absolute; top:0; bottom:0; border-right:1px dashed #3a4654; }
+  .kf { position:absolute; top:50%; transform:translate(-50%,-50%); width:10px; height:10px; background:var(--accent); border-radius:2px; box-shadow:0 0 0 3px #06241f; }
+  .kf .kfl{ position:absolute; top:-18px; left:50%; transform:translateX(-50%); font-size:9px; font-family:var(--mono); color:var(--accent); }
+  .cut { position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--bad); }
+  .cut .cl{ position:absolute; bottom:-16px; left:50%; transform:translateX(-50%); font-size:9px; font-family:var(--mono); color:var(--bad); white-space:nowrap;}
+  .bleed { position:absolute; top:0; bottom:0; background:repeating-linear-gradient(45deg, rgba(240,89,79,.25), rgba(240,89,79,.25) 4px, transparent 4px, transparent 8px); }
+  .timeline p { margin:8px 0 0; font-size:12.5px; color:var(--ink-mid); }
+  .timeline p b{color:var(--ink);}
+  .timeline .ok-tag{color:var(--good);font-weight:700;} .timeline .bad-tag{color:var(--bad);font-weight:700;}
+
+  /* ---------- Convergence ---------- */
+  .conv-box { background: var(--card); border:1px solid var(--line); border-radius: var(--radius); padding: 26px; box-shadow: var(--shadow); }
+  .flow { display:grid; grid-template-columns: 1fr auto 1fr; gap:18px; align-items:center; }
+  @media (max-width:820px){ .flow{grid-template-columns:1fr; } .flow .arrow{transform:rotate(90deg);} }
+  .node { border:1px solid var(--line); border-radius:12px; padding:16px 18px; background:var(--card-2); }
+  .node.key { border-color: var(--accent); background: linear-gradient(120deg, rgba(45,212,191,.12), transparent); text-align:center; }
+  .node h5 { margin:0 0 6px; font-size:14px; }
+  .node p { margin:0; font-size:12.5px; color:var(--ink-mid); }
+  .node.key h5 { color: var(--accent); font-size:15px; }
+  .arrow { font-size:26px; color:var(--accent); text-align:center; }
+  .unlocks { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:18px; }
+  @media (max-width:620px){ .unlocks{grid-template-columns:1fr;} }
+  .unlock { border:1px dashed #2c5e57; border-radius:12px; padding:14px 16px; }
+  .unlock h5{margin:0 0 5px;font-size:13.5px;color:var(--accent);}
+  .unlock p{margin:0;font-size:12.5px;color:var(--ink-mid);}
+
+  /* ---------- Roadmap ---------- */
+  .road { display:grid; gap:16px; counter-reset: phase; }
+  .phase { display:grid; grid-template-columns:auto 1fr; gap:18px; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px; box-shadow:var(--shadow); position:relative; }
+  .phase .pn { font-family:var(--mono); font-weight:700; font-size:13px; width:40px; height:40px; border-radius:11px; display:grid; place-items:center; flex:none; }
+  .phase.p1 .pn{background:rgba(45,212,191,.16);color:var(--accent);}
+  .phase.p2 .pn{background:rgba(88,166,255,.16);color:var(--us);}
+  .phase.p3 .pn{background:rgba(188,140,255,.16);color:var(--them);}
+  .phase.p0 .pn{background:var(--neutral-bg);color:var(--ink-mid);}
+  .phase h4{margin:0 0 6px;font-size:16px;}
+  .phase .why{font-size:13px;color:var(--ink-mid);margin:0 0 10px;}
+  .phase ul{margin:0;padding-left:18px;}
+  .phase li{font-size:13px;color:var(--ink-mid);margin:4px 0;}
+  .phase li b{color:var(--ink);}
+  .effort{position:absolute;top:18px;right:20px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);border:1px solid var(--line);padding:3px 9px;border-radius:999px;}
+
+  /* ---------- Caveat / footer ---------- */
+  .caveats { margin-top:30px; background:var(--card); border:1px solid var(--line); border-left:4px solid var(--mid); border-radius:var(--radius); padding:20px 24px; }
+  .caveats h3{margin:0 0 12px;font-size:15px;color:var(--mid);}
+  .caveats ul{margin:0;padding-left:18px;}
+  .caveats li{margin:7px 0;font-size:13.5px;color:var(--ink-mid);}
+  .caveats li b{color:var(--ink);}
+
+  footer { margin-top:60px; padding-top:24px; border-top:1px solid var(--line); color:var(--ink-dim); font-size:12.5px; }
+  footer .files{font-family:var(--mono); font-size:11.5px; color:var(--ink-mid); margin-top:10px; line-height:2;}
+  footer .files span{background:#0e141c;border:1px solid var(--line);border-radius:5px;padding:2px 7px;margin-right:6px;}
+
+  .anchor { scroll-margin-top: 70px; }
+</style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="inner">
+    <span class="brand">Ultimate&nbsp;AMV · <b>scene-detect &amp; cache study</b></span>
+    <a href="#insight">Key insight</a>
+    <a href="#detection">1 · Detection</a>
+    <a href="#caching">2 · Caching</a>
+    <a href="#flawless">3 · Flawless + light</a>
+    <a href="#convergence">4 · Convergence</a>
+    <a href="#roadmap">5 · What to do</a>
+    <a href="#caveats">Caveats</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow">Design study · branch: taking-shit-from-amverge-and-optimizations</div>
+    <h1>Scene detection &amp; preview caching:<br><span class="grad">where we are, what to consider, what to do</span></h1>
+    <p class="lede">A side-by-side of <b>our</b> stack (TransNetV2 neural detection + re-encode preview cache) against <b>AMVerge's</b> (keyframe/GOP split + lossless pre-cut files), the tradeoffs of every alternative, and a recommendation for the two asks: a <b>light "scene detection" mode</b> for weak machines, and <b>killing the cache</b> for a faster, more responsive preview path.</p>
+    <div class="meta-row">
+      <span><b>Our detector:</b> TransNetV2 (GPU) · CPU mean-diff fallback</span>
+      <span><b>Their detector:</b> keyframe timestamps (demux-only)</span>
+      <span><b>Source:</b> github.com/crptk/AMVerge (GPL-3.0)</span>
+    </div>
+  </header>
+
+  <div class="insight anchor" id="insight">
+    <h3>◆ The one thing that ties both asks together</h3>
+    <p>Our preview cache exists for exactly one reason: <b>our cut points are not on keyframes</b>, so producing a clean clip start requires a decode + re-encode. AMVerge has no cache because its cuts <b>are</b> keyframes, so a lossless stream-copy is enough. That means the "light scene-detection mode" and the "no-cache fast mode" are <span class="conv">not two features — they're the same lever: keyframe alignment.</span> Add keyframe-mode detection and the cheap-preview path falls out of it for free.</p>
+  </div>
+
+  <!-- ============ SECTION 1 : DETECTION ============ -->
+  <section class="anchor" id="detection">
+    <div class="sec-head"><span class="sec-num">1</span><h2>Scene detection</h2></div>
+    <p class="sec-sub">Neural shot boundaries vs. cutting at the encoder's keyframes.</p>
+
+    <div class="vs">
+      <div class="panel us">
+        <span class="tag">Ours · current</span>
+        <h4>TransNetV2 neural detection</h4>
+        <ul>
+          <li><b>What:</b> a neural net finds <b>true content/shot boundaries</b>. GPU path decodes via NVDEC/nelux (software-decode fallback) and runs <code>TransNetV2</code> (sigmoid 0.5, batch 100 / overlap 50). CPU path is a <b>content-aware mean pixel-difference</b> scorer (threshold 27) — cruder than the net, but far from useless.</li>
+          <li><b>Heads-up:</b> <code>scenedetect</code> (PySceneDetect) is in our requirements + dependency map but <b>isn't actually imported</b> in the active path — the CPU detector is the mean-diff scorer above, not PySceneDetect. Wiring it up is a free quality win waiting to happen.</li>
+          <li><b>Speed:</b> slow — decode + inference. GPU helps a lot; CPU is the painful case.</li>
+          <li><b>Quality:</b> high. Real cuts, content-aware.</li>
+          <li><b>Output:</b> boundary list → <code>ClipScene</code>; previews rendered lazily (no physical cut).</li>
+          <li><b>Deps:</b> torch, transnetv2, CUDA. Heavy.</li>
+          <li><b>File:</b> <code>backend/clip_cli.py</code> → <code>extract()</code></li>
+        </ul>
+      </div>
+      <div class="panel them">
+        <span class="tag">AMVerge · shipping</span>
+        <h4>Keyframe / GOP split</h4>
+        <ul>
+          <li><b>What:</b> demux packets with PyAV, collect every <code>packet.is_keyframe</code> timestamp — <b>no decoding</b>. A pathology guard falls back to keyframe-only decode if packet flags look broken.</li>
+          <li><b>Speed:</b> near-instant (sub-second) — it just reads container metadata.</li>
+          <li><b>Quality:</b> coarse. It cuts at <b>every</b> I-frame, so it catches real cuts <i>plus</i> periodic GOP keyframes → over-segments.</li>
+          <li><b>Cleanup:</b> adjacent-thumbnail similarity (8×8 pool + cosine, dissim&lt;0.10) emits <b>merge hints</b>; user merges false cuts.</li>
+          <li><b>Deps:</b> PyAV only. Their old content-aware detector (Canny+cosine) was deprecated — <i>"accurate, but too slow."</i></li>
+          <li><b>File:</b> <code>backend/utils/keyframes.py</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>Tradeoff heatmap</h3>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Approach</th>
+            <th>Speed (weak HW)</th>
+            <th>Detection quality</th>
+            <th>Hardware load</th>
+            <th>Dependency weight</th>
+            <th>Over-seg risk</th>
+            <th>Impl cost (for us)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="row-us">
+            <th>TransNetV2 (GPU)<span class="sub">our default</span></th>
+            <td class="b"><span class="v">Slow</span><span class="d">decode+inference</span></td>
+            <td class="g"><span class="v">High</span><span class="d">true shot cuts</span></td>
+            <td class="b"><span class="v">Heavy</span><span class="d">GPU/VRAM</span></td>
+            <td class="b"><span class="v">Heavy</span><span class="d">torch+CUDA</span></td>
+            <td class="g"><span class="v">Low</span><span class="d">content-aware</span></td>
+            <td class="n"><span class="v">Shipped</span><span class="d">—</span></td>
+          </tr>
+          <tr class="row-us">
+            <th>CPU mean-diff<span class="sub">our fallback</span></th>
+            <td class="b"><span class="v">Slow</span><span class="d">still decodes all frames</span></td>
+            <td class="m"><span class="v">Moderate</span><span class="d">content-aware delta; weak on fades/motion</span></td>
+            <td class="m"><span class="v">Moderate</span><span class="d">CPU-bound</span></td>
+            <td class="g"><span class="v">Light</span><span class="d">numpy</span></td>
+            <td class="m"><span class="v">Medium</span></td>
+            <td class="n"><span class="v">Shipped</span><span class="d">—</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>Keyframe (AMVerge)</th>
+            <td class="g"><span class="v">Instant</span><span class="d">demux-only</span></td>
+            <td class="m"><span class="v">Coarse</span><span class="d">encoder-dependent</span></td>
+            <td class="g"><span class="v">Trivial</span><span class="d">no decode</span></td>
+            <td class="g"><span class="v">None new</span><span class="d">reuse ffprobe</span></td>
+            <td class="b"><span class="v">High</span><span class="d">periodic I-frames</span></td>
+            <td class="g"><span class="v">Low</span><span class="d">~1 day</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>Keyframe + min-scene coarsen</th>
+            <td class="g"><span class="v">Instant</span></td>
+            <td class="m"><span class="v">Coarse+</span><span class="d">merges sub-N gaps</span></td>
+            <td class="g"><span class="v">Trivial</span></td>
+            <td class="g"><span class="v">None new</span></td>
+            <td class="m"><span class="v">Medium</span><span class="d">tamed</span></td>
+            <td class="g"><span class="v">Low</span><span class="d">extends min_clip_seconds</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>Keyframe + similarity auto-merge</th>
+            <td class="m"><span class="v">Fast</span><span class="d">+thumb decode</span></td>
+            <td class="g"><span class="v">Good</span><span class="d">near TransNet on web-rips</span></td>
+            <td class="m"><span class="v">Light</span></td>
+            <td class="g"><span class="v">None new</span><span class="d">numpy/PIL</span></td>
+            <td class="g"><span class="v">Low</span><span class="d">auto-merged</span></td>
+            <td class="m"><span class="v">Medium</span><span class="d">port cs_scenedetect</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="legend">
+      <span class="k"><i class="sw g"></i> strong / cheap</span>
+      <span class="k"><i class="sw m"></i> moderate / caveat</span>
+      <span class="k"><i class="sw b"></i> weak / costly</span>
+      <span class="k"><i class="sw n"></i> n/a (already shipped)</span>
+      <span class="k"><i class="sw us"></i> ours</span>
+      <span class="k"><i class="sw them"></i> AMVerge</span>
+      <span class="k"><i class="sw new"></i> proposed</span>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>Speed ⟷ quality, plotted</h3>
+    <div class="quad-wrap">
+      <div class="quad">
+        <div class="grid-line vx"></div>
+        <div class="grid-line hz"></div>
+        <span class="axis ax-x">FAST →</span>
+        <span class="axis ax-x2">← SLOW</span>
+        <span class="axis ax-y">↑ HIGH QUALITY</span>
+        <span class="axis ax-y2">↓ LOW QUALITY</span>
+        <!-- x: left=slow,right=fast ; y bottom=low quality (use bottom %) -->
+        <div class="dot" style="left:22%; bottom:80%;"><span class="lbl">TransNetV2</span><span class="pt us"></span></div>
+        <div class="dot" style="left:32%; bottom:46%;"><span class="lbl">CPU mean-diff</span><span class="pt us"></span></div>
+        <div class="dot" style="left:90%; bottom:52%;"><span class="lbl">Keyframe</span><span class="pt new"></span></div>
+        <div class="dot" style="left:80%; bottom:70%;"><span class="lbl">Keyframe +&nbsp;merge</span><span class="pt new"></span></div>
+      </div>
+      <div class="quad-note">
+        <p>The gap that matters: our <b>weak-hardware story today is the CPU mean-diff path</b> — lower-left: only <i>moderate</i> quality (a content-aware pixel delta — decent on hard cuts, weak on fades / fast motion) and <i>slow</i>, because it still decodes every frame. <b>PySceneDetect, already installed but unwired, would sit higher</b> on the quality axis at similar speed.</p>
+        <p style="margin-top:10px;">Keyframe mode lands <b>far right</b> (instant) at <b>middling quality</b>. With a coarsening/merge pass it climbs toward TransNetV2's quality while staying fast — a strictly better corner than where weak machines sit now.</p>
+      </div>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>Options on the table</h3>
+    <div class="opts">
+      <div class="opt no">
+        <div class="badge">A</div>
+        <div>
+          <h4>Bare keyframe cuts <span class="pill no">thin</span></h4>
+          <p>Ship the raw AMVerge detector, lean on the existing scene UI for manual merging.</p>
+          <div class="pc">
+            <div class="pro"><b>Pros</b><ul><li>Smallest change, fastest to land</li><li>Sub-second on weak HW</li></ul></div>
+            <div class="con"><b>Cons</b><ul><li>Over-segmentation reads as "broken" on a lot of anime</li><li>Pushes cleanup onto the user</li></ul></div>
+          </div>
+        </div>
+      </div>
+      <div class="opt pick">
+        <div class="badge">B</div>
+        <div>
+          <h4>Keyframe + min-scene coarsening <span class="pill pick">recommended v1</span></h4>
+          <p>Same detector, but merge keyframes closer than <i>N</i> seconds — a near-free extension of the <code>min_clip_seconds</code> we already have. No extra decode.</p>
+          <div class="pc">
+            <div class="pro"><b>Pros</b><ul><li>Kills the worst of the over-seg at zero cost</li><li>Still instant, still no new deps</li><li>Makes the mode actually pleasant to use</li></ul></div>
+            <div class="con"><b>Cons</b><ul><li>A fixed time-gap heuristic isn't content-aware</li></ul></div>
+          </div>
+        </div>
+      </div>
+      <div class="opt ok">
+        <div class="badge">C</div>
+        <div>
+          <h4>Keyframe + similarity auto-merge <span class="pill ok">later</span></h4>
+          <p>Port AMVerge's <code>cs_scenedetect</code> adjacent-thumbnail cosine check to auto-merge near-identical neighbours.</p>
+          <div class="pc">
+            <div class="pro"><b>Pros</b><ul><li>Best quality of the fast options</li><li>Reuses thumbnails we already make</li></ul></div>
+            <div class="con"><b>Cons</b><ul><li>Needs a thumb decode per scene — erodes the "instant" win somewhat</li></ul></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="insight" style="margin-top:22px;">
+      <h3>◆ What "keyframe + similarity auto-merge" actually is</h3>
+      <p style="margin-bottom:10px;"><b>The problem it solves:</b> raw keyframe detection cuts at <i>every</i> I-frame, so one real scene often gets sliced into several near-identical clips. <code>cs_scenedetect</code> is AMVerge's tiny cleanup pass (file <code>backend/utils/cs_scenedetect.py</code>; "cs" = cosine similarity) that stitches those back together.</p>
+      <p style="margin-bottom:10px;"><b>How it works — dead simple, no neural net:</b> for each pair of <i>adjacent</i> scenes it takes their thumbnails, shrinks them to an <b>8×8 blur</b> (average-pool), and measures how similar they are (cosine similarity). If two neighbours look almost the same (dissimilarity &lt; 0.10), the split between them was almost certainly a false cut from a periodic keyframe — so it <b>merges them</b>.</p>
+      <p><b>Why that's "fast + good + light" at once:</b> keyframe detection gives the <i>instant, no-decode</i> cut list (fast + light); the similarity pass throws away the false cuts to recover something close to <i>content-aware</i> quality (good) — at the cost of decoding one tiny thumbnail per scene, not every frame. It's a cheap stand-in for what TransNetV2 does with a network: "are these two shots actually different?" — answered with 64 pixels and a dot-product instead of a GPU.</p>
+    </div>
+
+    <div class="verdict">
+      <div class="h">▶ Verdict · detection</div>
+      <p><b>Add it, default off, as option B.</b> It's a genuinely better weak-machine path than today's CPU mean-diff (which is slow <i>and</i> bad), it adds <b>no new dependency</b> (we already bundle ffprobe — no PyAV needed; read keyframe flags via <code>ffprobe -show_packets</code>), and it returns the identical <code>ClipScene</code> shape so the whole downstream is untouched. Gate it on the cheap coarsening — shipping it bare (A) is the one way to make it feel broken. Keep C as a fast-follow if over-seg complaints persist.</p>
+    </div>
+  </section>
+
+  <!-- ============ SECTION 2 : CACHING ============ -->
+  <section class="anchor" id="caching">
+    <div class="sec-head"><span class="sec-num">2</span><h2>Preview caching</h2></div>
+    <p class="sec-sub">Why we re-encode-and-cache, why AMVerge doesn't, and whether "no cache" is real.</p>
+
+    <div class="vs">
+      <div class="panel us">
+        <span class="tag">Ours · current</span>
+        <h4>Re-encode preview cache</h4>
+        <ul>
+          <li><b>What:</b> each scene preview is a freshly re-encoded mp4 (<code>scene_clips/*.mp4</code>) via dual-<code>-ss</code> (coarse before <code>-i</code> for a fast keyframe seek, precise after <code>-i</code> for a clean cut), NVENC p1 @ 720p.</li>
+          <li><b>Why cache:</b> the cut sits at a <b>non-keyframe</b> boundary, so a clean start <b>requires decode + re-encode</b>. We cache the result so re-selecting is instant.</li>
+          <li><b>We tried <code>-c copy</code> and rejected it:</b> accurate-seek copy discards leading I-frames mid-GOP → mp4s WebView2 can't decode. Documented dead-end.</li>
+          <li><b>Already optimised:</b> the encode itself is ~10 ms for a 2 s clip; old cost was the demux walk (fixed by dual-<code>-ss</code>) and cold-start (fixed by startup warmup).</li>
+          <li><b>File:</b> <code>src-tauri/src/clips.rs</code> → <code>render_scene_clip_job</code></li>
+        </ul>
+      </div>
+      <div class="panel them">
+        <span class="tag">AMVerge · shipping</span>
+        <h4>No cache — because it never seeks</h4>
+        <ul>
+          <li><b>What:</b> at split time it writes one <b>standalone <code>.mp4</code> per scene</b> via <code>ffmpeg -c copy -f segment</code> — lossless stream-copy, no encoder.</li>
+          <li><b>Playback:</b> the <code>&lt;video&gt;</code> points at the <b>whole small file</b> and plays from <code>t=0</code>. It <b>never</b> seeks into the long source. No bleed, no decode-and-discard.</li>
+          <li><b>Why it's lossless:</b> cuts are <b>at keyframes</b>, so every segment starts on an I-frame and is independently decodable — the exact failure that killed our <code>-c copy</code> attempt <b>can't happen here</b>.</li>
+          <li><b>Still has a proxy layer:</b> HEVC / AC3 / Opus sources WebView2 can't play get a transcoded proxy (<code>ensure_preview_proxy</code>). So it's "cache-light," not "cache-free."</li>
+          <li><b>File:</b> <code>backend/app.py</code> → <code>trim_scenes_at_keyframes</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>Root cause, drawn out</h3>
+    <div class="rc">
+      <div class="timeline">
+        <h5><span class="dotc" style="background:var(--us)"></span>Our cut: lands between keyframes</h5>
+        <div class="track">
+          <div class="gop" style="left:25%"></div><div class="gop" style="left:50%"></div><div class="gop" style="left:75%"></div>
+          <div class="kf" style="left:25%"><span class="kfl">I-frame</span></div>
+          <div class="kf" style="left:50%"></div>
+          <div class="bleed" style="left:50%; width:14%"></div>
+          <div class="cut" style="left:64%"><span class="cl">scene start (TransNet)</span></div>
+        </div>
+        <p><b>Stream-copy can only begin at the I-frame</b> at 50%, so it drags in the hatched <span class="bad-tag">bleed</span> frames before the real start. To start <i>clean</i> at the cut you must re-encode. <b>That re-encode is the whole reason the cache exists.</b></p>
+      </div>
+      <div class="timeline">
+        <h5><span class="dotc" style="background:var(--them)"></span>AMVerge cut: <i>is</i> the keyframe</h5>
+        <div class="track">
+          <div class="gop" style="left:25%"></div><div class="gop" style="left:50%"></div><div class="gop" style="left:75%"></div>
+          <div class="kf" style="left:25%"><span class="kfl">I-frame</span></div>
+          <div class="kf" style="left:50%"></div>
+          <div class="kf" style="left:75%"></div>
+          <div class="cut" style="left:50%; background:var(--good)"><span class="cl" style="color:var(--good)">scene start = keyframe</span></div>
+        </div>
+        <p>The cut sits exactly on an I-frame, so the segment is <span class="ok-tag">self-contained</span>. Lossless copy is clean, instant, and needs <b>no cache and no seek</b>.</p>
+      </div>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>Tradeoff heatmap</h3>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Strategy</th>
+            <th>Build cost / click</th>
+            <th>Responsiveness</th>
+            <th>Correctness risk</th>
+            <th>Codec compat</th>
+            <th>Works w/ TransNet cuts?</th>
+            <th>Disk</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="row-us">
+            <th>Re-encode cache<span class="sub">our current</span></th>
+            <td class="m"><span class="v">~10ms enc</span><span class="d">+spawn/seek</span></td>
+            <td class="g"><span class="v">Instant on hit</span></td>
+            <td class="g"><span class="v">Clean</span><span class="d">precise cut</span></td>
+            <td class="g"><span class="v">Universal</span><span class="d">re-encodes anything</span></td>
+            <td class="g"><span class="v">Yes</span></td>
+            <td class="m"><span class="v">mp4/scene</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>Lossless stream-copy preview<span class="sub">keyframe-aligned</span></th>
+            <td class="g"><span class="v">No encode</span><span class="d">demux+remux</span></td>
+            <td class="g"><span class="v">Instant</span></td>
+            <td class="g"><span class="v">Clean*</span><span class="d">*only if cut=keyframe</span></td>
+            <td class="m"><span class="v">Most</span><span class="d">HEVC/AC3 need proxy</span></td>
+            <td class="b"><span class="v">No</span><span class="d">cuts aren't keyframes</span></td>
+            <td class="m"><span class="v">copy/scene</span></td>
+          </tr>
+          <tr class="row-them">
+            <th>Whole-file pre-split<span class="sub">AMVerge</span></th>
+            <td class="g"><span class="v">1× lossless split</span></td>
+            <td class="g"><span class="v">Instant</span><span class="d">whole-file play</span></td>
+            <td class="g"><span class="v">Clean</span></td>
+            <td class="m"><span class="v">Most</span><span class="d">+proxy layer</span></td>
+            <td class="b"><span class="v">No</span></td>
+            <td class="b"><span class="v">High</span><span class="d">full copy of source</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>No-cache · seek the source</th>
+            <td class="g"><span class="v">Zero</span></td>
+            <td class="b"><span class="v">Janky</span><span class="d">N seekers, 1 huge file</span></td>
+            <td class="b"><span class="v">Bleed</span><span class="d">seek into long source</span></td>
+            <td class="b"><span class="v">Poor</span><span class="d">HEVC/audio fails inline</span></td>
+            <td class="b"><span class="v">No</span></td>
+            <td class="g"><span class="v">None</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>"Faster cache format"</th>
+            <td class="m"><span class="v">Marginal</span><span class="d">enc already ~10ms</span></td>
+            <td class="g"><span class="v">Instant on hit</span></td>
+            <td class="g"><span class="v">Clean</span></td>
+            <td class="g"><span class="v">Universal</span></td>
+            <td class="g"><span class="v">Yes</span></td>
+            <td class="m"><span class="v">smaller</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="legend">
+      <span class="k"><i class="sw g"></i> strong</span>
+      <span class="k"><i class="sw m"></i> moderate</span>
+      <span class="k"><i class="sw b"></i> weak / risk</span>
+      <span class="k"><i class="sw us"></i> ours</span>
+      <span class="k"><i class="sw them"></i> AMVerge</span>
+      <span class="k"><i class="sw new"></i> proposed</span>
+    </div>
+
+    <div class="verdict">
+      <div class="h">▶ Verdict · caching</div>
+      <p><b>"Get rid of the cache" only works in keyframe mode.</b> With TransNetV2 cuts, the re-encode is unavoidable for a clean start and is <b>already near-optimal</b> — a "faster format" optimises the cheap part. Pure no-cache/seek-the-source is a <b>trap</b> for a grid (N elements seeking into one huge file, plus the bleed we already fixed). The real win is: <b>in keyframe mode, build previews via lossless stream-copy instead of NVENC</b> — the cache becomes ~free to build, and we <b>already have the plumbing</b> (<code>clips.rs</code> does keyframe-snapped stream-copy today for lossless merge/export). Fall back to the re-encode proxy only for HEVC / exotic-audio sources.</p>
+    </div>
+  </section>
+
+  <!-- ============ SECTION 3 : FLAWLESS + LIGHT ============ -->
+  <section class="anchor" id="flawless">
+    <div class="sec-head"><span class="sec-num">3</span><h2>Flawless accuracy <i>and</i> a light grid — without the per-clip cache</h2></div>
+    <p class="sec-sub">The real question: keep TransNetV2's exact cuts, but stop re-encoding and baking an asset per scene.</p>
+
+    <div class="insight" style="margin-top:0;">
+      <h3>◆ The codec law (why there's no totally-free lunch)</h3>
+      <p>To <i>display</i> an arbitrary frame of an inter-coded video, a decoder must start from the previous keyframe and roll forward — that's just how H.264/HEVC work. So a precise start at a non-keyframe boundary has only two escapes: <b>(a) re-encode</b> that region into a new clip (what our cache does, ×N), or <b>(b) decode from the nearest keyframe and simply <u>start the display</u> at the in-point</b> — the pre-roll frames are decoded but never shown. Option (b) is <span class="conv">free, and it's the one we're not using.</span></p>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>The shift: accuracy is a <i>display</i> concern, not a <i>cutting</i> concern</h3>
+    <div class="rc">
+      <div class="timeline">
+        <h5><span class="dotc" style="background:var(--us)"></span>(a) What we do now — re-encode per clip</h5>
+        <div class="track">
+          <div class="kf" style="left:20%"><span class="kfl">I-frame</span></div>
+          <div class="bleed" style="left:20%; width:18%"></div>
+          <div class="cut" style="left:38%"><span class="cl">scene start</span></div>
+        </div>
+        <p>We re-encode <code>[scene start → end]</code> into a fresh mp4 so it physically starts at the cut. Clean — but it's an encode <b>and</b> a cached file <b>for every scene</b>.</p>
+      </div>
+      <div class="timeline">
+        <h5><span class="dotc" style="background:var(--accent)"></span>(b) Offset playback — no new file</h5>
+        <div class="track">
+          <div style="position:absolute; left:38%; right:6%; top:0; bottom:0; background:rgba(63,185,80,.13); border-left:2px solid var(--good);"></div>
+          <div class="kf" style="left:20%"><span class="kfl">I-frame</span></div>
+          <div class="bleed" style="left:20%; width:18%"></div>
+          <div class="cut" style="left:38%; background:var(--good)"><span class="cl" style="color:var(--good)">start display here</span></div>
+        </div>
+        <p>Point <code>&lt;video&gt;</code> at an existing source, set <code>currentTime = sceneStart</code>, loop <code>[start,end]</code>. The decoder eats the pre-roll silently; the user only ever sees the green range. <span class="ok-tag">Frame-accurate, zero re-encode.</span></p>
+      </div>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>So what does the grid point at?</h3>
+    <div class="opts">
+      <div class="opt ok">
+        <div class="badge">1</div>
+        <div>
+          <h4>Friendly source → the original itself <span class="pill ok">zero materialization</span></h4>
+          <p>If the import is already H.264 + AAC at a sane resolution, every grid tile plays the <b>original file</b> with in/out offsets. No proxy, no cache, no baked WebP. The existing IntersectionObserver + stagger queue already cap how many tiles decode at once.</p>
+        </div>
+      </div>
+      <div class="opt pick">
+        <div class="badge">2</div>
+        <div>
+          <h4>Unfriendly source → <i>one</i> shared low-res proxy <span class="pill pick">one pass, not N</span></h4>
+          <p>HEVC / AV1 / AC3 / Opus / 4K can't play inline or are too heavy to decode ×N. Build <b>a single short-GOP, low-res proxy of the whole episode once</b> (NVENC, fast), then every tile offset-plays <i>that</i>. Short GOP → seeks land precisely &amp; cheaply. One small file replaces hundreds of baked clips.</p>
+        </div>
+      </div>
+      <div class="opt ok">
+        <div class="badge">3</div>
+        <div>
+          <h4>Deep option → MSE byte-range feeding <span class="pill ok">elegant, complex</span></h4>
+          <p>For friendly codecs you can append just the relevant GOP byte-ranges of the original to a <code>MediaSource</code> with a timestamp offset — precise preview, <b>zero transcode and zero disk</b>. Most elegant, but fragmented-mp4 only and a lot more plumbing; HEVC / odd-audio still fall back to a proxy.</p>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="block"><span class="tick"></span>How it stacks up</h3>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead><tr><th>Approach</th><th>Per-scene assets baked</th><th>Cut accuracy</th><th>Grid weight</th><th>Upfront cost</th><th>Codec compat</th></tr></thead>
+        <tbody>
+          <tr class="row-us">
+            <th>Now: WebP grid + mp4 modal<span class="sub">our current</span></th>
+            <td class="b"><span class="v">N webps (+N mp4)</span></td>
+            <td class="g"><span class="v">Flawless</span><span class="d">re-encoded</span></td>
+            <td class="g"><span class="v">Light</span><span class="d">static webp loops</span></td>
+            <td class="b"><span class="v">N encodes</span><span class="d">batch on extract</span></td>
+            <td class="g"><span class="v">Universal</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>Offset-play the original</th>
+            <td class="g"><span class="v">None</span></td>
+            <td class="g"><span class="v">Flawless</span><span class="d">offset display</span></td>
+            <td class="m"><span class="v">Live decode</span><span class="d">capped by stagger</span></td>
+            <td class="g"><span class="v">None</span></td>
+            <td class="b"><span class="v">H.264/AAC only</span></td>
+          </tr>
+          <tr class="row-new">
+            <th>Offset-play one shared proxy</th>
+            <td class="g"><span class="v">1 proxy</span></td>
+            <td class="g"><span class="v">Flawless</span><span class="d">offset display</span></td>
+            <td class="g"><span class="v">Light</span><span class="d">low-res shared decode</span></td>
+            <td class="m"><span class="v">1 pass</span><span class="d">whole-episode transcode</span></td>
+            <td class="g"><span class="v">Universal</span><span class="d">proxy normalises it</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="caveats" style="margin-top:22px;">
+      <h3>⚠ Honest caveats</h3>
+      <ul>
+        <li><b>Not literally zero work for unfriendly sources.</b> They need one whole-episode proxy pass — but it's <i>one</i> NVENC pass at low res (thousands of fps), replacing <i>N</i> per-clip encodes, and it's a single small file rather than a folder of hundreds.</li>
+        <li><b>Upfront latency vs today's progressive thumbnails.</b> Our current grid shows the first clips fast as WebPs stream in; a whole-episode proxy must exist before tiles go live. Mitigate by building it <b>segmented in scene order</b> (early tiles light up first) and keeping the cheap poster thumbnail visible until then.</li>
+        <li><b>Looping needs a little JS.</b> Playing <code>[in,out]</code> and looping back is a <code>requestVideoFrameCallback</code> handler per tile — more than AMVerge's "play a whole file," far less than maintaining a render cache.</li>
+        <li><b>All tiles share one decode source.</b> Low-res keeps it cheap; if the proxy fails, the grid falls back to thumbnails.</li>
+        <li><b>Export is unchanged.</b> This is a preview-only path; exact export still cuts from the original as today.</li>
+      </ul>
+    </div>
+
+    <div class="verdict">
+      <div class="h">▶ Verdict · flawless + light</div>
+      <p>This is the <b>objectively-better thing to prototype</b> if the goal is "TransNetV2 accuracy + a featherweight grid + no cache folder." The unlock is conceptual: <b>stop materialising clips to get accuracy — get accuracy from the playback in-point instead, and share one decode source.</b> It's <b>orthogonal to detection mode</b> (works with our existing precise cuts). No zero-cost lunch — the codec law means unfriendly sources still need one proxy pass — but it converts "re-encode + cache every scene" into "transcode once, or not at all."</p>
+    </div>
+  </section>
+
+  <!-- ============ SECTION 4 : CONVERGENCE ============ -->
+  <section class="anchor" id="convergence">
+    <div class="sec-head"><span class="sec-num">4</span><h2>The convergence</h2></div>
+    <p class="sec-sub">Why these are one feature, not two.</p>
+
+    <div class="conv-box">
+      <div class="flow">
+        <div class="node">
+          <h5>Ask #1 — light detection</h5>
+          <p>Fast, GPU-free scene detection for weak machines.</p>
+        </div>
+        <div class="arrow">⟶</div>
+        <div class="node key">
+          <h5>◆ Keyframe alignment</h5>
+          <p>Cut points <b>are</b> I-frames.</p>
+        </div>
+      </div>
+      <div class="flow" style="margin-top:14px;">
+        <div class="node">
+          <h5>Ask #2 — kill the cache</h5>
+          <p>A faster, more responsive preview path.</p>
+        </div>
+        <div class="arrow">⟶</div>
+        <div class="node key">
+          <h5>◆ same lever</h5>
+          <p>Unlocks lossless copy &amp; whole-file play.</p>
+        </div>
+      </div>
+
+      <div class="unlocks">
+        <div class="unlock">
+          <h5>Detection win</h5>
+          <p>Sub-second, no torch/CUDA, no new dependency — strictly better than today's CPU fallback.</p>
+        </div>
+        <div class="unlock">
+          <h5>Caching win</h5>
+          <p>Keyframe starts → stream-copy previews → cache is ~free to build, no re-encode, no bleed.</p>
+        </div>
+      </div>
+
+      <p style="margin:18px 0 0; font-size:14px; color:var(--ink-mid);">Corollary worth stating loudly: a <i>naïve</i> "no-cache mode" bolted onto <b>TransNetV2</b> — one that seeks the source and trusts the cut to be clean — would fight the boundary math and reintroduce the leakage we already fixed. The cheap-via-keyframe path is a <b>property of keyframe mode</b>. <b>If you want a cache-light grid that <i>keeps</i> TransNetV2's flawless cuts, that's the separate offset-playback lever in §3</b> — it sidesteps the leakage by not relying on a clean physical cut at all.</p>
+    </div>
+  </section>
+
+  <!-- ============ SECTION 5 : ROADMAP ============ -->
+  <section class="anchor" id="roadmap">
+    <div class="sec-head"><span class="sec-num">5</span><h2>What we should do</h2></div>
+    <p class="sec-sub">Phased, lowest-risk-first. Each phase ships independently.</p>
+
+    <div class="road">
+      <div class="phase p0">
+        <div class="pn">0</div>
+        <div>
+          <span class="effort">no code</span>
+          <h4>Keep TransNetV2 + its cache as the default</h4>
+          <p class="why">It's the quality path and its cache is already optimised. Nothing below replaces it — everything is additive and <b>default-off</b>.</p>
+        </div>
+      </div>
+      <div class="phase p1">
+        <div class="pn">1</div>
+        <div>
+          <span class="effort">~1 day</span>
+          <h4>Add keyframe detection mode (default off) + min-scene coarsening</h4>
+          <p class="why">The weak-machine detector. Option B from §1.</p>
+          <ul>
+            <li>New <code>extract_keyframe()</code> branch in <code>clip_cli.py</code>'s <code>run_detection()</code> — reads keyframe flags via <b>ffprobe <code>-show_packets</code></b> (no PyAV, no new dep).</li>
+            <li>Reuse our <code>min_clip_seconds</code> merge to coarsen sub-<i>N</i>-second gaps.</li>
+            <li>Returns the identical <code>(scenes, cuts)</code> shape → grid, modal, padding all untouched.</li>
+            <li>Toggle in <code>AppConfig</code> + <code>DEFAULT_CONFIG</code>, surfaced near <code>clip_extraction_mode</code>, threaded through <code>clips.rs::clip_extract</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase p2">
+        <div class="pn">2</div>
+        <div>
+          <span class="effort">~1–2 days</span>
+          <h4>Cache-light previews in keyframe mode</h4>
+          <p class="why">The "faster / no heavy cache" payoff — falls straight out of phase 1.</p>
+          <ul>
+            <li>When cuts are keyframe-aligned, materialise previews via <b>lossless stream-copy</b>, reusing the existing keyframe-snap merge plumbing in <code>clips.rs</code> instead of NVENC re-encode.</li>
+            <li>Keep the <b>re-encode proxy as fallback</b> for HEVC / AC3 / Opus (WebView2 can't decode them) — same approach AMVerge uses.</li>
+            <li>Optional: AMVerge-style whole-file-per-scene if we ever want zero per-click work (costs disk).</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase p3">
+        <div class="pn">3</div>
+        <div>
+          <span class="effort">opt · ~1 day</span>
+          <h4>Similarity auto-merge (only if over-seg still bites)</h4>
+          <p class="why">Option C from §1 — quality polish for keyframe mode.</p>
+          <ul>
+            <li>Port <code>cs_scenedetect</code>'s adjacent-thumbnail 8×8 cosine check to auto-merge near-identical neighbours.</li>
+            <li>Reuses thumbnails we already generate; turns "coarse" into "near-TransNet on web-rips."</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="verdict" style="margin-top:24px;">
+      <div class="h">▶ The short version</div>
+      <p>Build <b>Phase 1 + 2</b> together on this branch: one feature — <b>keyframe mode</b> — that simultaneously answers "fast detection for weak machines" and "faster, cache-light previews." Treat Phase 3 as a fast-follow gated on real over-segmentation feedback. <b>Separately</b>, if you want a lighter grid <i>without</i> giving up TransNetV2's flawless cuts, spike the <b>offset-playback / single-proxy approach in §3</b> — and consider the quick win of finally <b>wiring the already-installed PySceneDetect</b> as the CPU detector.</p>
+    </div>
+  </section>
+
+  <!-- ============ CAVEATS ============ -->
+  <section class="anchor" id="caveats">
+    <div class="caveats">
+      <h3>⚠ Caveats &amp; honest limits</h3>
+      <ul>
+        <li><b>Keyframe mode over-segments by nature.</b> Encoders place I-frames at scene changes <i>and</i> at fixed GOP intervals. Quality is hostage to the encode; coarsening/merge is mandatory, not optional, to make it pleasant.</li>
+        <li><b>Cache-light ≠ cache-free.</b> WebView2 can't decode HEVC / AC3 / Opus / some HEVC profiles. Those still need a transcoded proxy — exactly the layer AMVerge keeps. The win is real for the common H.264 + AAC case.</li>
+        <li><b>No-cache/seek-the-source is a trap for the grid.</b> Many <code>&lt;video&gt;</code> elements seeking into one large source is slower and reintroduces bleed. AMVerge deliberately pre-splits instead.</li>
+        <li><b>"Faster cache format" is low-leverage.</b> Our re-encode is already ~10 ms/clip; the prior costs (demux walk, cold-start) are already fixed. Optimising the format optimises the cheap part.</li>
+        <li><b>Export precision is separate.</b> Snapping a cut to a keyframe is fine for <i>preview</i> but shifts the <i>export</i> boundary by up to a GOP — keep export on the precise <code>sourceStart/sourceEnd</code> path as today.</li>
+        <li><b>GPL-3.0.</b> AMVerge is GPLv3; lifting code verbatim carries license obligations. Re-implementing the (simple) keyframe idea against our own ffprobe plumbing sidesteps that and avoids the PyAV dependency entirely.</li>
+      </ul>
+    </div>
+
+    <footer>
+      <div>Design study generated for the <code>taking-shit-from-amverge-and-optimizations</code> branch · for discussion, not yet implemented.</div>
+      <div class="files">
+        Key references —
+        <span>backend/clip_cli.py · extract()</span>
+        <span>src-tauri/src/clips.rs · render_scene_clip_job</span>
+        <span>docs/CLAUDE-NOTES.md · scene boundary semantics + preview perf</span>
+        <span>AMVerge: backend/utils/keyframes.py</span>
+        <span>AMVerge: backend/app.py · trim_scenes_at_keyframes</span>
+        <span>AMVerge: backend/utils/cs_scenedetect.py</span>
+      </div>
+    </footer>
+  </section>
+
+</div>
+</body>
+</html>

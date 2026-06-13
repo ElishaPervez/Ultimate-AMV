@@ -56,6 +56,9 @@ const defaultProps = {
   playable: true,
   activationEpoch: 0,
   clipHoverPreview: false,
+  // Featherweight flag OFF by default so these tests exercise the unchanged
+  // WebP-grid behavior; the offset <video> never mounts under this default.
+  featherweightEnabled: false,
   onClick: vi.fn(),
   onToggleSelect: vi.fn(),
 }
@@ -276,6 +279,73 @@ describe('ClipPreviewTile — selection and mergeMode rendering', () => {
     const mainBtn = wrapper.querySelector('button.clip-preview-tile') as HTMLElement
     fireEvent.click(mainBtn, { ctrlKey: true })
     expect(onClick).toHaveBeenCalledWith({ ctrl: true, shift: false })
+  })
+})
+
+// ─── featherweight central mount gate (mayMountVideo) ────────────────────────
+
+describe('ClipPreviewTile — featherweight mayMountVideo gate', () => {
+  // The per-tile IntersectionObserver was RETIRED from the mount decision. The
+  // tile now mounts its live offset <video> ONLY when the panel's central,
+  // geometry-driven, hard-capped set grants it a slot (mayMountVideo) — OR when
+  // the tile is hovered (the deliberate +1 hover exemption). These tests prove
+  // the tile consults nothing else for the steady-state mount.
+
+  // A featherweight clip with a resolved playbackSrc (single direct clip) so the
+  // OffsetVideoLayer path is eligible — gated solely on the play readiness.
+  function makeFeatherweightClip(overrides: Partial<ClipPreviewItem> = {}): ClipPreviewItem {
+    return makeClip({
+      playbackSrc: '/cache/proxy.mp4',
+      playbackMode: 'direct',
+      ...overrides,
+    })
+  }
+
+  const featherweightProps = {
+    ...defaultProps,
+    featherweightEnabled: true,
+  }
+
+  it('does NOT mount the offset <video> when mayMountVideo is false and not hovered', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={false} paused={false} />
+    )
+    // Outside the capped set and not hovered -> the live <video> stays unmounted
+    // (neutral placeholder only). No IntersectionObserver can override this.
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+  })
+
+  it('mounts the offset <video> when mayMountVideo=true', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={true} paused={false} />
+    )
+    // The central geometry set is the SOLE authority: a granted tile mounts.
+    expect(container.querySelector('.clip-offset-video')).toBeInTheDocument()
+  })
+
+  it('HOVER exemption: mounts the offset <video> on hover even when mayMountVideo=false', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={false} paused={false} />
+    )
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+    const wrapper = container.querySelector('.clip-preview-tile-wrapper') as HTMLElement
+    fireEvent.mouseEnter(wrapper)
+    // The `|| isHovered` exemption preserves hover-to-play for a tile outside
+    // the capped set (at most +1 concurrent decoder).
+    expect(container.querySelector('.clip-offset-video')).toBeInTheDocument()
+    fireEvent.mouseLeave(wrapper)
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+  })
+
+  it('does NOT mount when paused even if mayMountVideo=true', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={true} paused={true} />
+    )
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
   })
 })
 

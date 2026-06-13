@@ -416,6 +416,82 @@ pub(crate) fn probe_video_codec(ffprobe: &Path, input: &Path) -> Result<String, 
         .ok_or_else(|| "ffprobe could not read the input video codec".to_string())
 }
 
+// Featherweight previews: the single probe that drives clip_playback_plan's
+// friendly-vs-proxy routing. One ffprobe call reads the first video stream's
+// codec/pix_fmt/dimensions plus the first audio stream's codec, using the JSON
+// output form (mirrors downloads.rs's format probe) so we parse one document
+// instead of fragile key=value lines across two streams.
+#[derive(Clone, Default)]
+pub(crate) struct MediaSummary {
+    pub video_codec: Option<String>,
+    pub pix_fmt: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub audio_codec: Option<String>,
+}
+
+pub(crate) fn probe_media_summary(ffprobe: &Path, input: &Path) -> Result<MediaSummary, String> {
+    let output = cmd(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type,codec_name,pix_fmt,width,height",
+            "-of",
+            "json",
+        ])
+        .arg(input)
+        .output()
+        .map_err(|error| format!("Could not start ffprobe: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Could not parse ffprobe JSON: {error}"))?;
+    let streams = parsed
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut summary = MediaSummary::default();
+    // Take the FIRST video stream and FIRST audio stream (v:0 / a:0), matching
+    // how the rest of the app maps 0:v:0 / 0:a:0.
+    for stream in &streams {
+        let codec_type = stream
+            .get("codec_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let codec_name = stream
+            .get("codec_name")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.to_ascii_lowercase());
+        match codec_type {
+            "video" if summary.video_codec.is_none() => {
+                summary.video_codec = codec_name;
+                summary.pix_fmt = stream
+                    .get("pix_fmt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.to_ascii_lowercase());
+                summary.width = stream
+                    .get("width")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|v| v as u32);
+                summary.height = stream
+                    .get("height")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|v| v as u32);
+            }
+            "audio" if summary.audio_codec.is_none() => {
+                summary.audio_codec = codec_name;
+            }
+            _ => {}
+        }
+    }
+    Ok(summary)
+}
+
 pub(crate) fn probe_has_audio_stream(ffprobe: &Path, input: &Path) -> Result<bool, String> {
     let output = cmd(ffprobe)
         .args([
@@ -446,6 +522,26 @@ pub(crate) fn run_ffmpeg_with_progress(
     duration: f64,
     label: &str,
     pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
+) -> Result<(), String> {
+    run_ffmpeg_with_progress_tap(window, ffmpeg, args, duration, label, pid_slot, None)
+}
+
+// Same as run_ffmpeg_with_progress, plus an optional per-tick side-channel
+// event. When `progress_tap` is Some((event_name, source_path)) the determinate
+// percent is also forwarded on `event_name` as { sourcePath, percent, stage }
+// so a caller (e.g. the featherweight source-proxy build) can carry the source
+// identity alongside the percent without disturbing the shared
+// "conversion-progress" stream. All existing callers pass None via the thin
+// wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_ffmpeg_with_progress_tap(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    args: Vec<String>,
+    duration: f64,
+    label: &str,
+    pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
+    progress_tap: Option<(&str, &str)>,
 ) -> Result<(), String> {
     log_info(
         "ffmpeg.start",
@@ -521,6 +617,12 @@ pub(crate) fn run_ffmpeg_with_progress(
                             fps.clone(),
                             speed.clone(),
                         );
+                        if let Some((event, source_path)) = progress_tap {
+                            let _ = window.emit(
+                                event,
+                                json!({ "sourcePath": source_path, "percent": percent, "stage": "processing" }),
+                            );
+                        }
                     }
                 }
             }
@@ -533,6 +635,12 @@ pub(crate) fn run_ffmpeg_with_progress(
                     fps.clone(),
                     speed.clone(),
                 );
+                if let Some((event, source_path)) = progress_tap {
+                    let _ = window.emit(
+                        event,
+                        json!({ "sourcePath": source_path, "percent": 100.0, "stage": "finalizing" }),
+                    );
+                }
             }
             _ => {}
         }

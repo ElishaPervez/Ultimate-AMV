@@ -37,6 +37,10 @@ export type AppConfig = {
   background_bright_text: string | boolean;
   audio_output_format: "wav" | "mp3";
   clip_hover_preview: boolean;
+  /** Default-off flag gating the featherweight offset-playback scene previews.
+   * When false the previews behave byte-for-byte as today (animated-WebP grid
+   * + scene_clip_render modal). Plain key/value via get_config/set_config. */
+  featherweight_previews: boolean;
   tsukyio_api_key: string;
 };
 

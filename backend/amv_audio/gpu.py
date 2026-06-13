@@ -111,6 +111,6 @@ def get_cpu_switch_cmds(
     if install_onnxruntime:
         cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "onnxruntime"])
     if install_audio_separator:
-        # CPU mode: install audio-separator and scenedetect[opencv]
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator", "scenedetect[opencv]", *AUDIO_RUNTIME_PACKAGES])
+        # CPU mode: install audio-separator and scenedetect
+        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator", "scenedetect>=0.6.7,<0.8", *AUDIO_RUNTIME_PACKAGES])
     return cmds

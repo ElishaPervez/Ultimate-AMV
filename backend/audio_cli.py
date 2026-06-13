@@ -103,6 +103,7 @@ def _config_payload(cfg):
         "background_bright_text": bool(cfg.get("background_bright_text", BACKGROUND_DEFAULTS["background_bright_text"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
+        "featherweight_previews": bool(cfg.get("featherweight_previews", False)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
     }
 
@@ -228,6 +229,8 @@ def set_config(key, value):
         cfg["audio_output_format"] = normalized
     elif key == "clip_hover_preview":
         cfg["clip_hover_preview"] = value.lower() == "true"
+    elif key == "featherweight_previews":
+        cfg["featherweight_previews"] = value.lower() == "true"
     elif key == "tsukyio_api_key":
         cfg["tsukyio_api_key"] = (value or "").strip()
     save_config(cfg)

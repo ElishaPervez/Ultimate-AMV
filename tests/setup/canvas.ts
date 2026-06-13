@@ -58,6 +58,24 @@ if (typeof HTMLCanvasElement !== 'undefined') {
 export { _fakeCtx as fakeCanvasCtx }
 
 // ---------------------------------------------------------------------------
+// HTMLMediaElement polyfill — jsdom throws "Not implemented" for play/pause/load
+// ---------------------------------------------------------------------------
+//
+// The featherweight offset <video> layers call video.load() on mount and
+// video.pause() + video.load() in their SYNCHRONOUS decoder-release cleanup, and
+// useOffsetLoop calls video.play()/pause(). jsdom implements none of these and
+// logs a noisy "Error: Not implemented" to stderr on each call. Stub them as
+// no-ops (play resolves a Promise, matching the real API) so media-bearing
+// component tests render and unmount cleanly.
+if (typeof HTMLMediaElement !== 'undefined') {
+  HTMLMediaElement.prototype.play = vi.fn(
+    () => Promise.resolve(),
+  ) as unknown as typeof HTMLMediaElement.prototype.play
+  HTMLMediaElement.prototype.pause = vi.fn() as typeof HTMLMediaElement.prototype.pause
+  HTMLMediaElement.prototype.load = vi.fn() as typeof HTMLMediaElement.prototype.load
+}
+
+// ---------------------------------------------------------------------------
 // Image polyfill — setting .src fires onload on the next microtask
 // ---------------------------------------------------------------------------
 

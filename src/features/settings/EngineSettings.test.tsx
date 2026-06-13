@@ -33,6 +33,7 @@ const baseConfig: AppConfig = {
   background_bright_text: '0',
   audio_output_format: 'wav',
   clip_hover_preview: false,
+  featherweight_previews: false,
   tsukyio_api_key: '',
 }
 

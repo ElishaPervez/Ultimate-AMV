@@ -54,6 +54,7 @@ pub(crate) async fn clear_app_cache(window: tauri::Window) -> Result<ClearCacheR
         const CACHE_DIRS: &[&str] = &[
             "clip_previews",
             "scene_clips",
+            "source_proxies",
             "clip_compat_cache",
             "bgremove_previews",
         ];

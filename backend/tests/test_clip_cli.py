@@ -9,6 +9,8 @@ Scope:
   - probe_video() happy path + returncode != 0 branch
   - scenes_from_cuts() / scenes_from_ranges()
   - boundary_frames_to_seconds()
+  - scenedetect_cut_frames() — PySceneDetect ContentDetector driver (mocked)
+  - extract_cpu() — PySceneDetect CPU detection path (mocked decode + detector)
   - progress() stage alias normalisation
   - main() command dispatch — help/no command branch
   - extract() missing-file error path
@@ -344,6 +346,199 @@ class TestBoundaryFramesToSeconds:
         mask[61] = True
         cuts = boundary_frames_to_seconds(mask, None, 24.0, 10.0, 0.35)
         assert len(cuts) == 1
+
+
+# ---------------------------------------------------------------------------
+# scenedetect_cut_frames — PySceneDetect ContentDetector driver
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_scenedetect(cut_frame_numbers):
+    """Build a fake `scenedetect` module whose ContentDetector reports a cut
+    only at the given frame numbers, so the driver can be tested without the
+    real (cv2-backed) package installed.
+
+    Returns the patch.dict context manager for `sys.modules`.
+    """
+    class FakeFrameTimecode:
+        def __init__(self, timecode, fps=None):
+            self._frame = int(timecode)
+
+        def __int__(self):
+            return self._frame
+
+    class FakeContentDetector:
+        last_kwargs = None
+
+        def __init__(self, threshold=27.0, min_scene_len=15, **kwargs):
+            FakeContentDetector.last_kwargs = {
+                "threshold": threshold,
+                "min_scene_len": min_scene_len,
+            }
+
+        def process_frame(self, timecode, frame_img):
+            if int(timecode) in cut_frame_numbers:
+                # Return FrameTimecode-like objects, mirroring scenedetect 0.7
+                return [FakeFrameTimecode(int(timecode))]
+            return []
+
+    fake_module = types.ModuleType("scenedetect")
+    fake_module.ContentDetector = FakeContentDetector
+    fake_module.FrameTimecode = FakeFrameTimecode
+    return patch.dict("sys.modules", {"scenedetect": fake_module}), FakeContentDetector
+
+
+class TestScenedetectCutFrames:
+    def test_returns_cut_frame_for_detected_boundary(self):
+        import numpy as np
+        from clip_cli import scenedetect_cut_frames
+
+        frames = np.zeros((72, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect({36})
+        with ctx:
+            cuts = scenedetect_cut_frames(frames, 24.0, 27.0, 0.35, 0.0)
+        assert cuts == [36]
+
+    def test_no_detected_cuts_returns_empty(self):
+        import numpy as np
+        from clip_cli import scenedetect_cut_frames
+
+        frames = np.zeros((48, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect(set())
+        with ctx:
+            cuts = scenedetect_cut_frames(frames, 24.0, 27.0, 0.35, 0.0)
+        assert cuts == []
+
+    def test_empty_frames_returns_empty(self):
+        import numpy as np
+        from clip_cli import scenedetect_cut_frames
+
+        frames = np.zeros((0, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect({0})
+        with ctx:
+            cuts = scenedetect_cut_frames(frames, 24.0, 27.0, 0.35, 0.0)
+        assert cuts == []
+
+    def test_cpu_threshold_and_min_clip_passed_to_detector(self):
+        import numpy as np
+        from clip_cli import scenedetect_cut_frames
+
+        frames = np.zeros((24, 27, 48, 3), dtype=np.uint8)
+        ctx, FakeDetector = _install_fake_scenedetect(set())
+        with ctx:
+            scenedetect_cut_frames(frames, 24.0, 30.0, 0.5, 0.0)
+        # threshold flows through verbatim; min_scene_len = round(0.5 * 24) = 12
+        assert FakeDetector.last_kwargs["threshold"] == pytest.approx(30.0)
+        assert FakeDetector.last_kwargs["min_scene_len"] == 12
+
+    def test_cuts_returned_sorted_and_unique(self):
+        import numpy as np
+        from clip_cli import scenedetect_cut_frames
+
+        frames = np.zeros((100, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect({60, 30, 30})
+        with ctx:
+            cuts = scenedetect_cut_frames(frames, 24.0, 27.0, 0.35, 0.0)
+        assert cuts == [30, 60]
+
+    def test_real_scenedetect_finds_hard_cut(self):
+        """Integration: drive the genuine PySceneDetect ContentDetector against
+        a synthetic black->white cut. Skips cleanly where scenedetect isn't
+        installed (e.g. the repo .venv)."""
+        pytest.importorskip("scenedetect")
+        import numpy as np
+        from clip_cli import scenedetect_cut_frames, FRAME_W, FRAME_H
+
+        # Decode-shaped RGB array: solid black for the first half, solid white
+        # for the second — a single hard cut at the boundary frame.
+        frame_count = 60
+        boundary = 30
+        frames = np.zeros((frame_count, FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        frames[boundary:] = 255
+
+        # Low threshold + no min-scene floor so the obvious cut is reported.
+        cuts = scenedetect_cut_frames(frames, 24.0, 1.0, 0.0, 0.0)
+
+        assert cuts, "real ContentDetector reported no cut on a hard black/white boundary"
+        assert any(abs(c - boundary) <= 1 for c in cuts), (
+            f"expected a cut at/adjacent to frame {boundary}, got {cuts}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# extract_cpu — PySceneDetect CPU detection path
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCpu:
+    def _info(self, fps=24.0, duration=10.0, codec="h264"):
+        from clip_cli import VideoInfo
+        return VideoInfo(codec=codec, fps=fps, duration=duration)
+
+    def test_returns_scenes_and_interior_cuts(self, tmp_path):
+        import numpy as np
+        import clip_cli
+
+        info = self._info(fps=24.0, duration=10.0)
+        frames = np.zeros((240, 27, 48, 3), dtype=np.uint8)
+
+        # Cut at frame 120 -> 5.0 s (interior, passes min-clip edge filter).
+        ctx, _det = _install_fake_scenedetect({120})
+        with ctx:
+            with patch("clip_cli.require_tool", return_value="ffmpeg"):
+                with patch("clip_cli.decode_frames_cpu", return_value=frames):
+                    scenes, cuts = clip_cli.extract_cpu(
+                        tmp_path / "v.mp4", info, 27.0, 0.35, 0.0
+                    )
+
+        assert cuts == pytest.approx([5.0])
+        # one interior cut -> two scenes; shape matches the GPU paths' contract.
+        assert len(scenes) == 2
+        for key in ("index", "label", "source", "start", "end"):
+            assert key in scenes[0]
+        assert scenes[0]["start"] == pytest.approx(0.0)
+        assert scenes[0]["end"] == pytest.approx(5.0)
+        assert scenes[1]["start"] == pytest.approx(5.0)
+        assert scenes[1]["end"] == pytest.approx(10.0)
+
+    def test_no_cuts_yields_single_scene(self, tmp_path):
+        import numpy as np
+        import clip_cli
+
+        info = self._info(fps=24.0, duration=10.0)
+        frames = np.zeros((240, 27, 48, 3), dtype=np.uint8)
+
+        ctx, _det = _install_fake_scenedetect(set())
+        with ctx:
+            with patch("clip_cli.require_tool", return_value="ffmpeg"):
+                with patch("clip_cli.decode_frames_cpu", return_value=frames):
+                    scenes, cuts = clip_cli.extract_cpu(
+                        tmp_path / "v.mp4", info, 27.0, 0.35, 0.0
+                    )
+
+        assert cuts == []
+        assert len(scenes) == 1
+        assert scenes[0]["start"] == pytest.approx(0.0)
+        assert scenes[0]["end"] == pytest.approx(10.0)
+
+    def test_cut_too_close_to_edge_dropped(self, tmp_path):
+        import numpy as np
+        import clip_cli
+
+        info = self._info(fps=24.0, duration=10.0)
+        frames = np.zeros((240, 27, 48, 3), dtype=np.uint8)
+
+        # Cut at frame 2 -> ~0.083 s, below min_clip_seconds=0.35 -> dropped.
+        ctx, _det = _install_fake_scenedetect({2})
+        with ctx:
+            with patch("clip_cli.require_tool", return_value="ffmpeg"):
+                with patch("clip_cli.decode_frames_cpu", return_value=frames):
+                    scenes, cuts = clip_cli.extract_cpu(
+                        tmp_path / "v.mp4", info, 27.0, 0.35, 0.0
+                    )
+
+        assert cuts == []
+        assert len(scenes) == 1
 
 
 # ---------------------------------------------------------------------------

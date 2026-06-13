@@ -35,7 +35,8 @@ pub(crate) use python_env::{
 };
 pub(crate) use video_cmds::{
     canonical_input_path, command_available, emit_conversion_progress, ensure_tool, ffmpeg_listing,
-    probe_duration, probe_has_audio_stream, run_ffmpeg_with_progress, H264_NVENC_AVAILABLE,
+    probe_duration, probe_has_audio_stream, probe_media_summary, run_ffmpeg_with_progress,
+    MediaSummary, H264_NVENC_AVAILABLE,
 };
 
 // ---- Shared types used across modules (kept in lib.rs to avoid circular deps) ----
@@ -64,6 +65,9 @@ pub(crate) struct ConversionDone {
 
 pub(crate) static AUDIO_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static CLIP_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+// Featherweight previews: the in-flight source-proxy ffmpeg build. Mirrors
+// CLIP_CHILD_PID so a new source selection / app teardown cancels it.
+pub(crate) static PROXY_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static DOWNLOAD_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static VIDEO_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static BGREMOVE_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
@@ -250,6 +254,7 @@ fn prepare_for_update() -> Result<(), String> {
     );
     kill_child_pid(&AUDIO_CHILD_PID);
     kill_child_pid(&CLIP_CHILD_PID);
+    kill_child_pid(&PROXY_CHILD_PID);
     kill_child_pid(&DOWNLOAD_CHILD_PID);
     kill_child_pid(&VIDEO_CHILD_PID);
     kill_child_pid(&BGREMOVE_CHILD_PID);
@@ -375,6 +380,7 @@ pub fn run() {
                 log_info("app.close", "Application close requested", Value::Null);
                 kill_child_pid(&AUDIO_CHILD_PID);
                 kill_child_pid(&CLIP_CHILD_PID);
+                kill_child_pid(&PROXY_CHILD_PID);
                 kill_child_pid(&DOWNLOAD_CHILD_PID);
                 kill_child_pid(&VIDEO_CHILD_PID);
                 kill_child_pid(&BGREMOVE_CHILD_PID);
@@ -410,6 +416,8 @@ pub fn run() {
             preview::clip_preview_generate,
             preview::clip_preview_generate_batch,
             clips::scene_clip_render,
+            clips::clip_playback_plan,
+            clips::build_source_proxy,
             config::get_config,
             config::set_config,
             background_img::save_background_image,

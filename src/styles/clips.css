@@ -658,6 +658,23 @@
   font-weight: 800;
 }
 
+/* SINGLE-SOURCE MERGES ONLY: a tile from a different source can't join the
+   in-progress merge. Dim it and block the pointer so the rule reads at a
+   glance; the title tooltip carries the reason. */
+.clip-corner-select.is-merge-disabled,
+.clip-corner-select.is-merge-disabled:hover {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+  background: rgba(15, 20, 24, 0.55);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.clip-preview-tile.is-merge-disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .clip-corner-num {
   font-size: 13px;
   line-height: 1;
@@ -949,6 +966,32 @@
   box-shadow: 0 0 18px rgb(var(--theme-accent-rgb) / 0.16);
 }
 
+/* DEV TOOLS: featherweight offset-playback <video>. Overlays the base WebP
+ * poster/placeholder (same cell, just above it, below the scrim/badges) and
+ * fades in once the first frame paints. cover-crops to the tile like the WebP
+ * overlay so direct vs proxy sources look identical. Fully removable with the
+ * rest of the featherweight feature. */
+.clip-offset-video {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  background: #050809;
+  animation: clip-offset-video-in 250ms ease-out;
+}
+
+@keyframes clip-offset-video-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .clip-loop-progress {
   position: absolute;
   left: 0;
@@ -970,6 +1013,133 @@
   background: linear-gradient(90deg, var(--cyan), color-mix(in srgb, var(--cyan) 58%, white 24%));
   box-shadow: 0 0 14px rgb(var(--theme-accent-rgb) / 0.32);
   animation: clip-loop-progress var(--clip-loop-duration, 2s) linear infinite;
+}
+
+/* Featherweight offset-video progress bar: same look as .clip-loop-progress but
+ * driven imperatively (scaleX set from useOffsetLoop onProgress), no animation. */
+.clip-offset-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 3;
+  height: 3px;
+  overflow: hidden;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.clip-offset-progress-fill {
+  width: 100%;
+  height: 100%;
+  display: block;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: linear-gradient(90deg, var(--cyan), color-mix(in srgb, var(--cyan) 58%, white 24%));
+  box-shadow: 0 0 14px rgb(var(--theme-accent-rgb) / 0.32);
+  will-change: transform;
+}
+
+/* STEP D — SEGMENTED FILMSTRIP (non-contiguous merge playlist). Replaces the single
+   progress bar with one proportional cell per segment (flex-basis ∝ window duration),
+   thin dividers between. The active cell fills imperatively (scaleX), cells before it
+   render full, after it empty. Same top-edge placement / look as .clip-offset-progress. */
+.clip-offset-filmstrip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 3;
+  height: 3px;
+  display: flex;
+  gap: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.clip-offset-filmstrip-cell {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.clip-offset-filmstrip-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: linear-gradient(90deg, var(--cyan), color-mix(in srgb, var(--cyan) 58%, white 24%));
+  box-shadow: 0 0 14px rgb(var(--theme-accent-rgb) / 0.32);
+  will-change: transform;
+}
+
+/* STEP D — NOW-PLAYING 'i/N' PILL. Hidden by default; revealed on tile hover. Text is
+   updated imperatively by the playlist loop (no per-frame React). */
+.clip-now-playing-pill {
+  position: absolute;
+  top: 8px;
+  right: 44px;
+  z-index: 3;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: #edf6fb;
+  background: rgba(3, 6, 7, 0.72);
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 140ms ease-out;
+}
+
+.clip-preview-tile:hover .clip-now-playing-pill,
+.clip-preview-tile-wrapper:hover .clip-now-playing-pill {
+  opacity: 1;
+}
+
+/* STEP D — GRACEFUL MERGED POSTER. A featherweight merge with no resolvable
+   playbackSrc and nothing building shows this neutral static card instead of an
+   indefinite spinner (fixes the reported infinite-spinner). */
+.clip-merged-poster {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  pointer-events: none;
+  color: rgba(237, 246, 251, 0.82);
+  background:
+    radial-gradient(circle at 50% 42%, rgb(var(--theme-accent-rgb) / 0.12), transparent 46%),
+    #050809;
+}
+
+.clip-merged-poster-mark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  color: var(--cyan);
+  background: rgb(var(--theme-accent-rgb) / 0.14);
+  box-shadow: inset 0 0 0 1px rgb(var(--theme-accent-rgb) / 0.28);
+}
+
+.clip-merged-poster-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-align: center;
 }
 
 .clip-tile-scrim,
