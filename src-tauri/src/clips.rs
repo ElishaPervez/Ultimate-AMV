@@ -1584,14 +1584,20 @@ fn run_source_proxy_job(
     color: &ColorMetadata,
 ) -> Result<(), String> {
     // Whole-file transcode (NO -ss) so the proxy timeline matches the source
-    // 1:1. -hwaccel auto = universal HW decode (NVDEC/QSV/D3D11VA/software),
-    // not NVIDIA-gated, degrading cleanly per the CPU/GPU parity rule.
+    // 1:1. Decode accel: on the NVENC path force `cuda` so the NVIDIA decoder
+    // (NVDEC) is actually engaged -- plain `auto` silently picks dxva2, leaving
+    // the dedicated decoder idle (the "my decoder isn't being used" symptom).
+    // Frames still return to system RAM (NO -hwaccel_output_format cuda yet), so
+    // the CPU scale/setparams chain below is unchanged and there's no hwframe
+    // hard-fail. The libx264 path keeps `auto` so non-NVIDIA machines decode
+    // cleanly per the CPU/GPU parity rule; if NVDEC can't handle a codec the
+    // primary job errors and the existing libx264 fallback retries with `auto`.
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
         "-hwaccel".to_string(),
-        "auto".to_string(),
+        if use_nvenc { "cuda" } else { "auto" }.to_string(),
         "-i".to_string(),
         input.to_string_lossy().to_string(),
         // Optional audio: silent sources skip the audio stream without failing.
