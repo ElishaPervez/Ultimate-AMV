@@ -11,7 +11,8 @@ NAME = (os.environ.get("RELEASE_NAME") or TAG).strip() or "New release"
 BODY = (os.environ.get("RELEASE_BODY") or "").strip()
 RELEASE_URL = os.environ.get("RELEASE_URL", "").strip()
 
-CHANNEL = "1499511470717669396"  # #update-logs (Ultimate AMV Toolkit guild)
+# #update-logs in the Ultimate AMV Toolkit guild; override for testing.
+CHANNEL = os.environ.get("DISCORD_CHANNEL_ID", "1499511470717669396")
 DOWNLOAD_URL = "https://github.com/ElishaPervez/Ultimate-AMV/releases/latest/download/Ultimate.AMV_x64-setup.exe"
 IS_COMPONENTS_V2 = 1 << 15
 
@@ -59,7 +60,7 @@ req = urllib.request.Request(
 )
 try:
     with urllib.request.urlopen(req) as r:
-        print("Posted to #update-logs:", r.status, json.loads(r.read()).get("id"))
+        print("Posted:", r.status, json.loads(r.read()).get("id"))
 except urllib.error.HTTPError as e:
     print("Discord API error", e.code)
     print(e.read().decode())
