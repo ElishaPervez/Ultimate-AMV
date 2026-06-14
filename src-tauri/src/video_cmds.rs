@@ -11,7 +11,7 @@ use serde_json::json;
 use tauri::Emitter;
 
 use crate::{
-    app_root, clear_child_pid, cmd, find_tool, log_error, log_info, log_warn, store_child_pid,
+    app_root, cmd, find_tool, log_error, log_info, log_warn, store_child_pid,
     truncate_log_text, ConversionDone, ConversionProgress, GPU_INTRA_SOURCE_CODECS,
     VIDEO_CHILD_PID,
 };
@@ -526,6 +526,19 @@ pub(crate) fn run_ffmpeg_with_progress(
     run_ffmpeg_with_progress_tap(window, ffmpeg, args, duration, label, pid_slot, None)
 }
 
+// Clears a tracked PID slot ONLY if it still holds `own_pid`. A finishing job
+// must never wipe a newer job's pid out of a shared slot (which would orphan the
+// live job from every teardown path). Cheap — one lock and an equality check.
+fn clear_child_pid_if_owned(slot: &OnceLock<Mutex<Option<u32>>>, own_pid: u32) {
+    if let Some(m) = slot.get() {
+        if let Ok(mut g) = m.lock() {
+            if *g == Some(own_pid) {
+                *g = None;
+            }
+        }
+    }
+}
+
 // Same as run_ffmpeg_with_progress, plus an optional per-tick side-channel
 // event. When `progress_tap` is Some((event_name, source_path)) the determinate
 // percent is also forwarded on `event_name` as { sourcePath, percent, stage }
@@ -562,8 +575,9 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
             );
             format!("Could not start ffmpeg: {error}")
         })?;
+    let own_pid = child.id();
     if let Some(slot) = pid_slot {
-        store_child_pid(slot, child.id());
+        store_child_pid(slot, own_pid);
     }
 
     let stdout = child
@@ -649,7 +663,10 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
 
     let status = child.wait().map_err(|error| error.to_string())?;
     if let Some(slot) = pid_slot {
-        clear_child_pid(slot);
+        // Only clear the slot if it still holds OUR pid. If a newer job already
+        // superseded us (stored its own pid here), a blind clear would wipe the
+        // live job's pid and orphan it from teardown. Cheap: one lock + compare.
+        clear_child_pid_if_owned(slot, own_pid);
     }
     let stderr_tail = stderr_handle.join().unwrap_or_default();
     if status.success() {
@@ -668,15 +685,22 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
         );
         Ok(())
     } else {
-        if status.code().is_none() {
+        let tail = stderr_tail.trim();
+        // A build WE killed counts as cancelled, not an encoder failure, so a
+        // caller (e.g. the source-proxy NVENC->libx264 fallback) never re-runs
+        // it on CPU. On Windows `taskkill /F` makes ffmpeg exit with code
+        // Some(1) (NOT None), but a killed process produces no stderr
+        // diagnostics — so Some(1) with an empty tail is a kill, while a real
+        // ffmpeg failure that exits 1 always carries a non-empty stderr tail.
+        // Mirrors run_preview_merge_encode's Windows-aware classification.
+        if status.code().is_none() || status.code() == Some(1) && tail.is_empty() {
             log_warn(
                 "ffmpeg.cancelled",
                 "FFmpeg job was cancelled",
-                json!({ "label": label }),
+                json!({ "label": label, "code": status.code() }),
             );
             return Err(format!("{label} cancelled."));
         }
-        let tail = stderr_tail.trim();
         if tail.is_empty() {
             let error = format!("ffmpeg exited with code {}", status.code().unwrap_or(-1));
             log_error(

@@ -145,6 +145,7 @@ export function ClipPreviewTile({
   featherweightEnabled,
   playbackPending = false,
   mayMountVideo = false,
+  justMerged = false,
   onClick,
   onToggleSelect,
 }: {
@@ -180,6 +181,10 @@ export function ClipPreviewTile({
    * below so hover-to-play still works for a tile outside the capped set. Defaults
    * false so flag-off and existing callers/tests are byte-for-byte unchanged. */
   mayMountVideo?: boolean;
+  /* Real-time merge: true for one short beat right after this unified card is
+   * formed by a merge, so it springs in (clip-merge-card-pop) beneath the
+   * converging ghost tiles. Cleared on the panel's teardown timer. */
+  justMerged?: boolean;
   onClick: (modifiers: { ctrl: boolean; shift: boolean }) => void;
   onToggleSelect: () => void;
 }) {
@@ -287,13 +292,14 @@ export function ClipPreviewTile({
   return (
     <div
       ref={tileRef}
+      data-clip-id={clip.id}
       className={`clip-preview-tile-wrapper ${selected ? "is-selected" : ""}`}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
       <button
         type="button"
-        className={`clip-preview-tile spring-motion ${selected ? "is-selected" : ""} ${mergeMode ? "is-selectable" : ""} ${mergeMode && mergeDisabled ? "is-merge-disabled" : ""}`}
+        className={`clip-preview-tile spring-motion ${selected ? "is-selected" : ""} ${mergeMode ? "is-selectable" : ""} ${mergeMode && mergeDisabled ? "is-merge-disabled" : ""} ${justMerged ? "is-just-merged" : ""}`}
         title={mergeMode && mergeDisabled ? MERGE_DISABLED_REASON : undefined}
         onClick={(e) => {
           // SINGLE-SOURCE MERGES ONLY: in merge mode a cross-source tile can't

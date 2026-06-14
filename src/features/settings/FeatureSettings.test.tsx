@@ -4,7 +4,7 @@
  */
 
 import React from 'react'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
 import { FeatureSettings } from './FeatureSettings'
@@ -34,6 +34,7 @@ const baseConfig: AppConfig = {
   audio_output_format: 'wav',
   clip_hover_preview: false,
   featherweight_previews: false,
+  scene_preview_height: 240,
   tsukyio_api_key: '',
 }
 
@@ -74,14 +75,16 @@ describe('FeatureSettings', () => {
     renderFeatureSettings({ clipHoverPreview: false })
     const toggle = screen.getByRole('switch', { name: /Hover-to-Play previews/i })
     expect(toggle).toHaveAttribute('aria-checked', 'false')
-    expect(screen.getByText('Disabled')).toBeInTheDocument()
+    // Scope to this toggle's row — the page now has a second toggle
+    // (Lightweight scene previews) that also renders Enabled/Disabled.
+    expect(within(toggle.closest('.settings-toggle-wrap')!).getByText('Disabled')).toBeInTheDocument()
   })
 
   it('toggle reflects initial clipHoverPreview=true', () => {
     renderFeatureSettings({ clipHoverPreview: true })
     const toggle = screen.getByRole('switch', { name: /Hover-to-Play previews/i })
     expect(toggle).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByText('Enabled')).toBeInTheDocument()
+    expect(within(toggle.closest('.settings-toggle-wrap')!).getByText('Enabled')).toBeInTheDocument()
   })
 
   it('clicking toggle calls set_config with clip_hover_preview=true when currently false', async () => {
@@ -176,5 +179,27 @@ describe('FeatureSettings', () => {
     const mp3Option = screen.getByRole('option', { name: /MP3 \(smaller size\)/i })
     await user.click(mp3Option)
     expect(persistConfigField).toHaveBeenCalledWith('audio_output_format', 'mp3')
+  })
+
+  it('shows 240p as the default selected preview quality', () => {
+    renderFeatureSettings()
+    const trigger = screen.getByRole('button', { name: /240p/i })
+    expect(trigger).toBeInTheDocument()
+  })
+
+  it('shows 720p when backendConfig.scene_preview_height is 720', () => {
+    renderFeatureSettings({ backendConfig: { ...baseConfig, scene_preview_height: 720 } })
+    const trigger = screen.getByRole('button', { name: /720p/i })
+    expect(trigger).toBeInTheDocument()
+  })
+
+  it('changing preview quality calls persistConfigField with the stringified height', async () => {
+    const user = userEvent.setup()
+    const { persistConfigField } = renderFeatureSettings()
+    const trigger = screen.getByRole('button', { name: /240p/i })
+    await user.click(trigger)
+    const option = screen.getByRole('option', { name: /720p/i })
+    await user.click(option)
+    expect(persistConfigField).toHaveBeenCalledWith('scene_preview_height', '720')
   })
 })

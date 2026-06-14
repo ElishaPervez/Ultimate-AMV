@@ -37,10 +37,15 @@ export type AppConfig = {
   background_bright_text: string | boolean;
   audio_output_format: "wav" | "mp3";
   clip_hover_preview: boolean;
-  /** Default-off flag gating the featherweight offset-playback scene previews.
-   * When false the previews behave byte-for-byte as today (animated-WebP grid
-   * + scene_clip_render modal). Plain key/value via get_config/set_config. */
+  /** Default-on flag gating the featherweight offset-playback scene previews.
+   * When false the previews fall back to the classic behavior (animated-WebP
+   * grid + scene_clip_render modal). Plain key/value via get_config/set_config. */
   featherweight_previews: boolean;
+  /** Max preview-proxy height in px. 0 = Source (unlimited, capped at 1080
+   * only when a proxy is forced); 240 = default. Snapped to a fixed preset set
+   * by set_config (0/144/240/360/480/720/1080); threaded into the Rust proxy
+   * commands as the `height` invoke arg (Rust never reads config.json). */
+  scene_preview_height: number;
   tsukyio_api_key: string;
 };
 

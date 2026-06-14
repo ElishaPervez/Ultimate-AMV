@@ -168,18 +168,18 @@ export function SceneViewerModal({
     // resolved playbackSrc (direct original or shared proxy) AND it's a single
     // contiguous window, play that source directly and loop the margined
     // sub-window in JS — no scene_clip_render re-encode. The flag is read live
-    // (default-off) so behavior is byte-for-byte unchanged when it's off.
+    // (default-on) so only an explicit `false` routes back to the classic path.
     if (hasPlaybackSrc && !isMergedClip && !offsetFailed && clip.playbackSrc) {
       const offsetSrc = clip.playbackSrc;
       void invoke<string>("get_config")
         .then((raw) => {
           if (cancelled) return;
-          let enabled = false;
+          let enabled = true;
           try {
             const payload = parseBridgePayload<AppConfig>(raw);
-            enabled = payload.featherweight_previews === true;
+            enabled = payload.featherweight_previews !== false;
           } catch {
-            enabled = false;
+            enabled = true;
           }
           if (cancelled) return;
           if (enabled) {

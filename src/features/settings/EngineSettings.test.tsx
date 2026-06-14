@@ -34,6 +34,7 @@ const baseConfig: AppConfig = {
   audio_output_format: 'wav',
   clip_hover_preview: false,
   featherweight_previews: false,
+  scene_preview_height: 240,
   tsukyio_api_key: '',
 }
 

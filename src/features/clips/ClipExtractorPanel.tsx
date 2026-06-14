@@ -1,8 +1,9 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Clapperboard, Film, Info, Loader2, Play, Scissors, Upload, X, Zap } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Clapperboard, Film, Info, Loader2, Scissors, Upload, X, Zap } from "lucide-react";
 import { Dropdown } from "../../components/Dropdown";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
@@ -371,6 +372,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
    *  - sourceProxyPaths: sourcePath -> resolved proxy file path (proxy plans only).
    * Mirrors the detectorProxies Record state pattern. */
   const [featherweightPreviews, setFeatherweightPreviews] = React.useState(false);
+  /* Max preview-proxy height (Settings "Preview quality"). 0 = Source/unlimited.
+   * Threaded into clip_playback_plan + build_source_proxy as the `height` invoke
+   * arg. kickProxyBuild is a []-deps useCallback that reads only refs, so mirror
+   * the height into scenePreviewHeightRef to dodge the stale-closure trap. */
+  const [scenePreviewHeight, setScenePreviewHeight] = React.useState(240);
+  const scenePreviewHeightRef = React.useRef(240);
+  React.useEffect(() => {
+    scenePreviewHeightRef.current = scenePreviewHeight;
+  }, [scenePreviewHeight]);
   const [playbackPlans, setPlaybackPlans] = React.useState<Record<string, PlaybackPlan>>({});
   const [sourceProxyPaths, setSourceProxyPaths] = React.useState<Record<string, string>>({});
   // In-flight guards so we kick exactly one plan / one proxy build per source.
@@ -405,6 +415,22 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergedPreviewClip, setMergedPreviewClip] = React.useState<ClipPreviewItem | null>(null);
   const [activeGridItems, setActiveGridItems] = React.useState<string[][] | null>(null);
   const [unifiedPreviews, setUnifiedPreviews] = React.useState<Record<string, ClipPreviewItem>>({});
+  /* Real-time merge animation. When the user merges the selected clips into one
+   * card, we snapshot the on-screen rect (+ thumbnail) of each selected tile and
+   * fly fixed-position ghost clones into their shared centre while the new
+   * unified card springs in (justMergedId). Both are torn down on one timer.
+   * Ghosts are rendered in a body portal so they're immune to any transformed
+   * ancestor; the whole thing no-ops gracefully if rects can't be measured. */
+  type MergeGhost = { id: string; left: number; top: number; width: number; height: number; thumb: string | null };
+  const [mergeGhosts, setMergeGhosts] = React.useState<{ ghosts: MergeGhost[]; tx: number; ty: number } | null>(null);
+  const [justMergedId, setJustMergedId] = React.useState<string | null>(null);
+  const mergeAnimTimerRef = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (mergeAnimTimerRef.current != null) window.clearTimeout(mergeAnimTimerRef.current);
+    },
+    [],
+  );
   const [exportSession, setExportSession] = React.useState<ClipExportSession | null>(null);
   const [exportMinimized, setExportMinimized] = React.useState(false);
   const exportSessionRef = React.useRef<ClipExportSession | null>(null);
@@ -471,17 +497,45 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return () => window.removeEventListener("clipmode-changed", handler);
   }, []);
 
+  // Live-sync the featherweight gate when the Settings toggle flips it, so an
+  // open grid switches between offset-playback and the classic WebP path
+  // without a remount (mirrors the clip-hover-preview-changed listener).
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      setFeatherweightPreviews((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
+    };
+    window.addEventListener("featherweight-previews-changed", handler);
+    return () => window.removeEventListener("featherweight-previews-changed", handler);
+  }, []);
+
+  // Live-sync the preview-quality cap when the Settings dropdown changes it, so an
+  // open grid re-probes the playback plan and rebuilds the proxy at the new height
+  // without a remount (mirrors the featherweight-previews-changed listener).
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      setScenePreviewHeight((e as CustomEvent<{ height: number }>).detail.height);
+    };
+    window.addEventListener("scene-preview-height-changed", handler);
+    return () => window.removeEventListener("scene-preview-height-changed", handler);
+  }, []);
+
   async function refreshClipMode() {
     try {
       const raw = await invoke<string>("get_config");
       const payload = parseBridgePayload<AppConfig>(raw);
       setClipMode(payload.clip_extraction_mode ?? "gpu");
       setHoverPlayOnly(payload.clip_hover_preview ?? false);
-      /* DEV TOOLS: featherweight gate read from the persisted config. */
-      setFeatherweightPreviews(payload.featherweight_previews ?? false);
+      /* Featherweight previews are the default; only an explicit `false` saved
+       * by the Settings toggle routes back to the classic WebP/scene_clip path. */
+      setFeatherweightPreviews(payload.featherweight_previews ?? true);
+      setScenePreviewHeight(payload.scene_preview_height ?? 240);
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
+      // Keep featherweight previews on by default if the config read fails,
+      // matching SceneViewerModal — a transient failure shouldn't silently
+      // drop the grid back to the classic path.
+      setFeatherweightPreviews(true);
       setClipModeLoaded(true);
       logFrontend("error", "frontend.clip.config.error", "Could not load clip extraction mode", {
         error: safeLogValue(configError),
@@ -1212,7 +1266,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
     for (const source of sources) {
       planInFlightRef.current.add(source);
-      void invoke<PlaybackPlan>("clip_playback_plan", { sourcePath: source })
+      void invoke<PlaybackPlan>("clip_playback_plan", { sourcePath: source, height: scenePreviewHeightRef.current })
         .then((plan) => {
           setPlaybackPlans((current) => ({ ...current, [source]: plan }));
         })
@@ -1226,7 +1280,23 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           planInFlightRef.current.delete(source);
         });
     }
-  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans]);
+  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, scenePreviewHeight]);
+
+  /* When the preview-quality cap changes, discard the cached per-source plans and
+   * proxy paths so both re-run at the new height: the plan re-probes (a source can
+   * flip direct<->proxy when the cap crosses its height) and the proxy rebuilds at
+   * the new resolution (the Rust cache key folds in the height, so distinct heights
+   * are separate proxies — the old one stays on disk and is reused if reverted). */
+  const prevScenePreviewHeightRef = React.useRef(scenePreviewHeight);
+  React.useEffect(() => {
+    if (prevScenePreviewHeightRef.current === scenePreviewHeight) return;
+    prevScenePreviewHeightRef.current = scenePreviewHeight;
+    planInFlightRef.current.clear();
+    proxyInFlightRef.current.clear();
+    failedProxiesRef.current.clear();
+    setPlaybackPlans({});
+    setSourceProxyPaths({});
+  }, [scenePreviewHeight]);
 
   /* Kick exactly ONE build_source_proxy for a source, deduping on the in-flight
    * ref. Used both by the lazy on-scroll effect below AND by startExtraction to
@@ -1241,7 +1311,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // skips its cache; consumed below so only the first build after a re-extract
     // is forced (later tile interactions reuse the freshly-built proxy).
     const forceRebuild = forceProxyRebuildRef.current.has(source);
-    void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild })
+    void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild, height: scenePreviewHeightRef.current })
       .then((proxyPath) => {
         if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
       })
@@ -1924,6 +1994,25 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setViewerClipId(clip.id);
   }
 
+  /* Snapshot live on-screen rects (+ thumbnail src) for the given display clip
+   * ids, scoped to the grid scroller. Tiles scrolled out of Virtuoso's overscan
+   * band aren't mounted and are silently skipped — the caller no-ops the merge
+   * animation when fewer than 2 are found, so it degrades cleanly. */
+  function captureMergeGhostRects(ids: string[]): MergeGhost[] {
+    const root = scrollerEl;
+    if (!root || typeof document === "undefined") return [];
+    const out: MergeGhost[] = [];
+    ids.forEach((id) => {
+      const node = root.querySelector<HTMLElement>(`[data-clip-id="${CSS.escape(id)}"]`);
+      if (!node) return;
+      const r = node.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      const img = node.querySelector<HTMLImageElement>("img.clip-static-thumbnail");
+      out.push({ id, left: r.left, top: r.top, width: r.width, height: r.height, thumb: img?.src ?? null });
+    });
+    return out;
+  }
+
   function unifySelectedInGrid() {
     if (mergeOrder.length < 2) return;
 
@@ -1971,12 +2060,33 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       }
     });
 
+    // Snapshot where the selected tiles sit RIGHT NOW (before the layout
+    // collapses and their DOM recycles) so we can fly ghost copies into the new
+    // card. Query by the rendered display ids (mergeOrder), not the underlying
+    // ids — an already-unified selected card renders under its `unified-...` id.
+    const combinedId = `unified-${selectedUnderlyingIds.join("_")}`;
+    const ghostRects = captureMergeGhostRects(mergeOrder);
+
     setActiveGridItems(nextLayout);
     setMergeOrder([]);
     setMergeMode(false);
 
+    // Spring the freshly-formed card in, and — if we measured ≥2 source tiles —
+    // converge their ghosts into the tiles' shared centre. Both clear on one timer.
+    setJustMergedId(combinedId);
+    if (ghostRects.length >= 2) {
+      const tx = ghostRects.reduce((s, g) => s + g.left + g.width / 2, 0) / ghostRects.length;
+      const ty = ghostRects.reduce((s, g) => s + g.top + g.height / 2, 0) / ghostRects.length;
+      setMergeGhosts({ ghosts: ghostRects, tx, ty });
+    }
+    if (mergeAnimTimerRef.current != null) window.clearTimeout(mergeAnimTimerRef.current);
+    mergeAnimTimerRef.current = window.setTimeout(() => {
+      setMergeGhosts(null);
+      setJustMergedId(null);
+      mergeAnimTimerRef.current = null;
+    }, 360);
+
     // Automatically trigger preview merge & WebP generation in the background!
-    const combinedId = `unified-${selectedUnderlyingIds.join("_")}`;
     const constituentClips = selectedUnderlyingIds.map(id => clips.find(c => c.id === id)!).filter(Boolean);
     const segments = buildSegments(constituentClips);
 
@@ -2099,144 +2209,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
     return null;
   }, [mergeOrder, displayedClips]);
-
-  async function startPreviewMerge() {
-    if (mergeOrderedClips.length < 2 || isExtracting || isPreviewMerging) return;
-
-    setError(null);
-    setIsPreviewMerging(true);
-
-    const exportClips = buildSegments(mergeOrderedClips);
-
-    try {
-      const raw = await invoke<string>("clip_preview_merge", {
-        clips: exportClips,
-      });
-      const payload = parseBridgePayload<{ path: string; duration: number }>(raw);
-      
-      const mockClip: ClipPreviewItem = {
-        id: "merged-preview",
-        index: 9999,
-        label: `Merged Preview (${mergeFilenameStem})`,
-        range: `${mergeOrderedClips.length} clips combined`,
-        sourceName: "Merged Preview",
-        sourceSrc: "",
-        sourceStart: 0,
-        sourceEnd: payload.duration,
-        previewStart: 0,
-        previewEnd: payload.duration,
-        path: payload.path,
-        fps: 24,
-      };
-
-      setMergedPreviewClip(mockClip);
-      setViewerClipId("merged-preview");
-    } catch (e) {
-      const errorText = readBridgeError(e);
-      setError(errorText);
-    } finally {
-      setIsPreviewMerging(false);
-    }
-  }
-
-  async function startMergeExport() {
-    if (mergeOrderedClips.length < 2 || isExtracting) return;
-    if (selectedExportOption?.disabled) {
-      setError(selectedExportOption.reason ?? "This export format is not available on the current hardware/mode.");
-      return;
-    }
-
-    const selected = await open({
-      multiple: false,
-      directory: true,
-      title: "Select output folder for merged clip",
-    });
-    if (!selected || Array.isArray(selected)) return;
-
-    const exportClips = buildSegments(mergeOrderedClips);
-
-    setError(null);
-    setIsExtracting(true);
-    const mergeRow: ClipExportRow = {
-      id: `merge-${mergeFilenameStem}`,
-      label: `${mergeFilenameStem}.${mergeExt}`,
-      range: `${mergeOrderedClips.length} clips`,
-      status: "active",
-    };
-    setExportMinimized(false);
-    setExportSession({
-      mode: "merge",
-      rows: [mergeRow],
-      activeIndex: 0,
-      activePercent: 0,
-      activeFps: null,
-      activeSpeed: null,
-      activeMessage: `Merging ${exportClips.length} clips into ${mergeFilenameStem}.${mergeExt}...`,
-      phase: "running",
-      outputDir: selected,
-    });
-
-    let cancelled = false;
-    let failed = false;
-    let errorText: string | null = null;
-
-    try {
-      await invoke<string>("clip_export_merged", {
-        clips: exportClips,
-        outputDir: selected,
-        preset: exportFormat,
-        qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
-      });
-      setExportSession((current) =>
-        current
-          ? {
-              ...current,
-              activePercent: 100,
-              rows: current.rows.map((row, idx) =>
-                idx === 0 ? { ...row, status: "done" } : row,
-              ),
-            }
-          : current,
-      );
-    } catch (e) {
-      if (clipCancellingRef.current) {
-        cancelled = true;
-      } else {
-        failed = true;
-        errorText = readBridgeError(e);
-      }
-      setExportSession((current) =>
-        current
-          ? {
-              ...current,
-              rows: current.rows.map((row, idx) =>
-                idx === 0
-                  ? {
-                      ...row,
-                      status: cancelled ? "cancelled" : "error",
-                      errorMessage: errorText ?? row.errorMessage,
-                    }
-                  : row,
-              ),
-            }
-          : current,
-      );
-    } finally {
-      const finalPhase = cancelled ? "cancelled" : failed ? "error" : "complete";
-      setExportSession((current) =>
-        current ? { ...current, phase: finalPhase } : current,
-      );
-      if (!cancelled && !failed) {
-        setMergeOrder([]);
-        setMergeMode(false);
-      }
-      if (failed && errorText) {
-        setError(errorText);
-      }
-      clipCancellingRef.current = false;
-      setIsExtracting(false);
-    }
-  }
 
   async function startExport() {
     if (selectedClipIds.size === 0 || isExtracting) return;
@@ -2647,56 +2619,20 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           </button>
 
           {mergeMode && (
-            <>
-              <button
-                type="button"
-                className="clip-confirm-button spring-motion"
-                disabled={mergeOrder.length < 2 || isExtracting || isPreviewMerging}
-                onClick={startPreviewMerge}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to preview" : "Preview merged clips"}
-              >
-                {isPreviewMerging ? (
-                  <Loader2 className="is-spinning" size={17} strokeWidth={2.1} />
-                ) : (
-                  <Play size={17} strokeWidth={2.1} />
-                )}
-                <span>
-                  {mergeOrder.length < 2
-                    ? "Select 2+ clips"
-                    : isPreviewMerging ? "Merging..." : "Preview merge"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className="clip-confirm-button spring-motion"
-                disabled={mergeOrder.length < 2 || isExtracting}
-                onClick={unifySelectedInGrid}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to merge in real time" : "Merge selected clips in real time into a single grid card"}
-              >
-                <Film size={17} strokeWidth={2.1} />
-                <span>
-                  {mergeOrder.length < 2
-                    ? "Select 2+ clips"
-                    : "Merge in real time"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className="clip-confirm-button spring-motion accent-glow"
-                disabled={mergeOrder.length < 2 || isExtracting}
-                onClick={startMergeExport}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to merge" : `Merge into ${mergeFilenameStem}.${mergeExt}`}
-              >
-                <CheckCircle2 size={17} strokeWidth={2.1} />
-                <span>
-                  {mergeOrder.length < 2
-                    ? "Select 2+ clips"
-                    : `Merge into ${mergeFilenameStem}.${mergeExt}`}
-                </span>
-              </button>
-            </>
+            <button
+              type="button"
+              className="clip-confirm-button spring-motion accent-glow"
+              disabled={mergeOrder.length < 2 || isExtracting}
+              onClick={unifySelectedInGrid}
+              title={
+                mergeOrder.length < 2
+                  ? "Select at least 2 clips to merge"
+                  : "Merge the selected clips into one — preview it by clicking the card, export it with Export"
+              }
+            >
+              <Film size={17} strokeWidth={2.1} />
+              <span>{mergeOrder.length < 2 ? "Select 2+ clips" : `Merge ${mergeOrder.length} clips`}</span>
+            </button>
           )}
         </div>
 
@@ -2869,6 +2805,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                      * set size never exceeds the decoder ceiling, and a fast fling
                      * grants no new mounts. Flag-off mayMountVideoIds is empty. */
                     mayMountVideo={mayMountVideoIds.has(clip.id)}
+                    justMerged={justMergedId === clip.id}
                     onClick={(modifiers) => handleClipClick(clip, modifiers)}
                     onToggleSelect={() =>
                       mergeMode ? toggleMergeOrder(clip.id) : toggleClipSelection(clip.id)
@@ -2893,6 +2830,34 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             {Array.from({ length: 12 }, (_, index) => <div key={index} className="clip-preview-skeleton" />)}
           </div>
         )}
+
+        {/* Real-time merge: ghost clones of the just-merged tiles, flying into
+            their shared centre while the new unified card springs in. Portalled
+            to <body> so fixed-position viewport coords are never thrown off by a
+            transformed ancestor; pointer-transparent and torn down on a timer. */}
+        {mergeGhosts &&
+          createPortal(
+            <div className="clip-merge-ghosts" aria-hidden="true">
+              {mergeGhosts.ghosts.map((g) => (
+                <span
+                  key={g.id}
+                  className="clip-merge-ghost"
+                  style={
+                    {
+                      left: g.left,
+                      top: g.top,
+                      width: g.width,
+                      height: g.height,
+                      backgroundImage: g.thumb ? `url("${g.thumb}")` : undefined,
+                      "--gx": `${mergeGhosts.tx - (g.left + g.width / 2)}px`,
+                      "--gy": `${mergeGhosts.ty - (g.top + g.height / 2)}px`,
+                    } as React.CSSProperties
+                  }
+                />
+              ))}
+            </div>,
+            document.body,
+          )}
 
         {hasClips && selectedClipIds.size > 0 && !mergeMode && (
           <div className="clip-jump-pill" role="group" aria-label="Jump through selected clips">

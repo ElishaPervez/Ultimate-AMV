@@ -36,7 +36,8 @@ DEFAULT_CONFIG = {
     "theme_color_b": "#63e6a2",
     "audio_output_format": "wav",
     "clip_hover_preview": False,
-    "featherweight_previews": False,
+    "featherweight_previews": True,
+    "scene_preview_height": 240,
     "tsukyio_api_key": "",
 }
 

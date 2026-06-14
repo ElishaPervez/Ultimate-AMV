@@ -68,6 +68,11 @@ pub(crate) static CLIP_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new()
 // Featherweight previews: the in-flight source-proxy ffmpeg build. Mirrors
 // CLIP_CHILD_PID so a new source selection / app teardown cancels it.
 pub(crate) static PROXY_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+// Serializes source-proxy builds so at most one encode owns PROXY_CHILD_PID at a
+// time. The single PID slot can only hold one build; without this lock two
+// near-simultaneous build_source_proxy invokes could both spawn, the second
+// store wins, and the first ffmpeg becomes an orphan no teardown can reach.
+pub(crate) static PROXY_BUILD_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 pub(crate) static DOWNLOAD_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static VIDEO_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static BGREMOVE_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();

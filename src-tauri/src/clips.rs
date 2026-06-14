@@ -20,7 +20,7 @@ use crate::{
     probe_has_audio_stream, probe_media_summary, python_exe, run_ffmpeg_with_progress,
     sanitize_path_segment,
     serialize_clip_preview_done, short_stable_id, store_child_pid, truncate_log_text,
-    append_app_log, MediaSummary, CLIP_CHILD_PID, CLIP_SERVER, PROXY_CHILD_PID,
+    append_app_log, MediaSummary, CLIP_CHILD_PID, CLIP_SERVER, PROXY_BUILD_LOCK, PROXY_CHILD_PID,
     ConversionDone, H264_NVENC_AVAILABLE,
 };
 
@@ -1289,6 +1289,35 @@ const FRIENDLY_CONTAINERS: &[&str] = &["mp4", "m4v", "mov"];
 const FRIENDLY_MAX_WIDTH: u32 = 1920;
 const FRIENDLY_MAX_HEIGHT: u32 = 1080;
 
+// Preview-quality cap, threaded from the Settings "Preview quality" dropdown as
+// the `height` invoke arg (Rust never reads config.json). The frontend sends 0
+// (and `None` when absent) for the "Source"/unlimited preset. The two helpers
+// below intentionally map None/0 DIFFERENTLY because the ceiling means two
+// different things in the two call sites:
+//   * resolve_preview_cap — the DIRECT-vs-PROXY decision. Source = no cap, so a
+//     friendly file at any height stays "direct" (current behavior preserved).
+//   * resolve_proxy_height — the forced ENCODE height. Source = cap at 1080,
+//     because WebView2 gains nothing above 1080 even when a proxy is forced.
+
+// Decision ceiling: None/0 (Source preset) -> None (don't force a proxy on an
+// otherwise-friendly file); any other height -> Some(h).
+fn resolve_preview_cap(height: Option<u32>) -> Option<u32> {
+    match height {
+        None | Some(0) => None,
+        Some(h) => Some(h),
+    }
+}
+
+// Encode ceiling: None/0 (Source preset) -> 1080 (no WebView2 benefit above
+// that); any other height -> that height. The min(h,ih) clamp in the scale
+// filter still prevents upscaling a shorter source.
+fn resolve_proxy_height(height: Option<u32>) -> u32 {
+    match height {
+        None | Some(0) => 1080,
+        Some(h) => h,
+    }
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PlaybackPlan {
@@ -1341,13 +1370,14 @@ fn lowercase_extension(path: &Path) -> Option<String> {
 pub(crate) async fn clip_playback_plan(
     app: tauri::AppHandle,
     source_path: String,
+    height: Option<u32>,
 ) -> Result<PlaybackPlan, String> {
     log_info(
         "clip.playback_plan.start",
         "Computing clip playback plan",
-        json!({ "source": &source_path }),
+        json!({ "source": &source_path, "height": height }),
     );
-    let result = tauri::async_runtime::spawn_blocking(move || compute_playback_plan(&app, source_path))
+    let result = tauri::async_runtime::spawn_blocking(move || compute_playback_plan(&app, source_path, height))
         .await
         .map_err(|error| error.to_string())?;
     match &result {
@@ -1365,7 +1395,11 @@ pub(crate) async fn clip_playback_plan(
     result
 }
 
-fn compute_playback_plan(app: &tauri::AppHandle, source_path: String) -> Result<PlaybackPlan, String> {
+fn compute_playback_plan(
+    app: &tauri::AppHandle,
+    source_path: String,
+    height: Option<u32>,
+) -> Result<PlaybackPlan, String> {
     let root = app_root()?;
     let ffprobe = find_tool(&root, "ffprobe");
     ensure_tool(&ffprobe)?;
@@ -1374,6 +1408,8 @@ fn compute_playback_plan(app: &tauri::AppHandle, source_path: String) -> Result<
     let summary: MediaSummary = probe_media_summary(&ffprobe, &input).unwrap_or_default();
     let container = lowercase_extension(&input);
     let in_scope = path_in_asset_scope(app, &input);
+    // Source/unlimited -> None (no extra cap); any preset height -> Some(h).
+    let cap = resolve_preview_cap(height);
 
     let mut reasons: Vec<String> = Vec::new();
 
@@ -1409,6 +1445,17 @@ fn compute_playback_plan(app: &tauri::AppHandle, source_path: String) -> Result<
         _ => reasons.push("unknown resolution".to_string()),
     }
 
+    // Cap-aware proxy gate (independent of the 1920x1080 WebView2-friendliness
+    // clause above): a friendly source TALLER than the chosen preview cap should
+    // build a proxy so weak machines get a smoother, lower-res preview even on an
+    // otherwise-direct file. Source preset (cap == None) skips this entirely, so
+    // friendly files stay direct (current behavior).
+    if let (Some(cap_h), Some(h)) = (cap, summary.height) {
+        if h > cap_h {
+            reasons.push(format!("source height {h} exceeds preview cap {cap_h}p"));
+        }
+    }
+
     if !in_scope {
         reasons.push("source outside asset-protocol scope ($HOME/$APPDATA/$RESOURCE)".to_string());
     }
@@ -1430,24 +1477,36 @@ fn compute_playback_plan(app: &tauri::AppHandle, source_path: String) -> Result<
 
 // Build (or reuse) the shared low-res short-GOP proxy for an unfriendly / off-
 // scope source. Whole-file (NO -ss) so scene timecodes map 1:1 onto the proxy
-// timeline; 240p, short fixed GOP + no B-frames so currentTime seeks land near
-// a keyframe; yuv420p + AAC + faststart mp4 so it is friendly by construction
-// and always lives under $APPDATA (in asset scope). Mirrors generate_scene_clip:
-// NVENC fast path with a libx264 fallback (CPU/GPU parity), content-fingerprint
-// cache key, atomic tmp+rename, progress events. The in-flight ffmpeg PID lives
-// in PROXY_CHILD_PID so a new source selection / teardown cancels it.
+// timeline; capped at the chosen preview height (the Settings "Preview quality"
+// dropdown — default 240p, never upscaled), short fixed GOP + no B-frames so
+// currentTime seeks land near a keyframe; yuv420p + AAC + faststart mp4 so it is
+// friendly by construction and always lives under $APPDATA (in asset scope).
+// Mirrors generate_scene_clip: NVENC fast path with a libx264 fallback (CPU/GPU
+// parity), content-fingerprint cache key (which folds in the height so distinct
+// qualities cache separately), atomic tmp+rename, progress events. The in-flight
+// ffmpeg PID lives in PROXY_CHILD_PID so a new source selection / teardown
+// cancels it. `height` carries the Settings cap (None/Some(0) = Source preset,
+// which the encode caps at 1080 since WebView2 gains nothing above that).
 #[tauri::command]
 pub(crate) async fn build_source_proxy(
     window: tauri::Window,
     source_path: String,
     force: bool,
+    height: Option<u32>,
 ) -> Result<String, String> {
     let start = std::time::Instant::now();
     log_info(
         "clip.source_proxy.start",
         "Building source proxy",
-        json!({ "source": &source_path }),
+        json!({ "source": &source_path, "height": height }),
     );
+    // Serialize proxy builds: the single PROXY_CHILD_PID slot can only track one
+    // encode, so hold this guard across the supersede-kill below AND the
+    // spawn_blocking await. This guarantees exactly one live proxy encode owns
+    // the slot at a time — a second invoke waits here instead of racing past the
+    // best-effort kill and orphaning the first ffmpeg.
+    let _build_guard = PROXY_BUILD_LOCK.get_or_init(|| AsyncMutex::new(())).lock().await;
+
     // A new source build supersedes any in-flight one — cancel it first so we
     // never run two proxy encodes at once (mirror the single-source contract).
     kill_child_pid(&PROXY_CHILD_PID);
@@ -1460,7 +1519,7 @@ pub(crate) async fn build_source_proxy(
 
     let log_source = source_path.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        generate_source_proxy(window, app_data_dir, source_path, force)
+        generate_source_proxy(window, app_data_dir, source_path, force, height)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -1485,11 +1544,19 @@ fn generate_source_proxy(
     app_data_dir: PathBuf,
     source_path: String,
     force: bool,
+    height: Option<u32>,
 ) -> Result<String, String> {
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
     let ffprobe = find_tool(&root, "ffprobe");
     ensure_tool(&ffmpeg)?;
+
+    // Resolve the encode height once: Source preset (None/0) caps at 1080 (no
+    // WebView2 benefit above that); any preset height is used verbatim. The
+    // min(h,ih) clamp in the scale filter still prevents upscaling. Defaulting
+    // here also defends any non-Settings caller (warmup/other paths) that omits
+    // the arg — they get the historical behavior.
+    let h: u32 = resolve_proxy_height(height);
 
     let input = canonical_input_path(&source_path)?;
     // Carry the source's color metadata onto the proxy so offset playback looks
@@ -1513,8 +1580,12 @@ fn generate_source_proxy(
     let encoder_decision = if use_nvenc { "nvenc" } else { "x264" };
 
     // Cache key folds in the resolution target + encoder decision + protocol
-    // version. Bump "source-proxy-v3" to invalidate every cached proxy.
-    let proxy_key = short_stable_id(&[&source_key, "240p", encoder_decision, "source-proxy-v3"]);
+    // version. The height is the actual encode cap (e.g. "360p") so each preview
+    // quality caches as a distinct proxy and switching rebuilds rather than
+    // serving a stale size. NOT bumping "source-proxy-v3": the height now
+    // distinguishes the key, so existing 240p caches stay valid for the 240p
+    // preset. Bump "source-proxy-v3" only to invalidate every cached proxy.
+    let proxy_key = short_stable_id(&[&source_key, &format!("{h}p"), encoder_decision, "source-proxy-v3"]);
     let output = cache_dir.join(format!("{proxy_key}.mp4"));
 
     // >1024-byte cache hit short-circuit (matches every other app cache).
@@ -1547,7 +1618,7 @@ fn generate_source_proxy(
     );
 
     let primary = run_source_proxy_job(
-        &window, &ffmpeg, &input, &tmp_output, duration, &source_path, use_nvenc, &color,
+        &window, &ffmpeg, &input, &tmp_output, duration, &source_path, use_nvenc, &color, h,
     );
 
     if let Err(error) = primary {
@@ -1566,7 +1637,7 @@ fn generate_source_proxy(
             );
             let _ = fs::remove_file(&tmp_output);
             run_source_proxy_job(
-                &window, &ffmpeg, &input, &tmp_output, duration, &source_path, false, &color,
+                &window, &ffmpeg, &input, &tmp_output, duration, &source_path, false, &color, h,
             )?;
         } else {
             let _ = fs::remove_file(&tmp_output);
@@ -1589,6 +1660,7 @@ fn run_source_proxy_job(
     source_path: &str,
     use_nvenc: bool,
     color: &ColorMetadata,
+    height: u32,
 ) -> Result<(), String> {
     // Whole-file transcode (NO -ss) so the proxy timeline matches the source
     // 1:1. The decode prefix and -vf chain diverge by encoder so the NVENC path
@@ -1640,19 +1712,21 @@ fn run_source_proxy_job(
         "0:a:0?".to_string(),
     ]);
 
-    // 240p cap (never upscale via the min() guard). setparams carries the same
-    // color tags as the export (scaling preserves color; setparams only labels).
-    // Single quotes keep the inner comma an expression arg, not a filter-chain
-    // separator. NVENC: setparams FIRST, then GPU scale_cuda (with format) so the
-    // whole chain runs on cuda hwframes. CPU: software scale then setparams.
+    // Configurable height cap from the Settings "Preview quality" dropdown
+    // (default 240; never upscale via the min() guard). setparams carries the
+    // same color tags as the export (scaling preserves color; setparams only
+    // labels). Single quotes keep the inner comma an expression arg, not a
+    // filter-chain separator. NVENC: setparams FIRST, then GPU scale_cuda (with
+    // format) so the whole chain runs on cuda hwframes. CPU: software scale then
+    // setparams. Both branches honor the SAME height (CPU/GPU parity).
     args.push("-vf".to_string());
     if use_nvenc {
         args.push(format!(
-            "{},scale_cuda=-2:'min(240,ih)':format=yuv420p",
+            "{},scale_cuda=-2:'min({height},ih)':format=yuv420p",
             setparams_filter(color)
         ));
     } else {
-        args.push(format!("scale=-2:'min(240,ih)',{}", setparams_filter(color)));
+        args.push(format!("scale=-2:'min({height},ih)',{}", setparams_filter(color)));
     }
 
     if use_nvenc {
@@ -2523,6 +2597,9 @@ fn run_streaming_clip_cli(window: tauri::Window, args: Vec<String>) -> Result<St
 
 pub(crate) async fn stop_clip_processes_for_dependency_setup(window: &tauri::Window) {
     kill_child_pid(&CLIP_CHILD_PID);
+    // A dependency-setup run reinstalls the Python/ffmpeg runtime an in-flight
+    // proxy build is using — stop that build too, not just the clip child.
+    kill_child_pid(&PROXY_CHILD_PID);
 
     let Some(mutex) = CLIP_SERVER.get() else {
         return;
@@ -2574,6 +2651,10 @@ pub(crate) async fn stop_clip_processes_for_dependency_setup(window: &tauri::Win
 pub(crate) async fn cancel_clip(window: tauri::Window) {
     log_warn("clip.cancel", "Cancelling active clip process", Value::Null);
     kill_child_pid(&CLIP_CHILD_PID);
+    // A featherweight source-proxy build can be running independently of the
+    // clip child; stop it on cancel too so it isn't left burning GPU/CPU after
+    // the user cancelled.
+    kill_child_pid(&PROXY_CHILD_PID);
 
     // The persistent clip server runs nelux/torchcodec native code that can
     // hang in C++ on unsupported codecs without ever raising. The one-shot

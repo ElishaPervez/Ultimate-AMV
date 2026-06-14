@@ -103,6 +103,8 @@ def _config_payload(cfg):
         "background_bright_text": bool(cfg.get("background_bright_text", BACKGROUND_DEFAULTS["background_bright_text"])),
         "audio_output_format": cfg.get("audio_output_format", "wav"),
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
+        "featherweight_previews": bool(cfg.get("featherweight_previews", True)),
+        "scene_preview_height": int(cfg.get("scene_preview_height", 240)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
     }
 
@@ -228,6 +230,22 @@ def set_config(key, value):
         cfg["audio_output_format"] = normalized
     elif key == "clip_hover_preview":
         cfg["clip_hover_preview"] = value.lower() == "true"
+    elif key == "featherweight_previews":
+        cfg["featherweight_previews"] = value.lower() == "true"
+    elif key == "scene_preview_height":
+        # Max preview-proxy height in px. 0 is the sentinel for the
+        # "Source"/unlimited preset (Rust maps 0 -> None). Snap to the fixed
+        # preset set so an arbitrary height can never poison the proxy cache key.
+        try:
+            number = int(float(value))
+        except ValueError:
+            emit({"type": "error", "message": "scene_preview_height must be one of 0,144,240,360,480,720,1080"})
+            return 1
+        allowed = {0, 144, 240, 360, 480, 720, 1080}
+        if number not in allowed:
+            emit({"type": "error", "message": "scene_preview_height must be one of 0,144,240,360,480,720,1080"})
+            return 1
+        cfg["scene_preview_height"] = number
     elif key == "tsukyio_api_key":
         cfg["tsukyio_api_key"] = (value or "").strip()
     save_config(cfg)
