@@ -395,6 +395,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
    * populated by "extract again" (force) so a stale/buggy proxy can't survive a
    * full re-extraction. Consumed (one-shot) when that source's proxy build fires. */
   const forceProxyRebuildRef = React.useRef<Set<string>>(new Set());
+  /* Per-source generation guard. A late resolve from an OLD plan/proxy run (e.g.
+   * a non-forced build still in flight when "extract again" kicks a forced one)
+   * must not clobber the CURRENT run's state or delete its in-flight markers.
+   * Each kick captures the source's epoch; bump-before-clear on every
+   * invalidating event makes the stale closure's captured epoch go stale so its
+   * .then/.catch/.finally early-return. */
+  const sourceEpochRef = React.useRef<Map<string, number>>(new Map());
+  const bumpSourceEpoch = React.useCallback((source: string) => {
+    sourceEpochRef.current.set(source, (sourceEpochRef.current.get(source) ?? 0) + 1);
+  }, []);
+  const currentSourceEpoch = (source: string) => sourceEpochRef.current.get(source) ?? 0;
   // DEV tunables: margins + max-video cap. In prod this equals the baked
   // constants (the DEV panel is the only mutator). The DEV featherweight toggle
   // also force-enables the feature even when the config flag is off.
@@ -716,6 +727,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setPlaybackPlans({});
     setSourceProxyPaths({});
     setProxyProgress({});
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
@@ -1266,17 +1278,21 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
     for (const source of sources) {
       planInFlightRef.current.add(source);
+      const epoch = currentSourceEpoch(source);
       void invoke<PlaybackPlan>("clip_playback_plan", { sourcePath: source, height: scenePreviewHeightRef.current })
         .then((plan) => {
+          if (currentSourceEpoch(source) !== epoch) return;
           setPlaybackPlans((current) => ({ ...current, [source]: plan }));
         })
         .catch((planError) => {
+          if (currentSourceEpoch(source) !== epoch) return;
           logFrontend("warn", "frontend.clip.playback_plan.warning", "Could not compute playback plan", {
             source,
             error: safeLogValue(planError),
           });
         })
         .finally(() => {
+          if (currentSourceEpoch(source) !== epoch) return;
           planInFlightRef.current.delete(source);
         });
     }
@@ -1291,6 +1307,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   React.useEffect(() => {
     if (prevScenePreviewHeightRef.current === scenePreviewHeight) return;
     prevScenePreviewHeightRef.current = scenePreviewHeight;
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
@@ -1307,15 +1324,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const kickProxyBuild = React.useCallback((source: string) => {
     if (proxyInFlightRef.current.has(source)) return;
     proxyInFlightRef.current.add(source);
+    const epoch = currentSourceEpoch(source);
     // "extract again" marks the source for a forced rebuild so the Rust side
     // skips its cache; consumed below so only the first build after a re-extract
     // is forced (later tile interactions reuse the freshly-built proxy).
     const forceRebuild = forceProxyRebuildRef.current.has(source);
     void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild, height: scenePreviewHeightRef.current })
       .then((proxyPath) => {
+        if (currentSourceEpoch(source) !== epoch) return;
         if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
       })
       .catch((proxyError) => {
+        if (currentSourceEpoch(source) !== epoch) return;
         // A FAILED build is terminal: mark it so the graceful-poster decision
         // no longer counts this source as "pending" (otherwise a pinned
         // proxyProgress entry would spin forever), and drop its stale progress
@@ -1331,6 +1351,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         });
       })
       .finally(() => {
+        if (currentSourceEpoch(source) !== epoch) return;
         proxyInFlightRef.current.delete(source);
         // One-shot: the forced rebuild has happened (or failed); drop the mark
         // so subsequent builds for this source cache normally.
@@ -1501,6 +1522,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setPlaybackPlans({});
     setSourceProxyPaths({});
     setProxyProgress({});
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
