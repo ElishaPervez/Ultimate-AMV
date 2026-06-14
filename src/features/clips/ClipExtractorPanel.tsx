@@ -1161,6 +1161,27 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setVisibleRowRange(null);
   }, [result, gridCols]);
 
+  /* Stable Virtuoso props. Inline object/function props (style/components/
+   * computeItemKey/scrollerRef) get a fresh identity EVERY render. Virtuoso lists
+   * scrollerRef in a passive scroll-attach effect's deps, so a new identity re-runs
+   * that effect -> its cleanup calls scrollerRef(null) -> setScrollerEl(null) ->
+   * re-render -> new identity -> infinite loop ("Maximum update depth exceeded";
+   * the components object compounds it by remounting the scroller). Memoizing pins
+   * the identities and breaks the cycle. Real Virtuoso only runs in the live app,
+   * not jsdom, so this never surfaces in tests — verify the fix live. */
+  const virtuosoStyle = React.useMemo(
+    () => ({ "--clip-cols": gridCols }) as React.CSSProperties,
+    [gridCols],
+  );
+  const virtuosoComponents = React.useMemo(() => ({ Scroller: ClipPreviewScroller }), []);
+  const computeRowKey = React.useCallback(
+    (index: number, row: ClipPreviewItem[]) => `row-${gridCols}-${index}-${row[0]?.id ?? ""}`,
+    [gridCols],
+  );
+  const handleScrollerRef = React.useCallback((el: HTMLElement | Window | null) => {
+    setScrollerEl((el as HTMLElement | null) ?? null);
+  }, []);
+
   /* DEV TOOLS: lazily probe a PlaybackPlan for each distinct source that has an
    * active visible tile (first preview interaction). One invoke per source. */
   React.useEffect(() => {
@@ -2634,14 +2655,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             data={clipRows}
             overscan={1000}
             increaseViewportBy={1000}
-            style={{ '--clip-cols': gridCols } as React.CSSProperties}
-            components={{ Scroller: ClipPreviewScroller }}
-            computeItemKey={(index, row) => `row-${gridCols}-${index}-${row[0]?.id ?? ""}`}
+            style={virtuosoStyle}
+            components={virtuosoComponents}
+            computeItemKey={computeRowKey}
             /* DEV TOOLS: capture the real scroll element so the viewport-fill
-             * video-budget ResizeObserver can measure it. */
-            scrollerRef={(el) => {
-              setScrollerEl((el as HTMLElement | null) ?? null);
-            }}
+             * video-budget ResizeObserver can measure it. Stable handler (above)
+             * so Virtuoso's scroll-attach effect doesn't loop. */
+            scrollerRef={handleScrollerRef}
             rangeChanged={setVisibleRowRange}
             itemContent={(_index, row) => (
               <div
