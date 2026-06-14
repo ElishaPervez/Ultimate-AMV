@@ -54,6 +54,21 @@ PROGRESS_STAGE_ALIASES = {
     "setup-progress": "dependencies",
 }
 
+# Phase 1 (decode-once rewrite) parity switch. OFF by default. When on, GPU
+# detection skips the nelux VideoReader (which fuses decode+resize in C++ into
+# sealed 48x27 frames) and routes through the splittable ffmpeg-cuvid path
+# (extract_gpu -> decode_frames_nvdec), where scale_cuda is a filter we can
+# later fuse with the proxy build. This exists only to prove the cuvid path
+# finds the same scene cuts as nelux; it is NOT wired into app config/Settings.
+_FORCE_CUVID_ENV = "AMV_FORCE_CUVID_DETECTION"
+
+
+def _force_cuvid_detection(flag=False):
+    """True when the cuvid detection path is forced via CLI flag or env var."""
+    if flag:
+        return True
+    return os.environ.get(_FORCE_CUVID_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 @dataclass
 class VideoInfo:
@@ -635,7 +650,7 @@ def extract_cpu(input_path, info, cpu_threshold, min_clip_seconds, started_at):
     return scenes, cuts
 
 
-def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_frames, overlap, model=None):
+def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_frames, overlap, model=None, force_cuvid=False):
     started_at = time.perf_counter()
     input_path = Path(input_file).expanduser().resolve()
     if not input_path.exists():
@@ -674,6 +689,15 @@ def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_
             if info.codec not in GPU_DECODABLE_CODECS:
                 emit({"type": "log", "message": f"Codec {info.codec!r} is not NVDEC-decodable; using software decode -> TransNetV2 (GPU)."})
                 return extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
+
+            # Phase 1 parity switch: force the splittable ffmpeg-cuvid path
+            # (extract_gpu -> decode_frames_nvdec) even when nelux is importable.
+            # OFF by default -> nelux stays the GPU default and behavior is
+            # unchanged for real users. extract_gpu loads its own TransNetV2, so
+            # active_model is intentionally not threaded in here.
+            if _force_cuvid_detection(force_cuvid):
+                emit({"type": "log", "message": "Forcing cuvid detection path (decode_frames_nvdec); nelux bypassed."})
+                return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at)
 
             try:
                 import nelux  # noqa: F401  (import-presence check before the native call)
@@ -849,7 +873,8 @@ def server():
                     payload.get("min_clip_seconds", 0.35),
                     payload.get("batch_frames", 100),
                     payload.get("overlap", 50),
-                    model=model
+                    model=model,
+                    force_cuvid=payload.get("force_cuvid", False),
                 )
             elif command == "quit":
                 break
@@ -874,7 +899,12 @@ def main():
     extract_parser.add_argument("--min-clip-seconds", type=float, default=0.35)
     extract_parser.add_argument("--batch-frames", type=int, default=100)
     extract_parser.add_argument("--overlap", type=int, default=50)
-    
+    extract_parser.add_argument(
+        "--force-cuvid-detection",
+        action="store_true",
+        help="Phase 1 parity: force GPU detection through the ffmpeg-cuvid path (decode_frames_nvdec) instead of nelux (also settable via AMV_FORCE_CUVID_DETECTION env var)",
+    )
+
     args = parser.parse_args()
 
     if args.server:
@@ -894,6 +924,7 @@ def main():
                 args.min_clip_seconds,
                 args.batch_frames,
                 args.overlap,
+                force_cuvid=args.force_cuvid_detection,
             )
             return 0
     except Exception as exc:
