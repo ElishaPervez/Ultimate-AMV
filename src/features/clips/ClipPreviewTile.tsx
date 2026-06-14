@@ -554,6 +554,7 @@ function OffsetVideoLayer({
   // its worst boundary overshoot (how far currentTime drifts past the margined
   // end before the loop snaps back). Cleared on unmount so activeCount is exact.
   React.useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
     const video = videoRef.current;
     reportOffsetMetrics(metricId, { maxOvershootMs: 0 });
     if (!video) return () => clearOffsetMetrics(metricId);
@@ -714,6 +715,7 @@ function OffsetPlaylistLayer({
   // playlist's drift past the current segment's end before it advances). Cleared on
   // unmount so activeCount stays exact.
   React.useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
     reportOffsetMetrics(metricId, { maxOvershootMs: 0 });
     return () => clearOffsetMetrics(metricId);
   }, [metricId]);

@@ -223,23 +223,23 @@ export function SceneViewerModal({
   // never mounts, and the registry is a plain Map. Report on the active edge,
   // clear on teardown.
   React.useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
     if (!isOffsetActive || !clip) return undefined;
-    const metricId = `scene-viewer:${clip.id}`;
     const video = videoRef.current;
+    if (!video) return undefined;
+    const metricId = `scene-viewer:${clip.id}`;
     let maxOvershootMs = 0;
     const onTime = () => {
-      const v = videoRef.current;
-      if (!v) return;
-      const overshoot = (v.currentTime - endSec) * 1000;
+      const overshoot = (video.currentTime - endSec) * 1000;
       if (overshoot > maxOvershootMs) {
         maxOvershootMs = overshoot;
         reportOffsetMetrics(metricId, { maxOvershootMs });
       }
     };
     reportOffsetMetrics(metricId, { maxOvershootMs: 0 });
-    video?.addEventListener("timeupdate", onTime);
+    video.addEventListener("timeupdate", onTime);
     return () => {
-      video?.removeEventListener("timeupdate", onTime);
+      video.removeEventListener("timeupdate", onTime);
       clearOffsetMetrics(metricId);
     };
   }, [isOffsetActive, clip, endSec]);
