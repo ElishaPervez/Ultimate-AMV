@@ -22,6 +22,15 @@ export const MAX_GRID_AUTOPLAYERS = 100;
 // adjacent scene's frame. Validated in src/dev/OffsetSpike.tsx.
 export const PREVIEW_LOOP_END_MARGIN_FRAMES = 5;
 export const PREVIEW_LOOP_START_MARGIN_FRAMES = 3;
+// Minimum margined offset-window length (in frames, at the clip's clamped fps)
+// required to take the featherweight offset-loop path. A clip whose total length
+// is only just above the baked margins (START+END frames) produces an
+// arbitrarily-tiny positive window — e.g. a hair over 8 frames @24fps yields a
+// sub-millisecond window that technically passes a `> 0` gate but plays as a
+// dead 0:00/0:00 frozen micro-loop. Requiring a genuinely-watchable minimum (a
+// couple of frames) keeps short-but-real scenes on the offset loop while routing
+// the sub-frame float band to the trimmed-mp4 (scene_clip_render) fallback.
+export const MIN_OFFSET_WINDOW_FRAMES = 2;
 // Chromium's approximate hard limit on concurrent video decoders before the
 // WebView2 renderer/GPU process dies (the white-screen crash). Every ceiling
 // below is chosen against this bound, INCLUDING the DEV StrictMode transient

@@ -15,6 +15,7 @@ import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import type { AppConfig } from "../../types/app";
 import type { ClipPreviewItem } from "../../types/clip";
 import { useOffsetLoop } from "./useOffsetLoop";
+import { MIN_OFFSET_WINDOW_FRAMES } from "../../lib/constants";
 import {
   clearOffsetMetrics,
   reportOffsetMetrics,
@@ -111,6 +112,15 @@ export function SceneViewerModal({
   const startSec = clip ? clip.sourceStart + tunables.startMarginFrames / fps : 0;
   const endSec = clip ? clip.sourceEnd - tunables.endMarginFrames / fps : 0;
   const windowDuration = Math.max(0, endSec - startSec);
+  // The offset path only makes sense when the margined window is at least a
+  // couple of frames long. A clip whose length barely clears the baked margins
+  // yields an arbitrarily-tiny positive window that passes a naive `> 0` gate
+  // but plays as a dead 0:00/0:00 frozen micro-loop — so require a genuinely
+  // watchable minimum (MIN_OFFSET_WINDOW_FRAMES at the clamped fps) and route
+  // everything below it to the trimmed-mp4 scene_clip_render fallback.
+  const hasOffsetWindow =
+    Number.isFinite(windowDuration)
+    && windowDuration * fps >= MIN_OFFSET_WINDOW_FRAMES;
 
   const isOffsetActive = render.status === "offset";
 
@@ -169,7 +179,7 @@ export function SceneViewerModal({
     // contiguous window, play that source directly and loop the margined
     // sub-window in JS — no scene_clip_render re-encode. The flag is read live
     // (default-on) so only an explicit `false` routes back to the classic path.
-    if (hasPlaybackSrc && !isMergedClip && !offsetFailed && clip.playbackSrc && Number.isFinite(windowDuration) && windowDuration > 0) {
+    if (hasPlaybackSrc && !isMergedClip && !offsetFailed && clip.playbackSrc && hasOffsetWindow) {
       const offsetSrc = clip.playbackSrc;
       void invoke<string>("get_config")
         .then((raw) => {
@@ -214,7 +224,7 @@ export function SceneViewerModal({
   useOffsetLoop(videoRef, {
     startSec,
     endSec,
-    active: isOffsetActive && windowDuration > 0,
+    active: isOffsetActive && hasOffsetWindow,
     forceFallback: tunables.forceTimeupdateFallback,
   });
 

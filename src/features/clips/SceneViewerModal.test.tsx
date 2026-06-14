@@ -137,6 +137,89 @@ describe('SceneViewerModal — error state', () => {
   })
 })
 
+// ─── offset-window gate (M14 follow-up) ───────────────────────────────────────
+//
+// The featherweight offset path requires a meaningful margined window. A clip
+// whose total length barely clears the baked loop margins (START 3 + END 5 = 8
+// frames) yields an arbitrarily-tiny positive window that must NOT take the
+// offset path — it would play as a dead 0:00/0:00 frozen micro-loop. Those clips
+// fall through to scene_clip_render (status 'ready'). A genuinely short-but-
+// watchable window still gets the offset loop (status 'offset').
+
+describe('SceneViewerModal — offset-window gate', () => {
+  // A clip is offset-eligible only with a resolved playbackSrc + featherweight
+  // config enabled. The window is computed from sourceStart/sourceEnd minus the
+  // baked margins (8 frames @24fps ≈ 0.3334s).
+  function makeOffsetClip(overrides: Partial<ClipPreviewItem> = {}): ClipPreviewItem {
+    return makeClip({
+      id: 'clip-offset',
+      playbackSrc: '/video/ep05.mp4',
+      playbackMode: 'direct',
+      ...overrides,
+    })
+  }
+
+  const CONFIG_FEATHERWEIGHT_ON = JSON.stringify({ featherweight_previews: true })
+
+  function mountWithConfig(clip: ClipPreviewItem) {
+    mockInvoke('get_config', () => CONFIG_FEATHERWEIGHT_ON)
+    const sceneRender = vi.fn((_args: unknown) => RENDER_OK)
+    mockInvoke('scene_clip_render', sceneRender)
+    render(<SceneViewerModal clip={clip} onClose={vi.fn()} />)
+    return { sceneRender }
+  }
+
+  it('(a) zero-length window falls back to scene_clip_render (no offset)', async () => {
+    // sourceStart === sourceEnd -> window is 0 even before margins.
+    const clip = makeOffsetClip({ sourceStart: 130.0, sourceEnd: 130.0 })
+    const { sceneRender } = mountWithConfig(clip)
+    await waitFor(() => expect(sceneRender).toHaveBeenCalled())
+    // The mp4 fallback ran; the offset <video> never took over.
+    const videoEl = document.body.querySelector('video') as HTMLVideoElement | null
+    expect(videoEl?.getAttribute('src')).not.toBe(clip.playbackSrc)
+  })
+
+  it('(b) sub-threshold tiny window (float band just above margins) falls back', async () => {
+    // 8 baked margin frames @24fps ≈ 0.33333s. A length a hair above that yields
+    // a sub-frame (~0.0001s) window — must route to scene_clip_render, not offset.
+    const start = 130.0
+    const clip = makeOffsetClip({
+      sourceStart: start,
+      sourceEnd: start + (8 / 24) + 0.0001,
+    })
+    const { sceneRender } = mountWithConfig(clip)
+    await waitFor(() => expect(sceneRender).toHaveBeenCalled())
+    const videoEl = document.body.querySelector('video') as HTMLVideoElement | null
+    expect(videoEl?.getAttribute('src')).not.toBe(clip.playbackSrc)
+  })
+
+  it('(c) normal window above threshold takes the offset path', async () => {
+    // A comfortable multi-second window — well above 2 frames after margins.
+    const clip = makeOffsetClip({ sourceStart: 130.0, sourceEnd: 138.0 })
+    const sceneRender = vi.fn((_args: unknown) => RENDER_OK)
+    mockInvoke('get_config', () => CONFIG_FEATHERWEIGHT_ON)
+    mockInvoke('scene_clip_render', sceneRender)
+    render(<SceneViewerModal clip={clip} onClose={vi.fn()} />)
+    // The offset <video> mounts directly off playbackSrc; scene_clip_render is
+    // never invoked on the offset path.
+    await waitFor(() => {
+      const videoEl = document.body.querySelector('video') as HTMLVideoElement | null
+      expect(videoEl?.getAttribute('src')).toBe(clip.playbackSrc)
+    })
+    expect(sceneRender).not.toHaveBeenCalled()
+  })
+
+  it('(d) degenerate (NaN) window falls back to scene_clip_render', async () => {
+    // NaN fps would make the window math NaN; Number.isFinite must reject it.
+    // (fps clamps to 24 when non-finite, so drive the window NaN via the bounds.)
+    const clip = makeOffsetClip({ sourceStart: Number.NaN, sourceEnd: 138.0 })
+    const { sceneRender } = mountWithConfig(clip)
+    await waitFor(() => expect(sceneRender).toHaveBeenCalled())
+    const videoEl = document.body.querySelector('video') as HTMLVideoElement | null
+    expect(videoEl?.getAttribute('src')).not.toBe(clip.playbackSrc)
+  })
+})
+
 // ─── keyboard / backdrop close ────────────────────────────────────────────────
 
 describe('SceneViewerModal — close behaviour', () => {
