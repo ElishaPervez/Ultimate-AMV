@@ -169,7 +169,7 @@ export function SceneViewerModal({
     // contiguous window, play that source directly and loop the margined
     // sub-window in JS — no scene_clip_render re-encode. The flag is read live
     // (default-on) so only an explicit `false` routes back to the classic path.
-    if (hasPlaybackSrc && !isMergedClip && !offsetFailed && clip.playbackSrc) {
+    if (hasPlaybackSrc && !isMergedClip && !offsetFailed && clip.playbackSrc && Number.isFinite(windowDuration) && windowDuration > 0) {
       const offsetSrc = clip.playbackSrc;
       void invoke<string>("get_config")
         .then((raw) => {
