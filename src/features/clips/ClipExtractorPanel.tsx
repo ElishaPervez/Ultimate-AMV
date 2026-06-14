@@ -2418,16 +2418,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return lowest;
   }, [featherweightActive, proxyProgress, sourceProxyPaths]);
 
+  /* The prep bar carries the proxy-build / WebP-cache progress now, so this
+   * caption is just the scene-ready summary — no duplicated build % or cached
+   * count. Featherweight bakes nothing, so it reads "live previews". */
   const runMessage = error
     ?? (result
-      /* DEV TOOLS: featherweight bakes nothing, so the "X/N previews cached"
-       * counter is meaningless — show a live-preview ready state instead. The
-       * flag-off path keeps the cached-count message byte-for-byte. */
       ? (featherweightActive
-          ? (proxyBuildPct !== null
-              ? `Building preview proxy... ${Math.round(proxyBuildPct)}%`
-              : `${displayedClips.length} scenes ready - live previews`)
-          : `${result.sceneCount} scenes ready - ${readyPreviewCount}/${displayedClips.length} previews cached`)
+          ? `${displayedClips.length} scenes ready - live previews`
+          : `${result.sceneCount} scenes ready`)
       : progress?.message ?? "");
 
   /* Per-task progress bars. The detection feed and the secondary preview-prep
