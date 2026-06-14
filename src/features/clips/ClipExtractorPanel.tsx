@@ -899,6 +899,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     () => displayedClips.reduce((count, clip) => count + (clip.previewState?.status === "ready" ? 1 : 0), 0),
     [displayedClips],
   );
+  // Bake progress must count SETTLED previews, not just ready ones. A preview
+  // that permanently errors is terminal and the bake scheduler never retries it,
+  // so excluding it would peg the bar below 100% forever after a single failure.
+  // Treat both "ready" and "error" as done for progress purposes.
+  const settledPreviewCount = React.useMemo(
+    () =>
+      displayedClips.reduce((count, clip) => {
+        const status = clip.previewState?.status;
+        return count + (status === "ready" || status === "error" ? 1 : 0);
+      }, 0),
+    [displayedClips],
+  );
   const exportOptions = React.useMemo(
     () => clipExportOptions(clipMode, gpuStatus),
     [clipMode, gpuStatus],
@@ -2418,6 +2430,67 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           : `${result.sceneCount} scenes ready - ${readyPreviewCount}/${displayedClips.length} previews cached`)
       : progress?.message ?? "");
 
+  /* Per-task progress bars. The detection feed and the secondary preview-prep
+   * task run CONCURRENTLY, so each bar is driven SOLELY by its own signal and
+   * never fights the other. There is no synthetic roll-up: two purpose-built
+   * bars already convey state, and a fixed-weight blend of two parallel tasks
+   * with no fixed cost ratio reads as broken (Overall at 60% while detection is
+   * 100% above it) and pulls a completed bar backward when a post-detection lazy
+   * proxy build kicks. Each task simply shows its own honest fraction.
+   *
+   * - detection: progress.percent (already cross-episode overall via
+   *   mapClipBatchProgress). Indeterminate while extracting before any percent.
+   * - prep (exactly one runs per mode — proxy ON / WebP OFF):
+   *     featherweight ON  -> source-proxy build (proxyBuildPct). Bar appears
+   *       only while a build is in flight or has resolved; absent otherwise so
+   *       a non-running stage hides rather than showing 0%. proxyBuildPct===null
+   *       with resolved paths => done (100%); building with no percent yet =>
+   *       indeterminate. Failed sources are already excluded from proxyBuildPct.
+   *     featherweight OFF -> WebP preview bake (settledPreviewCount / clips).
+   *       Cache hits flip clips to ready immediately so the bar renders complete;
+   *       errors count as settled so a single failure can't peg the bar < 100%.
+   */
+  const proxyResolvedCount = Object.keys(sourceProxyPaths).length;
+  const prepBar = React.useMemo<{
+    label: string;
+    percent: number;
+    indeterminate: boolean;
+  } | null>(() => {
+    if (featherweightActive) {
+      // No proxy in flight and none resolved => no build ran this mode: hide.
+      if (proxyBuildPct === null && proxyResolvedCount === 0) return null;
+      if (proxyBuildPct === null) {
+        return { label: "Preview proxy", percent: 100, indeterminate: false };
+      }
+      return {
+        label: "Building preview proxy",
+        percent: Math.max(0, Math.min(100, proxyBuildPct)),
+        // No percent yet (cache-miss build just kicked) => indeterminate sweep.
+        indeterminate: proxyBuildPct <= 0,
+      };
+    }
+    // WebP bake only runs with a visible grid and at least one clip; otherwise
+    // there is no prep task to report, so hide the bar rather than show 0%.
+    if (!gridPreview || displayedClips.length === 0) return null;
+    return {
+      label: `Caching previews (${readyPreviewCount}/${displayedClips.length})`,
+      // Drive the fill off SETTLED (ready + error) previews so a permanently
+      // failed bake can't keep the bar below 100% once all work has finished.
+      percent: Math.round((settledPreviewCount / displayedClips.length) * 100),
+      indeterminate: false,
+    };
+  }, [
+    featherweightActive,
+    proxyBuildPct,
+    proxyResolvedCount,
+    gridPreview,
+    displayedClips.length,
+    readyPreviewCount,
+    settledPreviewCount,
+  ]);
+
+  const detectionIndeterminate = isExtracting && (!progress || progress.percent <= 0);
+
   return (
     <section
       ref={dropZone.ref}
@@ -2631,13 +2704,30 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
         {!exportSession && (progress || error || result) && (
           <div className={`clip-run-card glass ${error ? "is-error" : ""}`}>
-            <div className="clip-run-line">
-              <strong>{error ? "Extraction failed" : formatClipProgressStage(progress?.stage)}</strong>
-              {progress && <span>{Math.round(progress.percent)}%</span>}
-            </div>
-            {progress && (
-              <div className={`clip-progress-track ${isExtracting && progress.percent <= 0 ? "is-indeterminate" : ""}`}>
-                <span className="spring-motion" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} />
+            {/* Scene detection — always present; the core task. */}
+            {(progress || error) && (
+              <div className="clip-bar-row">
+                <div className="clip-run-line">
+                  <strong>{error ? "Extraction failed" : formatClipProgressStage(progress?.stage)}</strong>
+                  {progress && !error && <span>{Math.round(progress.percent)}%</span>}
+                </div>
+                {progress && !error && (
+                  <div className={`clip-progress-track ${detectionIndeterminate ? "is-indeterminate" : ""}`}>
+                    <span className="spring-motion" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} />
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Preview prep — exactly one of proxy build / WebP bake, only when it actually runs. */}
+            {!error && prepBar && (
+              <div className="clip-bar-row">
+                <div className="clip-run-line">
+                  <strong>{prepBar.label}</strong>
+                  {!prepBar.indeterminate && <span>{prepBar.percent}%</span>}
+                </div>
+                <div className={`clip-progress-track ${prepBar.indeterminate ? "is-indeterminate" : ""}`}>
+                  <span className="spring-motion" style={{ width: `${prepBar.percent}%` }} />
+                </div>
               </div>
             )}
             <p>{runMessage}</p>

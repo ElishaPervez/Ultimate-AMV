@@ -354,6 +354,17 @@
   animation: indeterminate 1.05s ease-in-out infinite;
 }
 
+/* Stacked per-task bars share one card; distinguish by label only. */
+.clip-bar-row {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.clip-bar-row .clip-progress-track {
+  height: 6px;
+}
+
 .clip-format-note {
   display: flex;
   align-items: flex-start;
