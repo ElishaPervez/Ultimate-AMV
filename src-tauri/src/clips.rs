@@ -1590,20 +1590,46 @@ fn run_source_proxy_job(
     color: &ColorMetadata,
 ) -> Result<(), String> {
     // Whole-file transcode (NO -ss) so the proxy timeline matches the source
-    // 1:1. Decode accel: on the NVENC path force `cuda` so the NVIDIA decoder
-    // (NVDEC) is actually engaged -- plain `auto` silently picks dxva2, leaving
-    // the dedicated decoder idle (the "my decoder isn't being used" symptom).
-    // Frames still return to system RAM (NO -hwaccel_output_format cuda yet), so
-    // the CPU scale/setparams chain below is unchanged and there's no hwframe
-    // hard-fail. The libx264 path keeps `auto` so non-NVIDIA machines decode
-    // cleanly per the CPU/GPU parity rule; if NVDEC can't handle a codec the
-    // primary job errors and the existing libx264 fallback retries with `auto`.
+    // 1:1. The decode prefix and -vf chain diverge by encoder so the NVENC path
+    // can keep every frame on the GPU end-to-end while CPU users stay on a
+    // pure-software pipeline (CPU/GPU parity rule).
+    //
+    // NVENC path (full-VRAM): `-hwaccel cuda -hwaccel_output_format cuda` keeps
+    // NVDEC output as CUDA hwframes, then scale_cuda resizes on the GPU and
+    // hands frames straight to NVENC -- no download-to-RAM / CPU-libswscale /
+    // re-upload round-trip (that round-trip was the build-time cost). Two hard
+    // requirements verified on this build: (1) setparams MUST precede scale_cuda
+    // -- if dropped or placed after, ffmpeg inserts a CPU auto_scale to reconcile
+    // unknown->bt709 colorspace which can't run on a CUDA hwframe and hard-fails
+    // (exit 127), breaking untagged sources (the common anime case); (2) NO
+    // top-level `-pix_fmt yuv420p` -- it's expressed as `scale_cuda=...:format=
+    // yuv420p` instead, since a top-level pix_fmt against a cuda hwframe forces a
+    // CPU conversion or fails. If NVDEC can't handle a codec the primary job
+    // errors and the existing libx264 fallback retries with `auto`.
+    //
+    // libx264 path: plain `-hwaccel auto` (non-NVIDIA machines decode cleanly)
+    // and the CPU scale/setparams chain, unchanged.
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
-        "-hwaccel".to_string(),
-        if use_nvenc { "cuda" } else { "auto" }.to_string(),
+    ];
+
+    if use_nvenc {
+        args.extend([
+            "-hwaccel".to_string(),
+            "cuda".to_string(),
+            "-hwaccel_output_format".to_string(),
+            "cuda".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-hwaccel".to_string(),
+            "auto".to_string(),
+        ]);
+    }
+
+    args.extend([
         "-i".to_string(),
         input.to_string_lossy().to_string(),
         // Optional audio: silent sources skip the audio stream without failing.
@@ -1611,13 +1637,22 @@ fn run_source_proxy_job(
         "0:v:0".to_string(),
         "-map".to_string(),
         "0:a:0?".to_string(),
-        // 240p cap (never upscale via the min() guard). setparams chained on so
-        // the proxy carries the same color tags as the export (scale preserves
-        // color; setparams only labels). Single quotes keep the inner comma an
-        // expression arg, not a filter-chain separator.
-        "-vf".to_string(),
-        format!("scale=-2:'min(240,ih)',{}", setparams_filter(color)),
-    ];
+    ]);
+
+    // 240p cap (never upscale via the min() guard). setparams carries the same
+    // color tags as the export (scaling preserves color; setparams only labels).
+    // Single quotes keep the inner comma an expression arg, not a filter-chain
+    // separator. NVENC: setparams FIRST, then GPU scale_cuda (with format) so the
+    // whole chain runs on cuda hwframes. CPU: software scale then setparams.
+    args.push("-vf".to_string());
+    if use_nvenc {
+        args.push(format!(
+            "{},scale_cuda=-2:'min(240,ih)':format=yuv420p",
+            setparams_filter(color)
+        ));
+    } else {
+        args.push(format!("scale=-2:'min(240,ih)',{}", setparams_filter(color)));
+    }
 
     if use_nvenc {
         // Short fixed GOP, no scene-cut, forced IDR, no B-frames so every
@@ -1639,8 +1674,9 @@ fn run_source_proxy_job(
             "1".to_string(),
             "-bf".to_string(),
             "0".to_string(),
-            "-pix_fmt".to_string(),
-            "yuv420p".to_string(),
+            // No top-level -pix_fmt here: the output pixel format is set on the
+            // GPU via `scale_cuda=...:format=yuv420p` (see -vf above). A
+            // top-level pix_fmt against a cuda hwframe forces a CPU conversion.
         ]);
     } else {
         args.extend([
