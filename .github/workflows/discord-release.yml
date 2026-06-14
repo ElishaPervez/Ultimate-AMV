@@ -1,0 +1,43 @@
+name: Announce release to Discord
+
+# Fires whenever a GitHub Release is published.
+# 1. Re-uploads the built installer under a stable filename so the
+#    #download button's /releases/latest/download/... URL always resolves.
+# 2. Posts a release card to the #update-logs channel in Discord.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write   # needed to upload the stable-named asset
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo (for the announce script)
+        uses: actions/checkout@v4
+
+      - name: Re-upload installer under a stable filename
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          # grab the versioned installer (has TWO underscore segments: name_version_x64-setup.exe)
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*_*_x64-setup.exe' --dir dl
+          SRC=$(ls dl/*_*_x64-setup.exe | head -n1)
+          echo "Source installer: $SRC"
+          cp "$SRC" "Ultimate.AMV_x64-setup.exe"
+          gh release upload "$TAG" "Ultimate.AMV_x64-setup.exe" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Post release card to #update-logs
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: python3 .github/scripts/announce_discord.py
