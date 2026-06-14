@@ -1442,6 +1442,7 @@ pub(crate) async fn build_source_proxy(
     source_path: String,
     force: bool,
 ) -> Result<String, String> {
+    let start = std::time::Instant::now();
     log_info(
         "clip.source_proxy.start",
         "Building source proxy",
@@ -1468,12 +1469,12 @@ pub(crate) async fn build_source_proxy(
         Ok(path) => log_info(
             "clip.source_proxy.complete",
             "Source proxy ready",
-            json!({ "source": log_source, "proxy": path }),
+            json!({ "source": log_source, "proxy": path, "elapsed_s": start.elapsed().as_secs_f64() }),
         ),
         Err(error) => log_error(
             "clip.source_proxy.error",
             "Source proxy build failed",
-            json!({ "source": log_source, "error": error }),
+            json!({ "source": log_source, "error": error, "elapsed_s": start.elapsed().as_secs_f64() }),
         ),
     }
     result

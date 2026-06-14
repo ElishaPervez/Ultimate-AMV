@@ -543,6 +543,7 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
     pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
     progress_tap: Option<(&str, &str)>,
 ) -> Result<(), String> {
+    let job_start = std::time::Instant::now();
     log_info(
         "ffmpeg.start",
         "Starting FFmpeg job",
@@ -655,7 +656,7 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
         log_info(
             "ffmpeg.complete",
             "FFmpeg job completed",
-            json!({ "label": label }),
+            json!({ "label": label, "elapsed_s": job_start.elapsed().as_secs_f64() }),
         );
         emit_conversion_progress(
             window,
