@@ -381,6 +381,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
    * must treat these as settled-with-no-source -> static merged poster, not an
    * indefinite spinner. Cleared whenever the per-source maps reset. */
   const failedProxiesRef = React.useRef<Set<string>>(new Set());
+  /* Sources whose proxy must be REBUILT (not cache-hit) on the next build —
+   * populated by "extract again" (force) so a stale/buggy proxy can't survive a
+   * full re-extraction. Consumed (one-shot) when that source's proxy build fires. */
+  const forceProxyRebuildRef = React.useRef<Set<string>>(new Set());
   // DEV tunables: margins + max-video cap. In prod this equals the baked
   // constants (the DEV panel is the only mutator). The DEV featherweight toggle
   // also force-enables the feature even when the config flag is off.
@@ -655,6 +659,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
      * proxy progress / failure state so the graceful-poster decision starts clean. */
     setProxyProgress({});
     failedProxiesRef.current.clear();
+    forceProxyRebuildRef.current.clear();
 
     // Video picked, high intent to extract - warm up the server
     if (clipMode !== "cpu") {
@@ -1202,7 +1207,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
     for (const source of sources) {
       proxyInFlightRef.current.add(source);
-      void invoke<string>("build_source_proxy", { sourcePath: source })
+      // "extract again" marks the source for a forced rebuild so the Rust side
+      // skips its cache; consumed below so only the first build after a re-extract
+      // is forced (later tile interactions reuse the freshly-built proxy).
+      const forceRebuild = forceProxyRebuildRef.current.has(source);
+      void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild })
         .then((proxyPath) => {
           if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
         })
@@ -1223,6 +1232,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         })
         .finally(() => {
           proxyInFlightRef.current.delete(source);
+          // One-shot: the forced rebuild has happened (or failed); drop the mark
+          // so subsequent builds for this source cache normally.
+          forceProxyRebuildRef.current.delete(source);
         });
     }
   }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths]);
@@ -1353,6 +1365,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (videos.length === 0 || isExtracting) return;
     const force = options?.force ?? false;
     const proxies = options?.proxies ?? detectorProxies;
+
+    // "Extract again" (force) must be a COMPLETE redo: scene detection already
+    // bypasses its cache via the force flag below, but the source proxy has its
+    // own on-disk cache. Mark each re-extracted source so its next proxy build
+    // rebuilds instead of cache-hitting a stale/buggy file. Consumed one-shot in
+    // the lazy proxy-build effect. Without this, no proxy fix is ever testable.
+    if (force) {
+      for (const video of videos) forceProxyRebuildRef.current.add(video);
+    }
 
     // GPU mode no longer blocks on a codec preflight. The Python backend
     // routes any codec NVDEC/nelux can't decode straight to software decode ->

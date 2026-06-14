@@ -1440,6 +1440,7 @@ fn compute_playback_plan(app: &tauri::AppHandle, source_path: String) -> Result<
 pub(crate) async fn build_source_proxy(
     window: tauri::Window,
     source_path: String,
+    force: bool,
 ) -> Result<String, String> {
     log_info(
         "clip.source_proxy.start",
@@ -1458,7 +1459,7 @@ pub(crate) async fn build_source_proxy(
 
     let log_source = source_path.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        generate_source_proxy(window, app_data_dir, source_path)
+        generate_source_proxy(window, app_data_dir, source_path, force)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -1482,6 +1483,7 @@ fn generate_source_proxy(
     window: tauri::Window,
     app_data_dir: PathBuf,
     source_path: String,
+    force: bool,
 ) -> Result<String, String> {
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
@@ -1515,10 +1517,14 @@ fn generate_source_proxy(
     let output = cache_dir.join(format!("{proxy_key}.mp4"));
 
     // >1024-byte cache hit short-circuit (matches every other app cache).
-    if output
-        .metadata()
-        .map(|metadata| metadata.len() > 1024)
-        .unwrap_or(false)
+    // `force` (from "extract again") bypasses it: a stale/buggy proxy must never
+    // mask a rebuild, or any proxy fix is invisible behind the cache. The atomic
+    // rename below replaces the old file on success.
+    if !force
+        && output
+            .metadata()
+            .map(|metadata| metadata.len() > 1024)
+            .unwrap_or(false)
     {
         return Ok(output.to_string_lossy().to_string());
     }
