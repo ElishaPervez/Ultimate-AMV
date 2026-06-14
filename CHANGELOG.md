@@ -5,6 +5,21 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] : 2026-06-15
+
+### Added
+- Integrated the Tsukyio asset vault. Browse, preview, and pull editing assets straight into your project.
+- Background remover. Automatically cut characters out of videos and images with a clean transparent background.
+- Featherlight previews for lighter, faster scene previews.
+
+### Changed
+- Significantly improved GUI, with a new home screen, grouped sidebar, custom color picker, and better readability over wallpapers.
+- Faster, more reliable clip extraction, merging, and previews.
+- Smarter downloads, with real quality labels and a steady speed readout.
+
+### Fixed
+- Fixed first-time setup so the app installs and launches reliably for everyone.
+
 ## [0.12.0] : 2026-05-22
 
 ### Added
@@ -221,6 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.13.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.0
 [0.12.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.12.0
 [0.11.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.11.0
 
