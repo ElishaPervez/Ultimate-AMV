@@ -606,13 +606,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // clip ids, making the first jump-to-selection click after a new
     // extraction land on the wrong end of the list.
     selectionCursorIdRef.current = null;
-    /* DEV TOOLS: a fresh extraction invalidates per-source plans/proxies. */
-    setPlaybackPlans({});
-    setSourceProxyPaths({});
-    setProxyProgress({});
-    planInFlightRef.current.clear();
-    proxyInFlightRef.current.clear();
-    failedProxiesRef.current.clear();
+    /* NOTE: per-source plan/proxy state is intentionally NOT reset here. This
+     * effect fires on every result?.input change — including when detection's
+     * results land mid-extraction — and the proxy build is now kicked early
+     * (concurrent with detection in startExtraction). Resetting here would wipe
+     * the in-flight proxy (or its proxyInFlightRef marker) the moment results
+     * arrive, leaving tiles stuck. The plan/proxy reset now happens ONCE at
+     * extraction start (startExtraction) and on new source selection (acceptVideos). */
   }, [result?.input]);
 
   /* DEV TOOLS: listen for proxy-build progress so a finished proxy flips its
@@ -656,8 +656,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setActiveGridItems(null);
     setUnifiedPreviews({});
     /* DEV TOOLS: a brand-new source selection invalidates any prior per-source
-     * proxy progress / failure state so the graceful-poster decision starts clean. */
+     * plan/proxy/progress/failure state so the graceful-poster decision (and the
+     * concurrent proxy build) starts clean. The result effect no longer resets
+     * these, so a new source must clear them here. */
+    setPlaybackPlans({});
+    setSourceProxyPaths({});
     setProxyProgress({});
+    planInFlightRef.current.clear();
+    proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
     forceProxyRebuildRef.current.clear();
 
@@ -1210,6 +1216,46 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
   }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans]);
 
+  /* Kick exactly ONE build_source_proxy for a source, deduping on the in-flight
+   * ref. Used both by the lazy on-scroll effect below AND by startExtraction to
+   * overlap the build with scene detection. Dedup is proxyInFlightRef-only (a ref,
+   * always current); it deliberately does NOT read sourceProxyPaths (that would
+   * need it as a dep / could be stale) — callers that can skip an already-built
+   * source do their own sourceProxyPaths check before calling. */
+  const kickProxyBuild = React.useCallback((source: string) => {
+    if (proxyInFlightRef.current.has(source)) return;
+    proxyInFlightRef.current.add(source);
+    // "extract again" marks the source for a forced rebuild so the Rust side
+    // skips its cache; consumed below so only the first build after a re-extract
+    // is forced (later tile interactions reuse the freshly-built proxy).
+    const forceRebuild = forceProxyRebuildRef.current.has(source);
+    void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild })
+      .then((proxyPath) => {
+        if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
+      })
+      .catch((proxyError) => {
+        // A FAILED build is terminal: mark it so the graceful-poster decision
+        // no longer counts this source as "pending" (otherwise a pinned
+        // proxyProgress entry would spin forever), and drop its stale progress
+        // tick so nothing else reads it as an in-flight build.
+        failedProxiesRef.current.add(source);
+        setProxyProgress((cur) => {
+          const { [source]: _dropped, ...rest } = cur;
+          return rest;
+        });
+        logFrontend("warn", "frontend.clip.source_proxy.warning", "Could not build source proxy", {
+          source,
+          error: safeLogValue(proxyError),
+        });
+      })
+      .finally(() => {
+        proxyInFlightRef.current.delete(source);
+        // One-shot: the forced rebuild has happened (or failed); drop the mark
+        // so subsequent builds for this source cache normally.
+        forceProxyRebuildRef.current.delete(source);
+      });
+  }, []);
+
   /* DEV TOOLS: for proxy-mode sources with an active visible tile, kick exactly
    * ONE build_source_proxy per source on first interaction. The proxy-progress
    * listener tracks the build; on resolve we record the proxy path which flips
@@ -1226,39 +1272,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       if (sourceProxyPaths[clip.path] || proxyInFlightRef.current.has(clip.path)) continue;
       sources.add(clip.path);
     }
-    for (const source of sources) {
-      proxyInFlightRef.current.add(source);
-      // "extract again" marks the source for a forced rebuild so the Rust side
-      // skips its cache; consumed below so only the first build after a re-extract
-      // is forced (later tile interactions reuse the freshly-built proxy).
-      const forceRebuild = forceProxyRebuildRef.current.has(source);
-      void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild })
-        .then((proxyPath) => {
-          if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
-        })
-        .catch((proxyError) => {
-          // A FAILED build is terminal: mark it so the graceful-poster decision
-          // no longer counts this source as "pending" (otherwise a pinned
-          // proxyProgress entry would spin forever), and drop its stale progress
-          // tick so nothing else reads it as an in-flight build.
-          failedProxiesRef.current.add(source);
-          setProxyProgress((cur) => {
-            const { [source]: _dropped, ...rest } = cur;
-            return rest;
-          });
-          logFrontend("warn", "frontend.clip.source_proxy.warning", "Could not build source proxy", {
-            source,
-            error: safeLogValue(proxyError),
-          });
-        })
-        .finally(() => {
-          proxyInFlightRef.current.delete(source);
-          // One-shot: the forced rebuild has happened (or failed); drop the mark
-          // so subsequent builds for this source cache normally.
-          forceProxyRebuildRef.current.delete(source);
-        });
-    }
-  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths]);
+    for (const source of sources) kickProxyBuild(source);
+  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths, kickProxyBuild]);
 
   function startPreviewRenderBatch(batch: ClipPreviewItem[], token: number) {
     const renderable = batch.filter((clip) => clip.path);
@@ -1396,6 +1411,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       for (const video of videos) forceProxyRebuildRef.current.add(video);
     }
 
+    // Reset per-source plan/proxy state ONCE here at extraction start (it used to
+    // live in the result?.input effect). Doing it here — before the concurrent
+    // proxy build is kicked below — means detection's results landing mid-extraction
+    // won't wipe the in-flight proxy or its proxyInFlightRef marker. failedProxiesRef
+    // is cleared too so a prior terminal failure doesn't poison the new build.
+    setPlaybackPlans({});
+    setSourceProxyPaths({});
+    setProxyProgress({});
+    planInFlightRef.current.clear();
+    proxyInFlightRef.current.clear();
+    failedProxiesRef.current.clear();
+
     // GPU mode no longer blocks on a codec preflight. The Python backend
     // routes any codec NVDEC/nelux can't decode straight to software decode ->
     // the same TransNetV2 model (mode stays "gpu"), so detection quality is
@@ -1452,6 +1479,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             error: safeLogValue(warmupError),
           });
         });
+      }
+
+      // Overlap: start the source-proxy build(s) concurrently with detection. The proxy
+      // (NVDEC+NVENC) and TransNet detection (tensor cores) mostly use different GPU
+      // silicon; they only share the decoder. Fire-and-forget — do NOT await — so the
+      // ~23s proxy overlaps the ~21s detection instead of running after it. force is
+      // honored via forceProxyRebuildRef (set above on "extract again").
+      if (featherweightActive) {
+        for (const video of videos) kickProxyBuild(video);
       }
 
       const results: ClipExtractionResult[] = [];
