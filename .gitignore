@@ -41,6 +41,18 @@ temp.md
 /TEST_AGENT_PROMPT.md
 /TEST_FAILURES.md
 /TEST_SUMMARY.md
+/regression-report.html
+/review-report.html
+
+# Agent-generated decision-aid / explainer HTML — the per-bug, per-feature
+# visualizations generated for review (see CLAUDE.md), not shipped product
+# docs. Same privacy as docs/agent/. These all live directly under docs/;
+# the root index.html app entry and experiments/ HTML are unaffected.
+docs/*.html
+
+# Per-release agent changelog scratch (e.g. CHANGELOG-0.13.0.md). The
+# canonical CHANGELOG.md (no version suffix) stays tracked.
+/CHANGELOG-*.md
 
 # Python.
 __pycache__/
