@@ -129,6 +129,14 @@ jobs:
           Get-Content latest.json
           Write-Host "::endgroup::"
 
+      - name: Prepare stable-named installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=$(ls "src-tauri/target/release/bundle/nsis/"*_*_x64-setup.exe | head -n1)
+          cp "$SRC" "src-tauri/target/release/bundle/nsis/Ultimate.AMV_x64-setup.exe"
+          echo "Prepared stable installer from: $SRC"
+
       - name: Upload installer to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -138,3 +146,26 @@ jobs:
             latest.json
             tools.json
           body_path: release-notes.md
+
+      # ── Announce to Discord ────────────────────────────────────────────────
+      # Folded in from the former discord-release.yml. A standalone workflow on
+      # `release: published` could never fire: the release here is published with
+      # the default GITHUB_TOKEN, and GITHUB_TOKEN-created events do not trigger
+      # other workflow runs. Posting in the same job sidesteps that entirely.
+      - name: Load release notes into env
+        shell: bash
+        run: |
+          {
+            echo 'RELEASE_BODY<<__RELEASE_BODY_EOF__'
+            cat release-notes.md
+            echo '__RELEASE_BODY_EOF__'
+          } >> "$GITHUB_ENV"
+
+      - name: Announce release to Discord
+        shell: bash
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_NAME: ${{ github.ref_name }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+        run: python .github/scripts/announce_discord.py
