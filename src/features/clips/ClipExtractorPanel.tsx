@@ -2733,6 +2733,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       <div className="clip-extractor-stage">
         {hasClips ? (
           <Virtuoso
+            /* Remount on column change so Virtuoso discards its per-row size
+             * cache and re-measures from scratch. Without this, switching from
+             * 1 column (tall rows) to multi-column (short rows) leaves every
+             * OFF-SCREEN row cached at the old tall height — only mounted rows
+             * re-measure — so the scroll spacer stays massively over-reserved
+             * (the "deadzone" empty region). A window resize cleared it before
+             * by forcing a full re-measure; this does the same automatically. */
+            key={gridCols}
             ref={virtuosoRef}
             data={clipRows}
             overscan={1000}

@@ -4897,7 +4897,7 @@ dependencies = [
 
 [[package]]
 name = "ultimate-amv-script"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "chrono",
  "discord-rich-presence",
