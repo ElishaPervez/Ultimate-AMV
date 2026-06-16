@@ -103,4 +103,4 @@ git push origin v1.0.0
 
 ---
 
-🤖 **App development was powered by GPT 5.5 via CodeX and Opus 4.7 via Claude Code** ✨
+🤖 **App development was powered by GPT 5.5 via CodeX and Opus 4.8 via Claude Code (and a bit of Fable, while it lasted)** ✨
