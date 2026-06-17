@@ -447,6 +447,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const exportSessionRef = React.useRef<ClipExportSession | null>(null);
   const lastSelectedIdRef = React.useRef<string | null>(null);
   const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
+  // Anchor-preserve across the DELIBERATE key={gridCols} remount (the deadzone fix).
+  // We snapshot the flat index of the clip at the TOP of the viewport just before the
+  // column count changes, then re-open the fresh Virtuoso instance scrolled to that same
+  // clip's NEW row. Held in a ref so it survives the remount without forcing a render.
+  const anchorClipIndexRef = React.useRef<number | null>(null);
   const selectionCursorIdRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     exportSessionRef.current = exportSession;
@@ -1265,6 +1270,34 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const handleScrollerRef = React.useCallback((el: HTMLElement | Window | null) => {
     setScrollerEl((el as HTMLElement | null) ?? null);
   }, []);
+
+  // Single handler both column-count call sites (slider + ticks) route through.
+  // Before the deliberate key={gridCols} remount it captures which clip sits at
+  // the TOP of the viewport so the fresh list can re-open scrolled to it.
+  const changeGridCols = React.useCallback((next: number) => {
+    const cols = Math.min(4, Math.max(1, next));
+    if (cols === gridCols) return;
+    // Capture which clip sits at the TOP of the viewport BEFORE the remount, reading
+    // the LIVE DOM (the dev-tools/featherweight geometry state is 0 when the flag is off).
+    const el = scrollerEl;
+    if (el && el.scrollTop > 0 && clipRows.length > 0) {
+      const rowEl = el.querySelector<HTMLElement>(".clip-preview-grid-row");
+      const measured = rowEl ? rowEl.getBoundingClientRect().height : 0;
+      let rowHeight = measured;
+      if (rowHeight <= 0) {
+        // No row rendered to measure: derive stride from the scroller's own width.
+        // tile is aspect-ratio 16/9; 12px column gap; scroller has padding-right:6px.
+        const innerWidth = el.clientWidth - 6;
+        const tileW = (innerWidth - 12 * (gridCols - 1)) / gridCols;
+        rowHeight = tileW * (9 / 16) + 12; // +12px row stride (padding-bottom)
+      }
+      const topRow = Math.floor(el.scrollTop / rowHeight);
+      anchorClipIndexRef.current = topRow * gridCols; // gridCols = CURRENT cols
+    } else {
+      anchorClipIndexRef.current = 0;
+    }
+    setGridCols(cols);
+  }, [gridCols, scrollerEl, clipRows.length]);
 
   /* DEV TOOLS: lazily probe a PlaybackPlan for each distinct source that has an
    * active visible tile (first preview interaction). One invoke per source. */
@@ -2566,7 +2599,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               max={4}
               step={1}
               value={gridCols}
-              onChange={(e) => setGridCols(Math.min(4, Math.max(1, Number(e.currentTarget.value))))}
+              onChange={(e) => changeGridCols(Number(e.currentTarget.value))}
               aria-label="Grid column count"
             />
             <div className="clip-cols-ticks">
@@ -2575,7 +2608,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                   key={n}
                   type="button"
                   className={`clip-cols-tick ${gridCols === n ? "is-active" : ""}`}
-                  onClick={() => setGridCols(n)}
+                  onClick={() => changeGridCols(n)}
                   aria-label={`${n} column${n === 1 ? "" : "s"}`}
                 >{n}</button>
               ))}
@@ -2743,6 +2776,21 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             key={gridCols}
             ref={virtuosoRef}
             data={clipRows}
+            /* Anchor-preserve across the key={gridCols} remount above: a clip's identity is
+             * stable, only its row index changes with column count. Re-open the fresh list
+             * scrolled so the clip that was at the top stays at the top. null ref (initial
+             * load / no prior column change) -> index 0 -> opens at the top. */
+            initialTopMostItemIndex={
+              anchorClipIndexRef.current == null
+                ? 0
+                : {
+                    index: Math.min(
+                      Math.max(0, Math.floor(anchorClipIndexRef.current / gridCols)),
+                      Math.max(0, clipRows.length - 1),
+                    ),
+                    align: "start",
+                  }
+            }
             overscan={1000}
             increaseViewportBy={1000}
             style={virtuosoStyle}
