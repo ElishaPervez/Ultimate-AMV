@@ -465,7 +465,9 @@ fn run_preview_ffmpeg(
     ]);
 
     if use_gpu {
-        args.push("scale_cuda=426:240,hwdownload,format=nv12,fps=12".to_string());
+        // scale_cuda must convert to nv12 on-GPU (`:format=nv12`): 10-bit HEVC
+        // decodes to p010, and hwdownload cannot emit nv12 from a p010 surface.
+        args.push("scale_cuda=426:240:format=nv12,hwdownload,format=nv12,fps=12".to_string());
     } else {
         args.push("fps=12,scale=426:240:force_original_aspect_ratio=increase,crop=426:240".to_string());
     }

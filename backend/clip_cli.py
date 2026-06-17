@@ -180,8 +180,11 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
         "-i",
         str(input_path),
         "-an",
+        # scale_cuda must convert to nv12 on-GPU (`:format=nv12`): 10-bit HEVC
+        # decodes to p010 CUDA frames, and hwdownload cannot emit nv12 from a
+        # p010 surface ("Invalid output format nv12 for hwframe download").
         "-vf",
-        f"scale_cuda={FRAME_W}:{FRAME_H},hwdownload,format=nv12,format=rgb24",
+        f"scale_cuda={FRAME_W}:{FRAME_H}:format=nv12,hwdownload,format=nv12,format=rgb24",
         "-f",
         "image2pipe",
         "-pix_fmt",
