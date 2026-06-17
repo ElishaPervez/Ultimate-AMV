@@ -359,9 +359,29 @@ describe('ClipPreviewTile — metadata rendering', () => {
     expect(screen.getByText('1:23 - 1:30')).toBeInTheDocument()
   })
 
-  it('renders source name badge', () => {
+  it('does not render a source-name badge for a non-merged clip', () => {
+    // The filename badge was redundant on every tile; non-merged clips now
+    // emit no clip-source-badge at all (the episode tag, when relevant, lives
+    // in the bottom caption via clip.label instead).
     const clip = makeClip({ sourceName: 'attack-on-titan-ep01' })
-    render(<ClipPreviewTile {...defaultProps} clip={clip} />)
-    expect(screen.getByText('attack-on-titan-ep01')).toBeInTheDocument()
+    const { container } = render(<ClipPreviewTile {...defaultProps} clip={clip} />)
+    expect(screen.queryByText('attack-on-titan-ep01')).not.toBeInTheDocument()
+    expect(container.querySelector('.clip-source-badge')).toBeNull()
+  })
+
+  it('renders the "Merged" badge for a merged clip (featherweight off)', () => {
+    const clip = makeClip({ isUnified: true, segmentCount: 3 })
+    const { container } = render(<ClipPreviewTile {...defaultProps} clip={clip} />)
+    expect(container.querySelector('.clip-source-badge')).not.toBeNull()
+    expect(screen.getByText('Merged')).toBeInTheDocument()
+  })
+
+  it('renders the "Merged xN" badge for a merged clip (featherweight on)', () => {
+    const clip = makeClip({ isUnified: true, segmentCount: 3 })
+    const { container } = render(
+      <ClipPreviewTile {...defaultProps} featherweightEnabled={true} clip={clip} />,
+    )
+    expect(container.querySelector('.clip-source-badge')).not.toBeNull()
+    expect(screen.getByText('Merged x3')).toBeInTheDocument()
   })
 })

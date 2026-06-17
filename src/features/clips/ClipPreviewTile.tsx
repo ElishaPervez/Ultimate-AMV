@@ -392,15 +392,18 @@ export function ClipPreviewTile({
           </span>
         )}
         <span className="clip-tile-scrim" />
-        <span className="clip-source-badge">
-          {clip.isUnified
-            ? /* STEP D — featherweight surfaces the merge fan-in count ("Merged
-               * x3"); flag-off keeps the literal "Merged" badge byte-for-byte. */
-              featherweightEnabled
+        {/* The filename is gone for non-merged tiles (it was redundant); the
+            episode tag, when relevant, now lives in the bottom caption via
+            clip.label. Only merged clips still need a top-left badge. */}
+        {clip.isUnified && (
+          <span className="clip-source-badge">
+            {/* STEP D — featherweight surfaces the merge fan-in count ("Merged
+                x3"); flag-off keeps the literal "Merged" badge byte-for-byte. */}
+            {featherweightEnabled
               ? `Merged x${clip.segmentCount ?? clip.segments?.length ?? 0}`
-              : "Merged"
-            : clip.sourceName}
-        </span>
+              : "Merged"}
+          </span>
+        )}
         <span className="clip-tile-meta">
           <strong>{clip.label}</strong>
           <small>{clip.range}</small>

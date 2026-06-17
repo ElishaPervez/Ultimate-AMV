@@ -3148,6 +3148,38 @@ function titleCaseStage(stage: string): string {
     .join(" ");
 }
 
+// Short, stable per-episode tag for multi-episode runs. The full source
+// filename is REDUNDANT noise on a tile (it's identical for every clip of
+// the same episode); a compact tag is all the user needs to tell which
+// episode a clip came from. CONSERVATIVE on purpose: a wrong tag is worse
+// than no tag, so resolution/codec/year digits must NEVER be read as an
+// episode number — anything ambiguous falls back to the full stem (today's
+// behavior), so multi-episode never loses distinction.
+function episodeTag(sourcePath: string): string {
+  const stem = fileStem(sourcePath);
+  // PRIMARY: SxxExx (S01E01, s1e1, S1E01) -> normalized "S01E01" (2-digit,
+  // uppercase, zero-padded). Optional whitespace between season and episode.
+  const se = stem.match(/\bS(\d{1,2})\s*E(\d{1,3})\b/i);
+  if (se) {
+    return `S${se[1].padStart(2, "0")}E${se[2].padStart(2, "0")}`;
+  }
+  // SECONDARY: explicit "Episode N" / "Ep N" / "Ep07" word token -> "E07".
+  const ep = stem.match(/\b(?:episode|ep)\s*[._-]?\s*(\d{1,3})\b/i);
+  if (ep) {
+    return `E${ep[1].padStart(2, "0")}`;
+  }
+  // SECONDARY: well-anchored fansub dash-episode " - 07 " / " - 07(" /
+  // " - 07[" / end-of-stem " - 07". Requires the space-hyphen-space prefix so
+  // bare numbers (1080, 720, x265, 2019, CRC hashes) can't match.
+  const dash = stem.match(/\s-\s(\d{1,3})(?=\s|\(|\[|$)/);
+  if (dash) {
+    return `E${dash[1].padStart(2, "0")}`;
+  }
+  // FALLBACK: nothing recognizable -> full stem (worst case shows the long
+  // name, i.e. today's behavior; better than a wrong/empty tag).
+  return stem;
+}
+
 function combineClipResults(results: ClipExtractionResult[], mode: "cpu" | "gpu"): ClipExtractionResult {
   const scenes: ClipScene[] = [];
   let sceneOffset = 0;
@@ -3163,7 +3195,8 @@ function combineClipResults(results: ClipExtractionResult[], mode: "cpu" | "gpu"
       scenes.push({
         ...scene,
         index: sceneOffset + scene.index,
-        label: `${fileStem(scene.source)} · ${scene.label}`,
+        // Single episode: the filename is redundant on every tile, so show the bare per-episode "Scene N". Multiple episodes: prefix a SHORT episode tag (not the full filename) so identical "Scene N" labels from different episodes stay distinguishable.
+        label: results.length > 1 ? `${episodeTag(scene.source)} · ${scene.label}` : scene.label,
       });
     }
     sceneOffset += result.scenes.length;
