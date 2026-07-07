@@ -29,6 +29,8 @@ class TestSetConfig(unittest.TestCase):
             "background_bright_text": False,
             "audio_output_format": "wav",
             "clip_hover_preview": False,
+            "featherweight_previews": True,
+            "scene_preview_height": 240,
             "tsukyio_api_key": "",
         }
         payload.update(overrides)

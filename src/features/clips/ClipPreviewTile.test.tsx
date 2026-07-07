@@ -56,6 +56,9 @@ const defaultProps = {
   playable: true,
   activationEpoch: 0,
   clipHoverPreview: false,
+  // Featherweight flag OFF by default so these tests exercise the unchanged
+  // WebP-grid behavior; the offset <video> never mounts under this default.
+  featherweightEnabled: false,
   onClick: vi.fn(),
   onToggleSelect: vi.fn(),
 }
@@ -279,6 +282,73 @@ describe('ClipPreviewTile — selection and mergeMode rendering', () => {
   })
 })
 
+// ─── featherweight central mount gate (mayMountVideo) ────────────────────────
+
+describe('ClipPreviewTile — featherweight mayMountVideo gate', () => {
+  // The per-tile IntersectionObserver was RETIRED from the mount decision. The
+  // tile now mounts its live offset <video> ONLY when the panel's central,
+  // geometry-driven, hard-capped set grants it a slot (mayMountVideo) — OR when
+  // the tile is hovered (the deliberate +1 hover exemption). These tests prove
+  // the tile consults nothing else for the steady-state mount.
+
+  // A featherweight clip with a resolved playbackSrc (single direct clip) so the
+  // OffsetVideoLayer path is eligible — gated solely on the play readiness.
+  function makeFeatherweightClip(overrides: Partial<ClipPreviewItem> = {}): ClipPreviewItem {
+    return makeClip({
+      playbackSrc: '/cache/proxy.mp4',
+      playbackMode: 'direct',
+      ...overrides,
+    })
+  }
+
+  const featherweightProps = {
+    ...defaultProps,
+    featherweightEnabled: true,
+  }
+
+  it('does NOT mount the offset <video> when mayMountVideo is false and not hovered', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={false} paused={false} />
+    )
+    // Outside the capped set and not hovered -> the live <video> stays unmounted
+    // (neutral placeholder only). No IntersectionObserver can override this.
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+  })
+
+  it('mounts the offset <video> when mayMountVideo=true', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={true} paused={false} />
+    )
+    // The central geometry set is the SOLE authority: a granted tile mounts.
+    expect(container.querySelector('.clip-offset-video')).toBeInTheDocument()
+  })
+
+  it('HOVER exemption: mounts the offset <video> on hover even when mayMountVideo=false', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={false} paused={false} />
+    )
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+    const wrapper = container.querySelector('.clip-preview-tile-wrapper') as HTMLElement
+    fireEvent.mouseEnter(wrapper)
+    // The `|| isHovered` exemption preserves hover-to-play for a tile outside
+    // the capped set (at most +1 concurrent decoder).
+    expect(container.querySelector('.clip-offset-video')).toBeInTheDocument()
+    fireEvent.mouseLeave(wrapper)
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+  })
+
+  it('does NOT mount when paused even if mayMountVideo=true', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={true} paused={true} />
+    )
+    expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+  })
+})
+
 // ─── clip label and metadata rendering ───────────────────────────────────────
 
 describe('ClipPreviewTile — metadata rendering', () => {
@@ -289,9 +359,29 @@ describe('ClipPreviewTile — metadata rendering', () => {
     expect(screen.getByText('1:23 - 1:30')).toBeInTheDocument()
   })
 
-  it('renders source name badge', () => {
+  it('does not render a source-name badge for a non-merged clip', () => {
+    // The filename badge was redundant on every tile; non-merged clips now
+    // emit no clip-source-badge at all (the episode tag, when relevant, lives
+    // in the bottom caption via clip.label instead).
     const clip = makeClip({ sourceName: 'attack-on-titan-ep01' })
-    render(<ClipPreviewTile {...defaultProps} clip={clip} />)
-    expect(screen.getByText('attack-on-titan-ep01')).toBeInTheDocument()
+    const { container } = render(<ClipPreviewTile {...defaultProps} clip={clip} />)
+    expect(screen.queryByText('attack-on-titan-ep01')).not.toBeInTheDocument()
+    expect(container.querySelector('.clip-source-badge')).toBeNull()
+  })
+
+  it('renders the "Merged" badge for a merged clip (featherweight off)', () => {
+    const clip = makeClip({ isUnified: true, segmentCount: 3 })
+    const { container } = render(<ClipPreviewTile {...defaultProps} clip={clip} />)
+    expect(container.querySelector('.clip-source-badge')).not.toBeNull()
+    expect(screen.getByText('Merged')).toBeInTheDocument()
+  })
+
+  it('renders the "Merged xN" badge for a merged clip (featherweight on)', () => {
+    const clip = makeClip({ isUnified: true, segmentCount: 3 })
+    const { container } = render(
+      <ClipPreviewTile {...defaultProps} featherweightEnabled={true} clip={clip} />,
+    )
+    expect(container.querySelector('.clip-source-badge')).not.toBeNull()
+    expect(screen.getByText('Merged x3')).toBeInTheDocument()
   })
 })

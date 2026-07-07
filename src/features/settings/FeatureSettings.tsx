@@ -33,6 +33,18 @@ export function FeatureSettings({
     setTsukyioKey(backendConfig?.tsukyio_api_key ?? "");
   }, [backendConfig?.tsukyio_api_key]);
 
+  // Featherweight (offset-playback) previews are the default; the toggle below
+  // lets the user switch BACK to the classic animated-grid previews. Seeded from
+  // the persisted config (default-on when the key is absent), mirroring how the
+  // Tsukyio key drafts off backendConfig above.
+  const [featherweightPreviews, setFeatherweightPreviews] = React.useState(
+    backendConfig?.featherweight_previews ?? true,
+  );
+
+  React.useEffect(() => {
+    setFeatherweightPreviews(backendConfig?.featherweight_previews ?? true);
+  }, [backendConfig?.featherweight_previews]);
+
   async function saveTsukyioKey() {
     await persistConfigField("tsukyio_api_key", tsukyioKey.trim());
     setTsukyioSaved(true);
@@ -178,6 +190,76 @@ export function FeatureSettings({
               </span>
             </button>
           </div>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <span className="setting-label">Lightweight scene previews</span>
+            <span className="setting-desc">
+              Play scene previews straight from the source with no extra encoding. Turn off to use the
+              classic animated-grid previews.
+            </span>
+          </div>
+          <div className="settings-toggle-wrap">
+            <span className="settings-toggle-icon" aria-hidden="true">
+              <Film size={16} strokeWidth={2.3} />
+            </span>
+            <span className={`settings-toggle-label ${featherweightPreviews ? "is-on" : "is-off"}`}>
+              {featherweightPreviews ? "Enabled" : "Disabled"}
+            </span>
+            <button
+              type="button"
+              className="settings-toggle-switch spring-motion"
+              role="switch"
+              aria-checked={featherweightPreviews}
+              aria-label="Lightweight scene previews"
+              data-on={featherweightPreviews ? "true" : "false"}
+              onClick={() => {
+                const next = !featherweightPreviews;
+                setFeatherweightPreviews(next);
+                void invoke("set_config", { key: "featherweight_previews", value: next ? "true" : "false" });
+                window.dispatchEvent(
+                  new CustomEvent("featherweight-previews-changed", { detail: { enabled: next } }),
+                );
+              }}
+              title={featherweightPreviews ? "Use classic previews" : "Use lightweight previews"}
+            >
+              <span className="settings-toggle-track" aria-hidden="true">
+                <span className="settings-toggle-track-on">ON</span>
+                <span className="settings-toggle-track-off">OFF</span>
+                <span className="settings-toggle-knob" />
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <span className="setting-label">Preview quality</span>
+            <span className="setting-desc">
+              Resolution of the lightweight scene-preview proxy. Sharper looks better but builds slower and
+              uses more disk; lower is smoother on weak machines.
+            </span>
+          </div>
+          <Dropdown<number>
+            options={[
+              { value: 0, label: "Source (max)", description: "Match the source height (capped at 1080p)." },
+              { value: 1080, label: "1080p", description: "Sharpest; slowest build, most disk." },
+              { value: 720, label: "720p", description: "Sharp; balanced build cost." },
+              { value: 480, label: "480p", description: "Lighter; faster build." },
+              { value: 360, label: "360p", description: "Light; smooth on weak machines." },
+              { value: 240, label: "240p (default)", description: "Default; fast build, low disk." },
+              { value: 144, label: "144p", description: "Smoothest playback; least sharp." },
+            ]}
+            value={backendConfig?.scene_preview_height ?? 240}
+            onChange={(val) => {
+              void persistConfigField("scene_preview_height", String(val));
+              window.dispatchEvent(
+                new CustomEvent("scene-preview-height-changed", { detail: { height: val } }),
+              );
+            }}
+            align="right"
+          />
         </div>
       </div>
 

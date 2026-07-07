@@ -33,6 +33,8 @@ BASE_CFG = {
     "background_blur": 0,
     "audio_output_format": "wav",
     "clip_hover_preview": False,
+    "featherweight_previews": True,
+    "scene_preview_height": 240,
 }
 
 EXPECTED_CONFIG_PAYLOAD = {
@@ -54,6 +56,8 @@ EXPECTED_CONFIG_PAYLOAD = {
     "background_blur": 0,
     "audio_output_format": "wav",
     "clip_hover_preview": False,
+    "featherweight_previews": True,
+    "scene_preview_height": 240,
 }
 
 
@@ -87,6 +91,27 @@ class TestConfigPayloadDefaults:
         from audio_cli import _config_payload
         payload = _config_payload({})
         assert payload["clip_hover_preview"] is False
+
+    def test_featherweight_previews_default_is_true(self):
+        """Default flipped to on-by-default: featherweight is the default preview method."""
+        from audio_cli import _config_payload
+        payload = _config_payload({})
+        assert payload["featherweight_previews"] is True
+
+    def test_featherweight_previews_is_bool(self):
+        from audio_cli import _config_payload
+        val = _config_payload({"featherweight_previews": 1})["featherweight_previews"]
+        assert isinstance(val, bool)
+
+    def test_scene_preview_height_default_is_240(self):
+        """Default preview-proxy height = 240p so existing users are unchanged."""
+        from audio_cli import _config_payload
+        assert _config_payload({})["scene_preview_height"] == 240
+
+    def test_scene_preview_height_is_int(self):
+        from audio_cli import _config_payload
+        val = _config_payload({"scene_preview_height": "360"})["scene_preview_height"]
+        assert isinstance(val, int)
 
     def test_force_cpu_default_false(self):
         from audio_cli import _config_payload
@@ -658,6 +683,114 @@ class TestSetConfigClipHoverPreview:
         set_config("clip_hover_preview", "true")
         payload = mock_emit.call_args[0][0]
         assert payload["clip_hover_preview"] is True
+
+
+# ---------------------------------------------------------------------------
+# set_config — featherweight_previews
+# ---------------------------------------------------------------------------
+
+class TestSetConfigFeatherweightPreviews:
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_true_string_sets_true(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg(featherweight_previews=False)
+        from audio_cli import set_config
+        result = set_config("featherweight_previews", "true")
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["featherweight_previews"] is True
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_false_string_sets_false(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg(featherweight_previews=True)
+        from audio_cli import set_config
+        result = set_config("featherweight_previews", "false")
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["featherweight_previews"] is False
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_emits_config_with_updated_value(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        set_config("featherweight_previews", "true")
+        payload = mock_emit.call_args[0][0]
+        assert payload["featherweight_previews"] is True
+
+
+# ---------------------------------------------------------------------------
+# set_config — scene_preview_height (max preview-proxy height; preset-snapped)
+# ---------------------------------------------------------------------------
+
+class TestSetConfigScenePreviewHeight:
+    @pytest.mark.parametrize("value,expected", [
+        ("144", 144), ("240", 240), ("360", 360), ("480", 480),
+        ("720", 720), ("1080", 1080), ("360.0", 360),
+    ])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_valid_preset_saved(self, mock_load, mock_save, mock_emit, value, expected):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("scene_preview_height", value)
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["scene_preview_height"] == expected
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_source_sentinel_zero_saved(self, mock_load, mock_save, mock_emit):
+        """0 is the Source/unlimited sentinel (Rust maps it to None)."""
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("scene_preview_height", "0")
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["scene_preview_height"] == 0
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_emits_config_with_updated_value(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        set_config("scene_preview_height", "360")
+        payload = mock_emit.call_args[0][0]
+        assert payload["scene_preview_height"] == 360
+
+    @pytest.mark.parametrize("bad", ["999", "100", "241", "-1"])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_off_preset_value_returns_1(self, mock_load, mock_save, mock_emit, bad):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("scene_preview_height", bad)
+        assert result == 1
+        mock_save.assert_not_called()
+        payload = mock_emit.call_args[0][0]
+        assert payload["type"] == "error"
+        assert "scene_preview_height" in payload["message"]
+
+    @pytest.mark.parametrize("bad", ["abc", "", "high"])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_non_numeric_returns_1(self, mock_load, mock_save, mock_emit, bad):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("scene_preview_height", bad)
+        assert result == 1
+        mock_save.assert_not_called()
+        payload = mock_emit.call_args[0][0]
+        assert payload["type"] == "error"
 
 
 # ---------------------------------------------------------------------------

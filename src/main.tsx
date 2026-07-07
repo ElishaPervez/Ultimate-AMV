@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
 import { logFrontend, safeLogValue } from "./lib/log";
+import { ErrorBoundary } from "./shell/ErrorBoundary";
 import { Root } from "./shell/Root";
 
 function installFrontendLogHandlers() {
@@ -25,6 +26,11 @@ installFrontendLogHandlers();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Root />
+    {/* Top-level INSURANCE boundary: any catchable JS throw below degrades to a
+        retry card + backend log instead of an unmounted (blank) tree. It cannot
+        catch a WebView2 renderer-process crash — that is bounded in the clip grid. */}
+    <ErrorBoundary name="app">
+      <Root />
+    </ErrorBoundary>
   </React.StrictMode>
 );

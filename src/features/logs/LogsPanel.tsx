@@ -94,6 +94,7 @@ export function LogsPanel() {
   const [lines, setLines] = React.useState<string[]>([]);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [copyState, setCopyState] = React.useState<"idle" | "copied" | "error">("idle");
+  const [copyAllState, setCopyAllState] = React.useState<"idle" | "copied" | "error">("idle");
   const [clearing, setClearing] = React.useState(false);
   
   // Filter states
@@ -114,10 +115,16 @@ export function LogsPanel() {
     return () => window.clearInterval(interval);
   }, []);
   
-  // Auto-scroll to bottom when new logs arrive
+  // Auto-scroll to bottom when new logs arrive — but only if the user is
+  // already pinned to (or very near) the bottom. If they've scrolled up to
+  // read/screenshot older lines, never yank their scroll position. Scrolling
+  // back down to the bottom re-arms the follow behavior automatically.
   React.useEffect(() => {
-    if (autoScroll && logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight;
+    const el = logRef.current;
+    if (!autoScroll || !el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom <= 40) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [lines, autoScroll, activeTab, searchQuery, selectedCategory]);
 
@@ -268,6 +275,30 @@ export function LogsPanel() {
     }
   }
 
+  async function copyAllLogs() {
+    try {
+      const content = filteredLogs
+        .map((l) => {
+          const header = `${l.timestamp} ${l.level.toUpperCase()} ${l.event} ${l.message}`;
+          return l.details ? `${header}\n${l.details}` : header;
+        })
+        .join("\n\n");
+      await navigator.clipboard.writeText(content);
+      setCopyAllState("copied");
+      logFrontend("info", "frontend.logs.copyAll", "Copied filtered logs (with details) to clipboard", {
+        lineCount: filteredLogs.length,
+      });
+      window.setTimeout(() => setCopyAllState("idle"), 1600);
+    } catch (error) {
+      setCopyAllState("error");
+      setErrorMessage(readBridgeError(error));
+      logFrontend("error", "frontend.logs.copyAll.error", "Could not copy logs to clipboard", {
+        error: safeLogValue(error),
+      });
+      window.setTimeout(() => setCopyAllState("idle"), 2200);
+    }
+  }
+
   async function clearLogs() {
     try {
       setClearing(true);
@@ -345,6 +376,10 @@ export function LogsPanel() {
           <button type="button" onClick={copyLogs} disabled={filteredLogs.length === 0}>
             <Copy size={15} />
             {copyState === "copied" ? "Copied" : copyState === "error" ? "Copy failed" : "Copy"}
+          </button>
+          <button type="button" onClick={copyAllLogs} disabled={filteredLogs.length === 0}>
+            <Copy size={15} />
+            {copyAllState === "copied" ? "Copied" : copyAllState === "error" ? "Copy failed" : "Copy all"}
           </button>
           <button className="logs-clear-button" type="button" onClick={clearLogs} disabled={lines.length === 0 || clearing}>
             <Trash2 size={15} />

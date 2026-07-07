@@ -54,6 +54,21 @@ PROGRESS_STAGE_ALIASES = {
     "setup-progress": "dependencies",
 }
 
+# Phase 1 (decode-once rewrite) parity switch. OFF by default. When on, GPU
+# detection skips the nelux VideoReader (which fuses decode+resize in C++ into
+# sealed 48x27 frames) and routes through the splittable ffmpeg-cuvid path
+# (extract_gpu -> decode_frames_nvdec), where scale_cuda is a filter we can
+# later fuse with the proxy build. This exists only to prove the cuvid path
+# finds the same scene cuts as nelux; it is NOT wired into app config/Settings.
+_FORCE_CUVID_ENV = "AMV_FORCE_CUVID_DETECTION"
+
+
+def _force_cuvid_detection(flag=False):
+    """True when the cuvid detection path is forced via CLI flag or env var."""
+    if flag:
+        return True
+    return os.environ.get(_FORCE_CUVID_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 @dataclass
 class VideoInfo:
@@ -165,8 +180,11 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
         "-i",
         str(input_path),
         "-an",
+        # scale_cuda must convert to nv12 on-GPU (`:format=nv12`): 10-bit HEVC
+        # decodes to p010 CUDA frames, and hwdownload cannot emit nv12 from a
+        # p010 surface ("Invalid output format nv12 for hwframe download").
         "-vf",
-        f"scale_cuda={FRAME_W}:{FRAME_H},hwdownload,format=nv12,format=rgb24",
+        f"scale_cuda={FRAME_W}:{FRAME_H}:format=nv12,hwdownload,format=nv12,format=rgb24",
         "-f",
         "image2pipe",
         "-pix_fmt",
@@ -269,14 +287,61 @@ def decode_frames_cpu(ffmpeg, input_path, info, started_at):
     return np.frombuffer(payload[:usable], dtype=np.uint8).reshape(frame_count, FRAME_H, FRAME_W, 3).copy()
 
 
-def cpu_scores(frames, started_at):
-    import numpy as np
+def scenedetect_cut_frames(frames, fps, cpu_threshold, min_clip_seconds, started_at):
+    """Content-aware CPU scene detection via PySceneDetect's ContentDetector.
 
-    progress("analyze", 50, "Calculating CPU scene-change scores...", started_at)
-    diffs = np.mean(np.abs(frames[1:].astype(np.float32) - frames[:-1].astype(np.float32)), axis=(1, 2, 3))
-    scores = np.concatenate(([0.0], diffs))
-    progress("analyze", 94, "Finished CPU scene-change analysis", started_at)
-    return scores
+    `frames` is the same (N, FRAME_H, FRAME_W, 3) uint8 RGB array our bundled
+    ffmpeg decode produces (see decode_frames_cpu). We drive ContentDetector
+    frame-by-frame instead of letting scenedetect open the file itself, so the
+    decode stays on our full bundled ffmpeg (h264/hevc/av1/anything) — no codec
+    regression vs. the OpenCV-bundled ffmpeg that scenedetect.open_video would
+    otherwise use.
+
+    Returns a sorted list of interior cut-point frame indices (ints).
+    """
+    import numpy as np
+    from scenedetect import ContentDetector, FrameTimecode
+
+    frame_count = len(frames)
+    if frame_count == 0:
+        return []
+
+    # ContentDetector enforces a minimum scene length itself (in frames); feed
+    # it min_clip_seconds so short flickers don't split. The downstream
+    # boundary/scene helpers also re-apply min_clip_seconds as a safety net.
+    min_scene_len = max(1, int(round(min_clip_seconds * fps)))
+    detector = ContentDetector(threshold=cpu_threshold, min_scene_len=min_scene_len)
+
+    progress("analyze", 50, "Running PySceneDetect ContentDetector (CPU)...", started_at)
+
+    cut_frames = []
+    last_emit = 0.0
+    for index in range(frame_count):
+        # ContentDetector computes scores in HSV via cv2, which expects BGR.
+        # Our frames are RGB, so flip the channel axis (view, no copy of data;
+        # cv2 handles the non-contiguous view fine for cvtColor).
+        bgr = frames[index][:, :, ::-1]
+        timecode = FrameTimecode(index, fps)
+        for cut in detector.process_frame(timecode, bgr):
+            # 0.7 returns FrameTimecode objects; older 0.6.x returns ints.
+            # int() yields the frame number in both cases.
+            cut_frames.append(int(cut))
+
+        now = time.perf_counter()
+        if now - last_emit >= 0.25:
+            last_emit = now
+            stage_percent = (index + 1) / frame_count
+            progress(
+                "analyze",
+                50 + stage_percent * 44,
+                f"Analyzed {index + 1:,}/{frame_count:,} frames",
+                started_at,
+            )
+
+    progress("analyze", 94, "Finished PySceneDetect CPU scene analysis", started_at)
+    # Detector may report cuts out of order across versions; keep them sorted
+    # and unique so the downstream cut→scene boundary math behaves.
+    return sorted(set(cut_frames))
 
 
 def transnet_scores(frames, threshold, batch_frames, overlap, started_at, model=None):
@@ -568,16 +633,27 @@ def extract_cpu(input_path, info, cpu_threshold, min_clip_seconds, started_at):
     ffmpeg = require_tool("ffmpeg")
     progress("probe", 1, f"{info.codec} at {info.fps:.3f} FPS, {info.duration:.1f}s", started_at)
 
+    # Decode with our bundled ffmpeg (shared with the GPU software-decode path)
+    # for full codec coverage, then run PySceneDetect's content-aware detector
+    # over those frames on the CPU.
     frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
-    scores = cpu_scores(frames, started_at)
-    
+    cut_frames = scenedetect_cut_frames(frames, info.fps, cpu_threshold, min_clip_seconds, started_at)
+
     progress("scenes", 96, "Building scene list...", started_at)
-    cuts = boundary_frames_to_seconds(scores >= cpu_threshold, scores, info.fps, info.duration, min_clip_seconds)
+    # Map detector cut frames -> interior cut seconds and re-apply the
+    # min-clip / edge filtering so the output matches the GPU paths' contract.
+    cut_seconds = [frame / info.fps for frame in cut_frames]
+    cuts = []
+    for cut in cut_seconds:
+        if not (min_clip_seconds <= cut <= info.duration - min_clip_seconds):
+            continue
+        if not cuts or cut - cuts[-1] >= min_clip_seconds:
+            cuts.append(cut)
     scenes = scenes_from_cuts(input_path, cuts, info.duration)
     return scenes, cuts
 
 
-def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_frames, overlap, model=None):
+def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_frames, overlap, model=None, force_cuvid=False):
     started_at = time.perf_counter()
     input_path = Path(input_file).expanduser().resolve()
     if not input_path.exists():
@@ -616,6 +692,15 @@ def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_
             if info.codec not in GPU_DECODABLE_CODECS:
                 emit({"type": "log", "message": f"Codec {info.codec!r} is not NVDEC-decodable; using software decode -> TransNetV2 (GPU)."})
                 return extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
+
+            # Phase 1 parity switch: force the splittable ffmpeg-cuvid path
+            # (extract_gpu -> decode_frames_nvdec) even when nelux is importable.
+            # OFF by default -> nelux stays the GPU default and behavior is
+            # unchanged for real users. extract_gpu loads its own TransNetV2, so
+            # active_model is intentionally not threaded in here.
+            if _force_cuvid_detection(force_cuvid):
+                emit({"type": "log", "message": "Forcing cuvid detection path (decode_frames_nvdec); nelux bypassed."})
+                return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at)
 
             try:
                 import nelux  # noqa: F401  (import-presence check before the native call)
@@ -791,7 +876,8 @@ def server():
                     payload.get("min_clip_seconds", 0.35),
                     payload.get("batch_frames", 100),
                     payload.get("overlap", 50),
-                    model=model
+                    model=model,
+                    force_cuvid=payload.get("force_cuvid", False),
                 )
             elif command == "quit":
                 break
@@ -816,7 +902,12 @@ def main():
     extract_parser.add_argument("--min-clip-seconds", type=float, default=0.35)
     extract_parser.add_argument("--batch-frames", type=int, default=100)
     extract_parser.add_argument("--overlap", type=int, default=50)
-    
+    extract_parser.add_argument(
+        "--force-cuvid-detection",
+        action="store_true",
+        help="Phase 1 parity: force GPU detection through the ffmpeg-cuvid path (decode_frames_nvdec) instead of nelux (also settable via AMV_FORCE_CUVID_DETECTION env var)",
+    )
+
     args = parser.parse_args()
 
     if args.server:
@@ -836,6 +927,7 @@ def main():
                 args.min_clip_seconds,
                 args.batch_frames,
                 args.overlap,
+                force_cuvid=args.force_cuvid_detection,
             )
             return 0
     except Exception as exc:

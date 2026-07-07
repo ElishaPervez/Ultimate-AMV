@@ -42,10 +42,27 @@ import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
 import { HomePanel } from "../features/home/HomePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { WindowChrome } from "./WindowChrome";
+/* TEMP: offset-playback spike — remove after evaluation */
+import { OffsetSpike } from "../dev/OffsetSpike";
+/* DEV TOOLS: featherweight-preview tuning panel — bake values then delete */
+import { PreviewDevTools } from "../dev/PreviewDevTools";
 
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
 const GITHUB_ISSUES_URL = "https://github.com/ElishaPervez/Ultimate-AMV/issues";
+
+/* DEV TOOLS: shared style for the fixed dev launcher buttons — delete with the panels */
+const DEV_LAUNCHER_BTN: React.CSSProperties = {
+  background: "#3b82f6",
+  color: "#fff",
+  border: "none",
+  borderRadius: 8,
+  padding: "8px 12px",
+  fontSize: 13,
+  cursor: "pointer",
+  boxShadow: "0 4px 14px rgba(0,0,0,0.4)",
+};
 
 // localStorage key for the persisted sidebar collapsed state. Survives across
 // sessions so the user's compact-rail choice sticks.
@@ -214,6 +231,10 @@ export function App() {
   // Whether the sidebar is collapsed to the compact icon rail. Persisted so
   // it sticks across sessions.
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(loadSidebarCollapsed);
+  /* TEMP: offset-playback spike — remove after evaluation */
+  const [spikeOpen, setSpikeOpen] = React.useState(false);
+  /* DEV TOOLS: featherweight-preview tuning panel — bake values then delete */
+  const [devToolsOpen, setDevToolsOpen] = React.useState(false);
   const toggleSidebar = React.useCallback(() => {
     setSidebarCollapsed((prev) => {
       const next = !prev;
@@ -350,6 +371,46 @@ export function App() {
       <BackgroundLayer state={liveBg} />
       <WindowChrome />
       <UpdateToast />
+      {/* TEMP: offset-playback spike — remove after evaluation */}
+      {/* DEV TOOLS: featherweight-preview tuning panel — bake values then delete */}
+      {import.meta.env.DEV && (
+        <>
+          {!spikeOpen && !devToolsOpen && (
+            <div
+              style={{
+                position: "fixed",
+                bottom: 16,
+                right: 16,
+                zIndex: 99998,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+                alignItems: "flex-end",
+              }}
+            >
+              {/* DEV TOOLS launcher */}
+              <button
+                type="button"
+                onClick={() => setDevToolsOpen(true)}
+                style={DEV_LAUNCHER_BTN}
+              >
+                🪶 Preview DevTools
+              </button>
+              {/* TEMP: offset-playback spike launcher */}
+              <button
+                type="button"
+                onClick={() => setSpikeOpen(true)}
+                style={DEV_LAUNCHER_BTN}
+              >
+                🔬 Offset Spike
+              </button>
+            </div>
+          )}
+          {spikeOpen && <OffsetSpike onClose={() => setSpikeOpen(false)} />}
+          {/* DEV TOOLS panel */}
+          {devToolsOpen && <PreviewDevTools onClose={() => setDevToolsOpen(false)} />}
+        </>
+      )}
       {bgModalOpen && (
         <BackgroundCustomizer
           initial={bgState}
@@ -627,7 +688,13 @@ export function App() {
               )}
               <div className="panel-body">
                 <div className={`panel-view spring-motion ${isClipHunting ? "is-active" : "is-hidden"}`} aria-hidden={!isClipHunting}>
-                  <ClipExtractorPanel active={isClipHunting} />
+                  {/* INSURANCE only: degrades a catchable JS throw in the clip
+                      grid into a retry card + backend log. The WebView2 renderer
+                      crash is bounded by the grid's hard-capped mount set, not by
+                      this boundary (a renderer death is not a JS exception). */}
+                  <ErrorBoundary name="Scene Splitter">
+                    <ClipExtractorPanel active={isClipHunting} />
+                  </ErrorBoundary>
                 </div>
                 <div className={`panel-view spring-motion ${isDownloader ? "is-active" : "is-hidden"}`} aria-hidden={!isDownloader}>
                   <DownloaderPanel active={isDownloader} activeTab={downloaderTab} />

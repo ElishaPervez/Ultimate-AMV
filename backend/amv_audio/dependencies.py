@@ -19,6 +19,11 @@ FEATURE_REQUIREMENTS = {
         "modules": [
             ("typing_extensions", "typing_extensions"),
             ("numpy", "numpy"),
+            # CPU scene detection runs PySceneDetect's ContentDetector, which
+            # pulls in cv2 for its HSV frame scoring (0.7 lists opencv-python as
+            # a core dep, so no [opencv] extra needed). <0.8 caps the API we
+            # drive directly (detector.process_frame).
+            ("scenedetect", "scenedetect>=0.6.7,<0.8"),
         ],
         "packages": [],
     },
@@ -77,7 +82,7 @@ KNOWN_MODULE_PACKAGES = {
     "requests": "requests",
     "resampy": "resampy",
     "samplerate": "samplerate==0.1.0",
-    "scenedetect": "scenedetect[opencv]",
+    "scenedetect": "scenedetect>=0.6.7,<0.8",
     "scipy": "scipy",
     "six": "six",
     "soundfile": "soundfile",

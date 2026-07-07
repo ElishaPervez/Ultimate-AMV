@@ -11,7 +11,7 @@ use serde_json::json;
 use tauri::Emitter;
 
 use crate::{
-    app_root, clear_child_pid, cmd, find_tool, log_error, log_info, log_warn, store_child_pid,
+    app_root, cmd, find_tool, log_error, log_info, log_warn, store_child_pid,
     truncate_log_text, ConversionDone, ConversionProgress, GPU_INTRA_SOURCE_CODECS,
     VIDEO_CHILD_PID,
 };
@@ -416,6 +416,82 @@ pub(crate) fn probe_video_codec(ffprobe: &Path, input: &Path) -> Result<String, 
         .ok_or_else(|| "ffprobe could not read the input video codec".to_string())
 }
 
+// Featherweight previews: the single probe that drives clip_playback_plan's
+// friendly-vs-proxy routing. One ffprobe call reads the first video stream's
+// codec/pix_fmt/dimensions plus the first audio stream's codec, using the JSON
+// output form (mirrors downloads.rs's format probe) so we parse one document
+// instead of fragile key=value lines across two streams.
+#[derive(Clone, Default)]
+pub(crate) struct MediaSummary {
+    pub video_codec: Option<String>,
+    pub pix_fmt: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub audio_codec: Option<String>,
+}
+
+pub(crate) fn probe_media_summary(ffprobe: &Path, input: &Path) -> Result<MediaSummary, String> {
+    let output = cmd(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type,codec_name,pix_fmt,width,height",
+            "-of",
+            "json",
+        ])
+        .arg(input)
+        .output()
+        .map_err(|error| format!("Could not start ffprobe: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Could not parse ffprobe JSON: {error}"))?;
+    let streams = parsed
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut summary = MediaSummary::default();
+    // Take the FIRST video stream and FIRST audio stream (v:0 / a:0), matching
+    // how the rest of the app maps 0:v:0 / 0:a:0.
+    for stream in &streams {
+        let codec_type = stream
+            .get("codec_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let codec_name = stream
+            .get("codec_name")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.to_ascii_lowercase());
+        match codec_type {
+            "video" if summary.video_codec.is_none() => {
+                summary.video_codec = codec_name;
+                summary.pix_fmt = stream
+                    .get("pix_fmt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.to_ascii_lowercase());
+                summary.width = stream
+                    .get("width")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|v| v as u32);
+                summary.height = stream
+                    .get("height")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|v| v as u32);
+            }
+            "audio" if summary.audio_codec.is_none() => {
+                summary.audio_codec = codec_name;
+            }
+            _ => {}
+        }
+    }
+    Ok(summary)
+}
+
 pub(crate) fn probe_has_audio_stream(ffprobe: &Path, input: &Path) -> Result<bool, String> {
     let output = cmd(ffprobe)
         .args([
@@ -447,6 +523,40 @@ pub(crate) fn run_ffmpeg_with_progress(
     label: &str,
     pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
 ) -> Result<(), String> {
+    run_ffmpeg_with_progress_tap(window, ffmpeg, args, duration, label, pid_slot, None)
+}
+
+// Clears a tracked PID slot ONLY if it still holds `own_pid`. A finishing job
+// must never wipe a newer job's pid out of a shared slot (which would orphan the
+// live job from every teardown path). Cheap — one lock and an equality check.
+fn clear_child_pid_if_owned(slot: &OnceLock<Mutex<Option<u32>>>, own_pid: u32) {
+    if let Some(m) = slot.get() {
+        if let Ok(mut g) = m.lock() {
+            if *g == Some(own_pid) {
+                *g = None;
+            }
+        }
+    }
+}
+
+// Same as run_ffmpeg_with_progress, plus an optional per-tick side-channel
+// event. When `progress_tap` is Some((event_name, source_path)) the determinate
+// percent is also forwarded on `event_name` as { sourcePath, percent, stage }
+// so a caller (e.g. the featherweight source-proxy build) can carry the source
+// identity alongside the percent without disturbing the shared
+// "conversion-progress" stream. All existing callers pass None via the thin
+// wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_ffmpeg_with_progress_tap(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    args: Vec<String>,
+    duration: f64,
+    label: &str,
+    pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
+    progress_tap: Option<(&str, &str)>,
+) -> Result<(), String> {
+    let job_start = std::time::Instant::now();
     log_info(
         "ffmpeg.start",
         "Starting FFmpeg job",
@@ -465,8 +575,9 @@ pub(crate) fn run_ffmpeg_with_progress(
             );
             format!("Could not start ffmpeg: {error}")
         })?;
+    let own_pid = child.id();
     if let Some(slot) = pid_slot {
-        store_child_pid(slot, child.id());
+        store_child_pid(slot, own_pid);
     }
 
     let stdout = child
@@ -521,6 +632,12 @@ pub(crate) fn run_ffmpeg_with_progress(
                             fps.clone(),
                             speed.clone(),
                         );
+                        if let Some((event, source_path)) = progress_tap {
+                            let _ = window.emit(
+                                event,
+                                json!({ "sourcePath": source_path, "percent": percent, "stage": "processing" }),
+                            );
+                        }
                     }
                 }
             }
@@ -533,6 +650,12 @@ pub(crate) fn run_ffmpeg_with_progress(
                     fps.clone(),
                     speed.clone(),
                 );
+                if let Some((event, source_path)) = progress_tap {
+                    let _ = window.emit(
+                        event,
+                        json!({ "sourcePath": source_path, "percent": 100.0, "stage": "finalizing" }),
+                    );
+                }
             }
             _ => {}
         }
@@ -540,14 +663,17 @@ pub(crate) fn run_ffmpeg_with_progress(
 
     let status = child.wait().map_err(|error| error.to_string())?;
     if let Some(slot) = pid_slot {
-        clear_child_pid(slot);
+        // Only clear the slot if it still holds OUR pid. If a newer job already
+        // superseded us (stored its own pid here), a blind clear would wipe the
+        // live job's pid and orphan it from teardown. Cheap: one lock + compare.
+        clear_child_pid_if_owned(slot, own_pid);
     }
     let stderr_tail = stderr_handle.join().unwrap_or_default();
     if status.success() {
         log_info(
             "ffmpeg.complete",
             "FFmpeg job completed",
-            json!({ "label": label }),
+            json!({ "label": label, "elapsed_s": job_start.elapsed().as_secs_f64() }),
         );
         emit_conversion_progress(
             window,
@@ -559,15 +685,22 @@ pub(crate) fn run_ffmpeg_with_progress(
         );
         Ok(())
     } else {
-        if status.code().is_none() {
+        let tail = stderr_tail.trim();
+        // A build WE killed counts as cancelled, not an encoder failure, so a
+        // caller (e.g. the source-proxy NVENC->libx264 fallback) never re-runs
+        // it on CPU. On Windows `taskkill /F` makes ffmpeg exit with code
+        // Some(1) (NOT None), but a killed process produces no stderr
+        // diagnostics — so Some(1) with an empty tail is a kill, while a real
+        // ffmpeg failure that exits 1 always carries a non-empty stderr tail.
+        // Mirrors run_preview_merge_encode's Windows-aware classification.
+        if status.code().is_none() || status.code() == Some(1) && tail.is_empty() {
             log_warn(
                 "ffmpeg.cancelled",
                 "FFmpeg job was cancelled",
-                json!({ "label": label }),
+                json!({ "label": label, "code": status.code() }),
             );
             return Err(format!("{label} cancelled."));
         }
-        let tail = stderr_tail.trim();
         if tail.is_empty() {
             let error = format!("ffmpeg exited with code {}", status.code().unwrap_or(-1));
             log_error(

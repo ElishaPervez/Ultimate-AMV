@@ -5,6 +5,35 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] : 2026-06-17
+
+### Fixed
+- Fixed clip detection and previews failing with a "can't read this file" error on 10-bit footage in GPU mode. 10-bit sources now decode correctly on the GPU from detection through preview.
+- Fixed the Scene Splitter snapping back to the top of your clips whenever you changed the column count. Your place is now kept, so the clip you were looking at stays in view.
+
+### Changed
+- Clip tiles now show just the scene number (for example "Scene 127") instead of the full, often very long, source filename. If you load more than one episode at once, a short episode tag (for example "S01E01") is shown so you can still tell which episode each clip belongs to.
+
+## [0.13.1] : 2026-06-15
+
+### Fixed
+- Fixed a Scene Splitter layout glitch where setting the column count to 1 and then back to a wider grid left a large empty "deadzone" below your clips. The grid now re-measures on every column change, so the gap no longer appears and you no longer have to minimize and reopen the app to clear it.
+
+## [0.13.0] : 2026-06-15
+
+### Added
+- Integrated the Tsukyio asset vault. Browse, preview, and pull editing assets straight into your project.
+- Background remover. Automatically cut characters out of videos and images with a clean transparent background.
+- Featherlight previews for lighter, faster scene previews.
+
+### Changed
+- Significantly improved GUI, with a new home screen, grouped sidebar, custom color picker, and better readability over wallpapers.
+- Faster, more reliable clip extraction, merging, and previews.
+- Smarter downloads, with real quality labels and a steady speed readout.
+
+### Fixed
+- Fixed first-time setup so the app installs and launches reliably for everyone.
+
 ## [0.12.0] : 2026-05-22
 
 ### Added
@@ -221,6 +250,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.13.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.1
+[0.13.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.0
 [0.12.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.12.0
 [0.11.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.11.0
 

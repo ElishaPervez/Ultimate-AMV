@@ -1,8 +1,9 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Clapperboard, Film, Info, Loader2, Play, Scissors, Upload, X, Zap } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Clapperboard, Film, Info, Loader2, Scissors, Upload, X, Zap } from "lucide-react";
 import { Dropdown } from "../../components/Dropdown";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
@@ -11,8 +12,21 @@ import {
   CLIP_PREVIEW_BATCH_SIZE,
   CLIP_PREVIEW_CPU_BATCH_CONCURRENCY,
   CLIP_PREVIEW_GPU_BATCH_CONCURRENCY,
+  FAST_SCROLL_VELOCITY_PX_PER_FRAME,
+  GRID_VIDEO_OVERSCAN_ROWS,
   MAX_GRID_AUTOPLAYERS,
+  MAX_GRID_VIDEO_PLAYERS_CEILING,
+  PREVIEW_PLAY_AREA_MARGIN_PX,
 } from "../../lib/constants";
+
+// How long after the scroll velocity drops below the fast-fling threshold the
+// `fastScrolling` flag stays set before clearing (ms). One short settle so the
+// geometry mount set recomputes promptly when the user releases a fling.
+const FAST_SCROLL_SETTLE_MS = 140;
+/* DEV TOOLS: featherweight tunables — the grid reads margins / max-video cap /
+ * the DEV featherweight override from this store. In prod the store equals the
+ * baked constants, so reading it is a constant read. */
+import { usePreviewTunables } from "../../dev/previewTunables";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, fileStem, normalizeSelectedPaths } from "../../lib/paths";
@@ -34,13 +48,14 @@ import type {
   ClipPreviewState,
   ClipProgress,
   ClipScene,
+  PlaybackPlan,
 } from "../../types/clip";
 import type { ConversionProgress, VideoControlSpec, VideoGpuStatus } from "../../types/conversion";
 import { ClipCompatConvertModal } from "./ClipCompatConvertModal";
 import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
-import { ClipPreviewTile } from "./ClipPreviewTile";
+import { ClipPreviewTile, offsetMarginWindow } from "./ClipPreviewTile";
 import { SceneViewerModal } from "./SceneViewerModal";
 
 // Currently dead code : see FINDINGS.md. Moved here unchanged during the
@@ -48,6 +63,234 @@ import { SceneViewerModal } from "./SceneViewerModal";
 void readClipAudioSettings;
 void writeClipAudioSettings;
 void formatPreciseClipTime;
+
+/** The export-bound / flag-off segment shape consumed by the Rust merge/export
+ * commands (clip_preview_merge, clip_export_merged). */
+type ClipSegment = NonNullable<ClipPreviewItem["segments"]>[number];
+
+/**
+ * Flatten a list of clips into the ordered constituent-segment array the
+ * backend merge/export commands consume.
+ *
+ * INVARIANTS (do not break — these keep the output byte-identical to the four
+ * inline flatMaps this replaced, on which export correctness depends):
+ *  - ORDER IS PRESERVED VERBATIM. Segments come out in the exact order the
+ *    input clips appear, and within a unified clip in its STORED segments-array
+ *    order. NEVER sort by index, source, time, or anything else.
+ *  - A unified clip's already-built `segments` are flattened RECURSIVELY and
+ *    passed through BY REFERENCE (never rebuilt), so their object shape stays
+ *    exactly `{ source, start, end, index, fps }`. (Stored segments are always
+ *    leaf objects, so the recursion bottoms out immediately — but recursing
+ *    keeps the helper correct if nested unified clips are ever passed in.)
+ *  - A single (non-unified) clip emits exactly ONE leaf segment with property
+ *    order `{ source, start, end, index, fps }`, identical to the prior inline
+ *    object literals. `clip.path` is asserted non-null exactly as before.
+ */
+function buildSegments(clips: ClipPreviewItem[]): ClipSegment[] {
+  return clips.flatMap((clip) =>
+    clip.isUnified && clip.segments
+      ? buildSegmentsFromStored(clip.segments)
+      : [
+          {
+            source: clip.path!,
+            start: clip.sourceStart,
+            end: clip.sourceEnd,
+            index: clip.index,
+            fps: clip.fps,
+          },
+        ],
+  );
+}
+
+/** Recurse through a stored segments array, preserving array order and passing
+ * each leaf segment through unchanged. Stored segments are already flat leaf
+ * objects, so this is a verbatim pass-through today; it stays recursive so a
+ * future nested-unified shape would still flatten in stored order. */
+function buildSegmentsFromStored(segments: ClipSegment[]): ClipSegment[] {
+  return segments.flatMap((segment) => {
+    const nested = (segment as { segments?: ClipSegment[] }).segments;
+    return Array.isArray(nested) ? buildSegmentsFromStored(nested) : [segment];
+  });
+}
+
+/**
+ * CONTIGUOUS-MERGE DETECTION (Step D) — the LOCKED definition, evaluated over a
+ * unified clip's segments in their STORED ARRAY ORDER (never mergeOrder, which is
+ * reset to [] right after a merge). A merge is contiguous when EVERY pair of
+ * adjacent stored segments:
+ *   - shares the exact same `source`, AND
+ *   - has equal `fps` (so the frame-duration tolerance is well defined), AND
+ *   - is adjacent in source time: |seg[i].end - seg[i+1].start| < 1/fps.
+ *
+ * A contiguous merge can therefore be replayed as ONE continuous decode window
+ * on the single shared source (one decoder, zero seeks). NON-contiguous merges
+ * return null and keep their current poster / first-scene behavior (the
+ * segmented playlist arrives in a later stage). A 0/1-segment list is never
+ * treated as a contiguous merge.
+ */
+function isContiguousMerge(segments: ClipSegment[]): boolean {
+  if (!segments || segments.length < 2) return false;
+  const first = segments[0];
+  const fps = first.fps;
+  if (!Number.isFinite(fps) || fps <= 0) return false;
+  const frameTolerance = 1 / fps;
+  for (let i = 0; i < segments.length - 1; i++) {
+    const a = segments[i];
+    const b = segments[i + 1];
+    if (a.source !== b.source || b.source !== first.source) return false;
+    if (a.fps !== fps || b.fps !== fps) return false;
+    if (Math.abs(a.end - b.start) >= frameTolerance) return false;
+  }
+  return true;
+}
+
+/**
+ * The single continuous offset-playback window for a CONTIGUOUS merge, in
+ * file-relative seconds on the shared source. The opening edge reuses the SHARED
+ * margin helper on the FIRST segment (so the scene-0 head exemption keeps a
+ * merge that begins at the file head from losing its opening frames), and the
+ * closing edge reuses it on the LAST segment. Inner seams are skipped entirely —
+ * the segments are adjacent in source time, so [firstStart, lastEnd] is exactly
+ * the joined range. Caller must have verified isContiguousMerge first.
+ */
+function contiguousMergeWindow(
+  segments: ClipSegment[],
+  startMarginFrames: number,
+  endMarginFrames: number,
+): { previewStart: number; previewEnd: number } {
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  const head = offsetMarginWindow(first.start, first.end, first.fps, startMarginFrames, endMarginFrames);
+  const tail = offsetMarginWindow(last.start, last.end, last.fps, startMarginFrames, endMarginFrames);
+  return { previewStart: head.startSec, previewEnd: tail.endSec };
+}
+
+/**
+ * CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount-set computation (pure).
+ *
+ * The SOLE authority for which grid tiles may mount a live offset <video>. It
+ * REPLACES the retired per-tile IntersectionObserver mount decision so the
+ * live-<video> union can never exceed the EFFECTIVE cap (clamped to
+ * MAX_GRID_VIDEO_PLAYERS_CEILING by the caller). Computed from scroll GEOMETRY
+ * only — never from Virtuoso's inflated overscan range and never from
+ * offsetMetrics.activeCount (a feedback loop).
+ *
+ *  1. Eligible band = the visible rows EXTENDED by `marginRows` on each side (the
+ *     250px pre-play pre-warm preserved as rows).
+ *  2. The EFFECTIVE cap is floored at the count of tiles ACTUALLY visible
+ *     (visibleTileCount = visible-row count × cols, clamped to the real clip
+ *     count) so a tall/dense viewport (e.g. 16–24 visible tiles at 4 cols)
+ *     never leaves a still-visible tile dark when the knob cap (prod 12) is
+ *     below the visible band. The incoming `cap` (the knob value, already
+ *     ceiling-clamped by the caller) can only RAISE the cap above that floor to
+ *     add pre-warm headroom; MAX_GRID_VIDEO_PLAYERS_CEILING still bounds the top.
+ *  3. Grant in TWO phases: (a) every VISIBLE tile unconditionally — the floor
+ *     guarantees they fit — then (b) fill the remaining budget with PRE-WARM
+ *     tiles, walking OUTWARD from the viewport-center row (nearest first) until
+ *     the effective cap is reached. Granting visible tiles in their own phase
+ *     (not via the center walk) is what prevents a nearer-to-center pre-warm tile
+ *     from stealing the last budget slot from a farther-but-still-VISIBLE tile on
+ *     an asymmetric band (the cap-below-visible dead-zone).
+ *
+ * Extracted as a pure function (no React) so the hard cap can be unit-tested
+ * deterministically across a scripted fast-fling (jsdom has no real Virtuoso
+ * geometry). The `geometryMountVideoIds` memo calls this verbatim.
+ */
+export function computeGeometryMountVideoIds(params: {
+  clipRows: { id: string }[][];
+  cap: number;
+  rowHeightPx: number;
+  viewportHeightPx: number;
+  scrollTopPx: number;
+  rowsInView: number;
+  marginPx: number;
+}): Set<string> {
+  const { clipRows, cap, rowHeightPx, viewportHeightPx, scrollTopPx, rowsInView, marginPx } = params;
+  const ids = new Set<string>();
+  if (clipRows.length <= 0 || cap <= 0) return ids;
+  const lastRow = clipRows.length - 1;
+
+  let firstVisibleRow: number;
+  let lastVisibleRow: number;
+  if (rowHeightPx > 0 && viewportHeightPx > 0) {
+    firstVisibleRow = Math.floor(scrollTopPx / rowHeightPx);
+    lastVisibleRow = Math.ceil((scrollTopPx + viewportHeightPx) / rowHeightPx) - 1;
+  } else {
+    // Geometry not measured yet (initial / pre-mount): fall back to the top
+    // rows that fill the viewport (rowsInView), or the first row at minimum.
+    firstVisibleRow = 0;
+    lastVisibleRow = (rowsInView > 0 ? rowsInView : 1) - 1;
+  }
+
+  // VIEWPORT-AWARE CAP FLOOR. Count the tiles ACTUALLY intersecting the viewport
+  // (the visible-row span × that span's columns, clamped to the real clip count).
+  // The effective cap is floored at this count so EVERY visible tile always
+  // mounts — a tall/dense viewport (~16–24 tiles at 4 cols) is never left with
+  // dark-but-visible tiles when the knob cap (prod 12) sits below the visible
+  // band. The incoming `cap` can only RAISE the cap above this floor (pre-warm
+  // headroom); the caller has already clamped it to MAX_GRID_VIDEO_PLAYERS_CEILING.
+  const clampedFirstVisible = Math.max(0, Math.min(firstVisibleRow, lastRow));
+  const clampedLastVisible = Math.max(clampedFirstVisible, Math.min(lastVisibleRow, lastRow));
+  let visibleTileCount = 0;
+  for (let r = clampedFirstVisible; r <= clampedLastVisible; r += 1) {
+    visibleTileCount += clipRows[r]?.length ?? 0;
+  }
+  // The hard ceiling bounds the top even above the visible-tile floor: in the
+  // pathological case where the viewport shows MORE tiles than the ceiling
+  // (only reachable at a tiny row height / huge viewport), we accept a dead-zone
+  // rather than blow past the decoder safety limit. `cap` is already
+  // ceiling-clamped by the caller; re-clamp here so the floor can't escape it.
+  const effectiveCap = Math.min(
+    MAX_GRID_VIDEO_PLAYERS_CEILING,
+    Math.max(cap, visibleTileCount),
+  );
+
+  // PHASE 1 — grant EVERY VISIBLE tile first. Because effectiveCap is floored at
+  // visibleTileCount, this fits within the cap (except the pathological case
+  // where the viewport itself shows more tiles than the ceiling — then we honor
+  // the ceiling, granting the visible tiles nearest the top first and accepting a
+  // dead-zone rather than exceeding the decoder safety limit). Granting visible
+  // tiles unconditionally — NOT via the center-distance walk — is what guarantees
+  // no still-visible tile is dropped in favor of a nearer-to-center PRE-WARM tile
+  // on an asymmetric band (the DEFECT-A dead-zone).
+  for (let r = clampedFirstVisible; r <= clampedLastVisible; r += 1) {
+    for (const clip of clipRows[r] ?? []) {
+      ids.add(clip.id);
+      if (ids.size >= effectiveCap) return ids;
+    }
+  }
+
+  // PHASE 2 — fill the remaining budget (effectiveCap - visible) with PRE-WARM
+  // tiles. Extend the band by the pre-play margin (250px -> rows) on each side so
+  // a tile is already decoding by the time it scrolls into view, then walk
+  // OUTWARD from the viewport-center row (nearest first) so the discretionary
+  // headroom favors the rows closest to the middle of what the user sees. Visible
+  // rows are skipped here (already granted in phase 1).
+  const marginRows = rowHeightPx > 0 ? Math.ceil(marginPx / rowHeightPx) : 1;
+  const bandFirst = Math.max(0, Math.min(firstVisibleRow - marginRows, lastRow));
+  const bandLast = Math.max(bandFirst, Math.min(lastVisibleRow + marginRows, lastRow));
+  const centerRow = Math.max(
+    bandFirst,
+    Math.min(Math.floor((firstVisibleRow + lastVisibleRow) / 2), bandLast),
+  );
+  for (let offset = 0; bandFirst + offset <= bandLast || centerRow - offset >= bandFirst; offset += 1) {
+    const rowsToVisit = offset === 0 ? [centerRow] : [centerRow - offset, centerRow + offset];
+    let visitedAny = false;
+    for (const r of rowsToVisit) {
+      if (r < bandFirst || r > bandLast) continue;
+      visitedAny = true;
+      // Visible rows are already granted; only pre-warm rows add tiles here.
+      if (r >= clampedFirstVisible && r <= clampedLastVisible) continue;
+      for (const clip of clipRows[r] ?? []) {
+        ids.add(clip.id);
+        if (ids.size >= effectiveCap) return ids;
+      }
+    }
+    // Stop once the outward walk has exhausted the band on both sides.
+    if (!visitedAny && centerRow - offset < bandFirst && centerRow + offset > bandLast) break;
+  }
+  return ids;
+}
 
 export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [selectedVideos, setSelectedVideos] = React.useState<string[]>([]);
@@ -78,6 +321,28 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     "lossless-cut": 0,
   });
   const [visibleRowRange, setVisibleRowRange] = React.useState<{ startIndex: number; endIndex: number } | null>(null);
+  /* DEV TOOLS: measured scroll-viewport geometry for viewport-fill decoder
+   * windowing. Only populated in featherweight mode (the ResizeObserver below
+   * is gated on featherweightActive && hasClips); flag-off these stay 0 and the
+   * video budget falls back to the tunable seed, so behavior is unchanged. */
+  const [viewportHeightPx, setViewportHeightPx] = React.useState(0);
+  const [viewportWidthPx, setViewportWidthPx] = React.useState(0);
+  /* DEV TOOLS (featherweight only): the scroller's current scrollTop, throttled
+   * to one update per rAF. Drives the central geometry-driven mount set (the SOLE
+   * authoritative, capped set of tiles allowed to mount a live offset <video>).
+   * Flag-off this stays 0 and is never read. */
+  const [scrollTopPx, setScrollTopPx] = React.useState(0);
+  /* DEV TOOLS (featherweight only): transient FAST-FLING flag. Set from real
+   * scroll VELOCITY (|scrollTop delta| per rAF frame, NOT Virtuoso's isScrolling,
+   * which is true for slow scroll too). While true the panel grants NO new
+   * offset-<video> mounts (it holds the last committed set) so a fling allocates
+   * no new decoders; cleared ~140ms after velocity drops, at which point the
+   * geometry-based set recomputes immediately (no dead-zone). */
+  const [fastScrolling, setFastScrolling] = React.useState(false);
+  // Held as state (not a ref) so the ResizeObserver effect re-runs the moment
+  // Virtuoso hands us the scroll element via scrollerRef — a ref wouldn't
+  // re-trigger the effect and the first measurement could be missed.
+  const [scrollerEl, setScrollerEl] = React.useState<HTMLElement | null>(null);
   const [progress, setProgress] = React.useState<ClipProgress | null>(null);
   const [result, setResult] = React.useState<ClipExtractionResult | null>(null);
   const [previewStates, setPreviewStates] = React.useState<Record<string, ClipPreviewState>>({});
@@ -100,6 +365,52 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   // proxy align with the raw because the convert is a straight full transcode
   // (same fps/duration, no trimming). See clip_compat_convert in clips.rs.
   const [detectorProxies, setDetectorProxies] = React.useState<Record<string, string>>({});
+  /* DEV TOOLS: featherweight offset-playback wiring. ALL gated behind the
+   * persisted `featherweight_previews` config flag — when off, none of the maps
+   * below ever populate and the grid renders byte-for-byte as before.
+   *  - playbackPlans:    sourcePath -> PlaybackPlan (probe once per distinct source).
+   *  - sourceProxyPaths: sourcePath -> resolved proxy file path (proxy plans only).
+   * Mirrors the detectorProxies Record state pattern. */
+  const [featherweightPreviews, setFeatherweightPreviews] = React.useState(false);
+  /* Max preview-proxy height (Settings "Preview quality"). 0 = Source/unlimited.
+   * Threaded into clip_playback_plan + build_source_proxy as the `height` invoke
+   * arg. kickProxyBuild is a []-deps useCallback that reads only refs, so mirror
+   * the height into scenePreviewHeightRef to dodge the stale-closure trap. */
+  const [scenePreviewHeight, setScenePreviewHeight] = React.useState(240);
+  const scenePreviewHeightRef = React.useRef(240);
+  React.useEffect(() => {
+    scenePreviewHeightRef.current = scenePreviewHeight;
+  }, [scenePreviewHeight]);
+  const [playbackPlans, setPlaybackPlans] = React.useState<Record<string, PlaybackPlan>>({});
+  const [sourceProxyPaths, setSourceProxyPaths] = React.useState<Record<string, string>>({});
+  // In-flight guards so we kick exactly one plan / one proxy build per source.
+  const planInFlightRef = React.useRef<Set<string>>(new Set());
+  const proxyInFlightRef = React.useRef<Set<string>>(new Set());
+  /* DEV TOOLS: sources whose proxy build FAILED. A failed build can't be
+   * "pending" (it will never produce a path), so the graceful-poster decision
+   * must treat these as settled-with-no-source -> static merged poster, not an
+   * indefinite spinner. Cleared whenever the per-source maps reset. */
+  const failedProxiesRef = React.useRef<Set<string>>(new Set());
+  /* Sources whose proxy must be REBUILT (not cache-hit) on the next build —
+   * populated by "extract again" (force) so a stale/buggy proxy can't survive a
+   * full re-extraction. Consumed (one-shot) when that source's proxy build fires. */
+  const forceProxyRebuildRef = React.useRef<Set<string>>(new Set());
+  /* Per-source generation guard. A late resolve from an OLD plan/proxy run (e.g.
+   * a non-forced build still in flight when "extract again" kicks a forced one)
+   * must not clobber the CURRENT run's state or delete its in-flight markers.
+   * Each kick captures the source's epoch; bump-before-clear on every
+   * invalidating event makes the stale closure's captured epoch go stale so its
+   * .then/.catch/.finally early-return. */
+  const sourceEpochRef = React.useRef<Map<string, number>>(new Map());
+  const bumpSourceEpoch = React.useCallback((source: string) => {
+    sourceEpochRef.current.set(source, (sourceEpochRef.current.get(source) ?? 0) + 1);
+  }, []);
+  const currentSourceEpoch = (source: string) => sourceEpochRef.current.get(source) ?? 0;
+  // DEV tunables: margins + max-video cap. In prod this equals the baked
+  // constants (the DEV panel is the only mutator). The DEV featherweight toggle
+  // also force-enables the feature even when the config flag is off.
+  const tunables = usePreviewTunables();
+  const featherweightActive = featherweightPreviews || tunables.featherweightEnabled;
   const [clipModeLoaded, setClipModeLoaded] = React.useState(false);
   const [activationEpoch, setActivationEpoch] = React.useState(0);
   // Store the viewer's selection by id (not by value): the `clips` array
@@ -115,11 +426,32 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergedPreviewClip, setMergedPreviewClip] = React.useState<ClipPreviewItem | null>(null);
   const [activeGridItems, setActiveGridItems] = React.useState<string[][] | null>(null);
   const [unifiedPreviews, setUnifiedPreviews] = React.useState<Record<string, ClipPreviewItem>>({});
+  /* Real-time merge animation. When the user merges the selected clips into one
+   * card, we snapshot the on-screen rect (+ thumbnail) of each selected tile and
+   * fly fixed-position ghost clones into their shared centre while the new
+   * unified card springs in (justMergedId). Both are torn down on one timer.
+   * Ghosts are rendered in a body portal so they're immune to any transformed
+   * ancestor; the whole thing no-ops gracefully if rects can't be measured. */
+  type MergeGhost = { id: string; left: number; top: number; width: number; height: number; thumb: string | null };
+  const [mergeGhosts, setMergeGhosts] = React.useState<{ ghosts: MergeGhost[]; tx: number; ty: number } | null>(null);
+  const [justMergedId, setJustMergedId] = React.useState<string | null>(null);
+  const mergeAnimTimerRef = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (mergeAnimTimerRef.current != null) window.clearTimeout(mergeAnimTimerRef.current);
+    },
+    [],
+  );
   const [exportSession, setExportSession] = React.useState<ClipExportSession | null>(null);
   const [exportMinimized, setExportMinimized] = React.useState(false);
   const exportSessionRef = React.useRef<ClipExportSession | null>(null);
   const lastSelectedIdRef = React.useRef<string | null>(null);
   const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
+  // Anchor-preserve across the DELIBERATE key={gridCols} remount (the deadzone fix).
+  // We snapshot the flat index of the clip at the TOP of the viewport just before the
+  // column count changes, then re-open the fresh Virtuoso instance scrolled to that same
+  // clip's NEW row. Held in a ref so it survives the remount without forcing a render.
+  const anchorClipIndexRef = React.useRef<number | null>(null);
   const selectionCursorIdRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     exportSessionRef.current = exportSession;
@@ -181,15 +513,45 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return () => window.removeEventListener("clipmode-changed", handler);
   }, []);
 
+  // Live-sync the featherweight gate when the Settings toggle flips it, so an
+  // open grid switches between offset-playback and the classic WebP path
+  // without a remount (mirrors the clip-hover-preview-changed listener).
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      setFeatherweightPreviews((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
+    };
+    window.addEventListener("featherweight-previews-changed", handler);
+    return () => window.removeEventListener("featherweight-previews-changed", handler);
+  }, []);
+
+  // Live-sync the preview-quality cap when the Settings dropdown changes it, so an
+  // open grid re-probes the playback plan and rebuilds the proxy at the new height
+  // without a remount (mirrors the featherweight-previews-changed listener).
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      setScenePreviewHeight((e as CustomEvent<{ height: number }>).detail.height);
+    };
+    window.addEventListener("scene-preview-height-changed", handler);
+    return () => window.removeEventListener("scene-preview-height-changed", handler);
+  }, []);
+
   async function refreshClipMode() {
     try {
       const raw = await invoke<string>("get_config");
       const payload = parseBridgePayload<AppConfig>(raw);
       setClipMode(payload.clip_extraction_mode ?? "gpu");
       setHoverPlayOnly(payload.clip_hover_preview ?? false);
+      /* Featherweight previews are the default; only an explicit `false` saved
+       * by the Settings toggle routes back to the classic WebP/scene_clip path. */
+      setFeatherweightPreviews(payload.featherweight_previews ?? true);
+      setScenePreviewHeight(payload.scene_preview_height ?? 240);
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
+      // Keep featherweight previews on by default if the config read fails,
+      // matching SceneViewerModal — a transient failure shouldn't silently
+      // drop the grid back to the classic path.
+      setFeatherweightPreviews(true);
       setClipModeLoaded(true);
       logFrontend("error", "frontend.clip.config.error", "Could not load clip extraction mode", {
         error: safeLogValue(configError),
@@ -314,7 +676,40 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // clip ids, making the first jump-to-selection click after a new
     // extraction land on the wrong end of the list.
     selectionCursorIdRef.current = null;
+    /* NOTE: per-source plan/proxy state is intentionally NOT reset here. This
+     * effect fires on every result?.input change — including when detection's
+     * results land mid-extraction — and the proxy build is now kicked early
+     * (concurrent with detection in startExtraction). Resetting here would wipe
+     * the in-flight proxy (or its proxyInFlightRef marker) the moment results
+     * arrive, leaving tiles stuck. The plan/proxy reset now happens ONCE at
+     * extraction start (startExtraction) and on new source selection (acceptVideos). */
   }, [result?.input]);
+
+  /* DEV TOOLS: listen for proxy-build progress so a finished proxy flips its
+   * tiles from WebP poster to live offset <video>. The terminal "complete" tick
+   * is matched by the source becoming present in sourceProxyPaths (set when the
+   * build_source_proxy promise resolves below); this listener only needs to keep
+   * the build observable. Always mounted but inert until a build emits. */
+  const [proxyProgress, setProxyProgress] = React.useState<Record<string, number>>({});
+  React.useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void listen<{ sourcePath: string; percent: number; stage: string }>(
+      "proxy-progress",
+      (event) => {
+        if (cancelled) return;
+        const { sourcePath, percent } = event.payload;
+        setProxyProgress((current) => ({ ...current, [sourcePath]: percent }));
+      },
+    ).then((cleanup) => {
+      if (cancelled) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   function acceptVideos(paths: string[]) {
     if (paths.length === 0) return;
@@ -330,6 +725,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setConvertedSources({});
     setActiveGridItems(null);
     setUnifiedPreviews({});
+    /* DEV TOOLS: a brand-new source selection invalidates any prior per-source
+     * plan/proxy/progress/failure state so the graceful-poster decision (and the
+     * concurrent proxy build) starts clean. The result effect no longer resets
+     * these, so a new source must clear them here. */
+    setPlaybackPlans({});
+    setSourceProxyPaths({});
+    setProxyProgress({});
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    planInFlightRef.current.clear();
+    proxyInFlightRef.current.clear();
+    failedProxiesRef.current.clear();
+    forceProxyRebuildRef.current.clear();
 
     // Video picked, high intent to extract - warm up the server
     if (clipMode !== "cpu") {
@@ -370,6 +777,28 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const previewRange = previewClipRange(sourceStart, sourceEnd, result.fps, scene.index);
       const sourceName = fileStem(scene.source);
       const id = `${sourceName}-${scene.index}-${scene.start.toFixed(3)}`;
+      /* DEV TOOLS: resolve the offset-playback source from the per-source plan.
+       * Only set once the plan is known (and, for proxy plans, once the proxy
+       * file has been built); absent => tile keeps the WebP poster. Gated on
+       * featherweightActive so flag-off leaves playbackSrc undefined entirely. */
+      let playbackSrc: string | undefined;
+      let playbackMode: "direct" | "proxy" | undefined;
+      if (featherweightActive) {
+        const plan = playbackPlans[scene.source];
+        const proxyPath = sourceProxyPaths[scene.source];
+        if (proxyPath) {
+          // Play the 240p short-GOP proxy whenever it's built — even for "direct"
+          // sources — so ~20 concurrent decoders don't starve rVFC (seam bleed).
+          playbackSrc = convertFileSrc(proxyPath);
+          playbackMode = "proxy";
+        } else if (plan?.mode === "direct") {
+          // Until the proxy finishes building, a friendly source still plays direct so
+          // the grid isn't blank; it swaps to the proxy when ready.
+          playbackSrc = convertFileSrc(scene.source);
+          playbackMode = "direct";
+        }
+        // else: unfriendly source, proxy not built yet -> poster until ready.
+      }
       return {
         id,
         index: scene.index,
@@ -384,9 +813,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         previewState: previewStates[id],
         fps: result.fps,
         path: scene.source,
+        playbackSrc,
+        playbackMode,
       };
     });
-  }, [result, previewStates]);
+  }, [result, previewStates, featherweightActive, playbackPlans, sourceProxyPaths]);
 
   const displayedClips = React.useMemo<ClipPreviewItem[]>(() => {
     if (!clips || clips.length === 0) return [];
@@ -404,7 +835,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         const indices = constituentClips.map((c) => c.index + 1).join("+");
         const combinedId = `unified-${constituentClips.map((c) => c.id).join("_")}`;
 
-        return {
+        // Stored segments (array order is verbatim; never sorted) — the single
+        // source of truth for the contiguous-merge fast path below.
+        const segments = buildSegments(constituentClips);
+
+        const unified: ClipPreviewItem = {
           id: combinedId,
           index: first.index,
           label: `Merged Clip (${indices})`,
@@ -419,21 +854,105 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           fps: first.fps,
           path: first.path,
           isUnified: true,
-          segments: constituentClips.flatMap((c) =>
-            c.isUnified && c.segments
-              ? c.segments
-              : [{
-                  source: c.path!,
-                  start: c.sourceStart,
-                  end: c.sourceEnd,
-                  index: c.index,
-                  fps: c.fps,
-                }]
-          ),
+          segments,
         };
+
+        /* STEP D — CONTIGUOUS MERGE FAST PATH. All gated on featherweightActive;
+         * flag-off the object above is returned byte-for-byte unchanged.
+         *
+         * When the merge is contiguous (all segments same source, adjacent in
+         * source + stored-array order at equal fps), route it through the
+         * previewStart/End-aware OffsetVideoLayer as ONE continuous window on the
+         * single shared source: resolve that source's proxy/direct playbackSrc
+         * exactly as single clips do, then set previewStart = first segment's
+         * margined start (head exemption applies) and previewEnd = last segment's
+         * margined end. The synthetic summary sourceStart/sourceEnd stay as-is.
+         *
+         * NON-contiguous merges get NO playbackSrc this stage — they keep their
+         * current poster / first-scene behavior; the segmented playlist arrives
+         * in a later stage. */
+        if (featherweightActive) {
+          const contiguous = isContiguousMerge(segments);
+          unified.isContiguous = contiguous;
+          unified.segmentCount = segments.length;
+
+          if (contiguous) {
+            const sharedSource = segments[0].source;
+            const plan = playbackPlans[sharedSource];
+            const proxyPath = sourceProxyPaths[sharedSource];
+            if (proxyPath) {
+              unified.playbackSrc = convertFileSrc(proxyPath);
+              unified.playbackMode = "proxy";
+            } else if (plan?.mode === "direct") {
+              unified.playbackSrc = convertFileSrc(sharedSource);
+              unified.playbackMode = "direct";
+            }
+            // else: unfriendly source, proxy not built yet -> poster until ready
+            // (matches the single-clip resolution exactly).
+
+            const mergeWindow = contiguousMergeWindow(
+              segments,
+              tunables.startMarginFrames,
+              tunables.endMarginFrames,
+            );
+            unified.previewStart = mergeWindow.previewStart;
+            unified.previewEnd = mergeWindow.previewEnd;
+          } else {
+            /* STEP A — NON-CONTIGUOUS MERGE PLAYBACK. The segments jump around
+             * the SAME source (single-source rule), so there's no single joined
+             * window; instead the segmented playlist seeks between per-segment
+             * windows on ONE shared proxy/direct source.
+             *
+             * (1) Resolve the shared source's top-level playbackSrc/playbackMode
+             *     with the EXACT proxy-then-direct resolution single clips and the
+             *     contiguous path use (all segments share one source, so resolve
+             *     from segments[0].source). This top-level src is what the
+             *     playlist player decodes; per-segment playbackSrc is left unset
+             *     since every segment plays off this same source.
+             * (2) Populate EACH segment's [previewStart, previewEnd] from the
+             *     shared margin helper on the segment's OWN file-relative
+             *     start/end (so the per-segment head exemption carries). Build
+             *     fresh segment objects so the export-bound stored shape (raw
+             *     start/end, stored array order) is never mutated. */
+            const sharedSource = segments[0].source;
+            const plan = playbackPlans[sharedSource];
+            const proxyPath = sourceProxyPaths[sharedSource];
+            if (proxyPath) {
+              unified.playbackSrc = convertFileSrc(proxyPath);
+              unified.playbackMode = "proxy";
+            } else if (plan?.mode === "direct") {
+              unified.playbackSrc = convertFileSrc(sharedSource);
+              unified.playbackMode = "direct";
+            }
+            // else: unfriendly source, proxy not built yet -> poster until ready
+            // (matches the single-clip / contiguous resolution exactly).
+
+            unified.segments = segments.map((seg) => {
+              const win = offsetMarginWindow(
+                seg.start,
+                seg.end,
+                seg.fps,
+                tunables.startMarginFrames,
+                tunables.endMarginFrames,
+              );
+              return { ...seg, previewStart: win.startSec, previewEnd: win.endSec };
+            });
+          }
+        }
+
+        return unified;
       }
     }).filter(Boolean);
-  }, [clips, activeGridItems, previewStates]);
+  }, [
+    clips,
+    activeGridItems,
+    previewStates,
+    featherweightActive,
+    playbackPlans,
+    sourceProxyPaths,
+    tunables.startMarginFrames,
+    tunables.endMarginFrames,
+  ]);
 
   const hasClips = displayedClips.length > 0;
   const viewerClip = React.useMemo(
@@ -449,6 +968,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const clipAbortRef = React.useRef<((reason: Error) => void) | null>(null);
   const readyPreviewCount = React.useMemo(
     () => displayedClips.reduce((count, clip) => count + (clip.previewState?.status === "ready" ? 1 : 0), 0),
+    [displayedClips],
+  );
+  // Bake progress must count SETTLED previews, not just ready ones. A preview
+  // that permanently errors is terminal and the bake scheduler never retries it,
+  // so excluding it would peg the bar below 100% forever after a single failure.
+  // Treat both "ready" and "error" as done for progress purposes.
+  const settledPreviewCount = React.useMemo(
+    () =>
+      displayedClips.reduce((count, clip) => {
+        const status = clip.previewState?.status;
+        return count + (status === "ready" || status === "error" ? 1 : 0);
+      }, 0),
     [displayedClips],
   );
   const exportOptions = React.useMemo(
@@ -495,6 +1026,188 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return rows;
   }, [displayedClips, gridCols, hasClips]);
 
+  /* DEV TOOLS: measure the scroll viewport so the offset-<video> budget can be
+   * sized to FILL the visible area (+ a small overscan) instead of a fixed cap.
+   * Virtuoso's scrollerRef hands us the real scroll element (the
+   * ClipPreviewScroller div). Only observe in featherweight mode with clips —
+   * flag-off this never attaches and the geometry stays 0. */
+  React.useEffect(() => {
+    if (!featherweightActive || !hasClips || !scrollerEl || typeof ResizeObserver === "undefined") {
+      // Reset so a flag flip / cleared grid / lost element can't leave a stale
+      // measurement feeding the budget memo (memo then falls back to tunable).
+      setViewportHeightPx(0);
+      setViewportWidthPx(0);
+      return;
+    }
+    const el = scrollerEl;
+    const measure = () => {
+      setViewportHeightPx(el.clientHeight);
+      setViewportWidthPx(el.clientWidth);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+    // scrollerEl changes when Virtuoso (re)mounts the scroll element — e.g. when
+    // hasClips toggles — so re-running on it picks up the fresh target.
+  }, [featherweightActive, hasClips, scrollerEl]);
+
+  /* DEV TOOLS (featherweight only): track the scroller's scrollTop AND its
+   * per-frame velocity so the central mount set can be computed from real scroll
+   * GEOMETRY and FAST-FLING suppression can key on actual velocity (not
+   * Virtuoso's isScrolling, which is true for slow scroll too).
+   * THROTTLED to one state update per requestAnimationFrame — a raw scroll
+   * handler would re-render the panel on every wheel tick. Flag-off (or before
+   * Virtuoso hands us the element) this never attaches; scrollTop stays 0 and
+   * fastScrolling stays false. */
+  React.useEffect(() => {
+    if (!featherweightActive || !hasClips || !scrollerEl) {
+      setScrollTopPx(0);
+      setFastScrolling(false);
+      return undefined;
+    }
+    const el = scrollerEl;
+    let rafId = 0;
+    let lastTopPx = el.scrollTop;
+    let settleTimer = 0;
+    const clearSettle = () => {
+      if (settleTimer) {
+        window.clearTimeout(settleTimer);
+        settleTimer = 0;
+      }
+    };
+    const onScroll = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        const top = el.scrollTop;
+        // Velocity = px moved since the previous rAF sample. A real fling moves
+        // many px/frame; a careful drag stays well under the threshold.
+        const velocity = Math.abs(top - lastTopPx);
+        lastTopPx = top;
+        setScrollTopPx(top);
+        if (velocity > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
+          setFastScrolling(true);
+          // Re-arm the settle timer on every fast frame so the flag clears only
+          // ~140ms AFTER the fling actually slows below the threshold.
+          clearSettle();
+          settleTimer = window.setTimeout(() => {
+            settleTimer = 0;
+            setFastScrolling(false);
+          }, FAST_SCROLL_SETTLE_MS);
+        }
+      });
+    };
+    // Seed the resting scrollTop immediately (the element may already be
+    // scrolled when this effect re-attaches after a remount).
+    lastTopPx = el.scrollTop;
+    setScrollTopPx(el.scrollTop);
+    setFastScrolling(false);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (rafId) cancelAnimationFrame(rafId);
+      clearSettle();
+    };
+  }, [featherweightActive, hasClips, scrollerEl]);
+
+  /* DEV TOOLS: derive per-row pixel geometry from the real CSS layout so we can
+   * count how many rows fill the viewport. Mirrors src/styles/clips.css:
+   *   .clip-preview-grid-scroller { padding-right: 6px }
+   *   .clip-preview-grid-row { gap: 12px; padding-bottom: 12px }
+   *   .clip-preview-tile { aspect-ratio: 16 / 9 }
+   */
+  // HOISTED out of rowsInView so the viewport-tight visible-row floor can reuse
+  // the same per-row pixel height. 0 when geometry isn't measured yet.
+  const rowHeightPx = React.useMemo(() => {
+    if (viewportHeightPx <= 0 || viewportWidthPx <= 0) return 0;
+    const ROW_GAP = 12; // column gap == row padding-bottom
+    const SCROLLBAR_PAD = 6; // scroller padding-right
+    const usableWidth = viewportWidthPx - SCROLLBAR_PAD;
+    if (usableWidth <= 0) return 0;
+    const tileWidth = (usableWidth - (gridCols - 1) * ROW_GAP) / gridCols;
+    if (tileWidth <= 0) return 0;
+    const tileHeight = (tileWidth * 9) / 16;
+    const rowHeight = tileHeight + ROW_GAP; // tile + padding-bottom between rows
+    return rowHeight > 0 ? rowHeight : 0;
+  }, [viewportHeightPx, viewportWidthPx, gridCols]);
+
+  const rowsInView = React.useMemo(() => {
+    if (rowHeightPx <= 0 || viewportHeightPx <= 0) return 0;
+    return Math.ceil(viewportHeightPx / rowHeightPx);
+  }, [rowHeightPx, viewportHeightPx]);
+
+  /* DEV TOOLS (featherweight only) — CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount
+   * set. This is the SOLE authority for which tiles may mount a live offset
+   * <video>; it REPLACES the retired per-tile IntersectionObserver mount decision
+   * (useInPlayArea) so the live-<video> union can never exceed a known cap.
+   *
+   * Computed from scroll GEOMETRY (scrollTop + measured rowHeight + viewport
+   * height), NEVER from Virtuoso's inflated overscan range and NEVER from
+   * offsetMetrics.activeCount (which is incremented AFTER a <video> mounts — a
+   * feedback loop). Recomputed CONTINUOUSLY (cheap) so slow scroll pre-warms.
+   *
+   *  1. Eligible band = the visible rows EXTENDED by `marginRows` on each side
+   *     (the 250px pre-play pre-warm preserved as rows).
+   *  2. The effective cap is FLOORED at the visible-tile count so every visible
+   *     tile always mounts (no cap-below-visible dead-zone), and ceiling-bounded
+   *     at the top:
+   *       effectiveCap = min(
+   *         MAX_GRID_VIDEO_PLAYERS_CEILING,
+   *         max(visibleTileCount, max(1, tunables.maxGridVideoPlayers)))
+   *     `tunables.maxGridVideoPlayers` (the repurposed live knob, dialed in the
+   *     DEV panel against the activeCount readout) can only RAISE the cap above
+   *     the visible floor to add pre-warm headroom; the hard ceiling always
+   *     bounds the top. The floor + ceiling clamp lives inside
+   *     computeGeometryMountVideoIds; this memo passes the ceiling-clamped knob.
+   *  3. From the eligible tiles, ORDER by distance from the viewport-CENTER row
+   *     and take the nearest up-to-effectiveCap (so when the cap is below the
+   *     band, the visible tiles — nearest the center — are granted first).
+   *
+   * Fast-fling SUPPRESSION is applied OUTSIDE this memo (see mayMountVideoIds):
+   * while `fastScrolling` is true the panel holds the last committed set so a
+   * fling allocates no NEW decoders; this memo keeps computing eligibility so the
+   * instant the fling clears the visible tiles are granted at once (no dead-zone). */
+  const geometryMountVideoIds = React.useMemo(() => {
+    if (!featherweightActive) return new Set<string>();
+    // Repurpose the (formerly inert) "Max grid players" knob as the LIVE cap,
+    // ceiling-clamped here so it can never push past the absolute hard ceiling
+    // (which, at 35, keeps even the 2x StrictMode transient — plus the play-area
+    // gate's hover +1 — under the decoder safety limit: (35 + 1) × 2 = 72 < 75).
+    // computeGeometryMountVideoIds then FLOORS this at the visible-tile count so
+    // every visible tile mounts (no dead-zone) and re-applies the ceiling at the
+    // top.
+    const cap = Math.min(
+      MAX_GRID_VIDEO_PLAYERS_CEILING,
+      Math.max(1, Math.floor(tunables.maxGridVideoPlayers) || 1),
+    );
+    return computeGeometryMountVideoIds({
+      clipRows,
+      cap,
+      rowHeightPx,
+      viewportHeightPx,
+      scrollTopPx,
+      rowsInView,
+      marginPx: PREVIEW_PLAY_AREA_MARGIN_PX,
+    });
+  }, [featherweightActive, clipRows, rowHeightPx, viewportHeightPx, scrollTopPx, rowsInView, tunables.maxGridVideoPlayers]);
+
+  /* DEV TOOLS (featherweight only) — FAST-FLING HOLD. While `fastScrolling` is
+   * true we do NOT grant new mounts: we return the LAST committed geometry set
+   * (held in a ref) so a fling allocates zero new decoders. The instant
+   * fastScrolling clears (settle timeout), the live geometry set is committed and
+   * returned immediately — the now-visible tiles mount at once, no dead-zone.
+   * Flag-off this is the empty set (geometryMountVideoIds is empty). */
+  const lastCommittedMountIdsRef = React.useRef<Set<string>>(new Set());
+  const mayMountVideoIds = React.useMemo(() => {
+    if (fastScrolling) {
+      // Hold: serve the last set committed before the fling started.
+      return lastCommittedMountIdsRef.current;
+    }
+    lastCommittedMountIdsRef.current = geometryMountVideoIds;
+    return geometryMountVideoIds;
+  }, [fastScrolling, geometryMountVideoIds]);
+
   const activeGridClipIds = React.useMemo(() => {
     const active = new Set<string>();
     if (!gridPreview) return active;
@@ -509,12 +1222,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // WebPs were compositing on every frame at 3 columns — visible cause
     // of the grid lag at large clip counts. MAX_GRID_AUTOPLAYERS stays
     // as a hard ceiling for unusually tall viewports but rarely fires.
-    const OVERSCAN_ROWS = 1;
+    //
+    // OVERSCAN_ROWS == GRID_VIDEO_OVERSCAN_ROWS (both 1) so flag-off behavior is
+    // numerically identical to the old `±1`. In featherweight mode we also floor
+    // the bottom of the window at the measured fill (startRow + rowsInView - 1)
+    // so the active set can never under-report visible rows relative to the
+    // viewport-fill video budget — otherwise the budget couldn't be filled.
+    const OVERSCAN_ROWS = GRID_VIDEO_OVERSCAN_ROWS;
     const lastRow = clipRows.length - 1;
     const baseStart = visibleRowRange?.startIndex ?? 0;
     const baseEnd = visibleRowRange?.endIndex ?? baseStart;
     const startRow = Math.max(0, baseStart - OVERSCAN_ROWS);
-    const endRow = Math.min(lastRow, baseEnd + OVERSCAN_ROWS);
+    const fillEnd = featherweightActive && rowsInView > 0 ? baseStart + rowsInView - 1 : baseEnd;
+    const endRow = Math.min(lastRow, Math.max(baseEnd, fillEnd) + OVERSCAN_ROWS);
 
     for (let rowIndex = startRow; rowIndex <= endRow; rowIndex += 1) {
       for (const clip of clipRows[rowIndex] ?? []) {
@@ -524,11 +1244,172 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       if (active.size >= MAX_GRID_AUTOPLAYERS) break;
     }
     return active;
-  }, [clipRows, gridCols, gridPreview, visibleRowRange]);
+  }, [clipRows, gridCols, gridPreview, visibleRowRange, featherweightActive, rowsInView]);
 
   React.useEffect(() => {
     setVisibleRowRange(null);
   }, [result, gridCols]);
+
+  /* Stable Virtuoso props. Inline object/function props (style/components/
+   * computeItemKey/scrollerRef) get a fresh identity EVERY render. Virtuoso lists
+   * scrollerRef in a passive scroll-attach effect's deps, so a new identity re-runs
+   * that effect -> its cleanup calls scrollerRef(null) -> setScrollerEl(null) ->
+   * re-render -> new identity -> infinite loop ("Maximum update depth exceeded";
+   * the components object compounds it by remounting the scroller). Memoizing pins
+   * the identities and breaks the cycle. Real Virtuoso only runs in the live app,
+   * not jsdom, so this never surfaces in tests — verify the fix live. */
+  const virtuosoStyle = React.useMemo(
+    () => ({ "--clip-cols": gridCols }) as React.CSSProperties,
+    [gridCols],
+  );
+  const virtuosoComponents = React.useMemo(() => ({ Scroller: ClipPreviewScroller }), []);
+  const computeRowKey = React.useCallback(
+    (index: number, row: ClipPreviewItem[]) => `row-${gridCols}-${index}-${row[0]?.id ?? ""}`,
+    [gridCols],
+  );
+  const handleScrollerRef = React.useCallback((el: HTMLElement | Window | null) => {
+    setScrollerEl((el as HTMLElement | null) ?? null);
+  }, []);
+
+  // Single handler both column-count call sites (slider + ticks) route through.
+  // Before the deliberate key={gridCols} remount it captures which clip sits at
+  // the TOP of the viewport so the fresh list can re-open scrolled to it.
+  const changeGridCols = React.useCallback((next: number) => {
+    const cols = Math.min(4, Math.max(1, next));
+    if (cols === gridCols) return;
+    // Capture which clip sits at the TOP of the viewport BEFORE the remount, reading
+    // the LIVE DOM (the dev-tools/featherweight geometry state is 0 when the flag is off).
+    const el = scrollerEl;
+    if (el && el.scrollTop > 0 && clipRows.length > 0) {
+      const rowEl = el.querySelector<HTMLElement>(".clip-preview-grid-row");
+      const measured = rowEl ? rowEl.getBoundingClientRect().height : 0;
+      let rowHeight = measured;
+      if (rowHeight <= 0) {
+        // No row rendered to measure: derive stride from the scroller's own width.
+        // tile is aspect-ratio 16/9; 12px column gap; scroller has padding-right:6px.
+        const innerWidth = el.clientWidth - 6;
+        const tileW = (innerWidth - 12 * (gridCols - 1)) / gridCols;
+        rowHeight = tileW * (9 / 16) + 12; // +12px row stride (padding-bottom)
+      }
+      const topRow = Math.floor(el.scrollTop / rowHeight);
+      anchorClipIndexRef.current = topRow * gridCols; // gridCols = CURRENT cols
+    } else {
+      anchorClipIndexRef.current = 0;
+    }
+    setGridCols(cols);
+  }, [gridCols, scrollerEl, clipRows.length]);
+
+  /* DEV TOOLS: lazily probe a PlaybackPlan for each distinct source that has an
+   * active visible tile (first preview interaction). One invoke per source. */
+  React.useEffect(() => {
+    if (!featherweightActive || !hasClips) return;
+    const sources = new Set<string>();
+    for (const clip of displayedClips) {
+      if (!activeGridClipIds.has(clip.id) || !clip.path) continue;
+      if (playbackPlans[clip.path] || planInFlightRef.current.has(clip.path)) continue;
+      sources.add(clip.path);
+    }
+    for (const source of sources) {
+      planInFlightRef.current.add(source);
+      const epoch = currentSourceEpoch(source);
+      void invoke<PlaybackPlan>("clip_playback_plan", { sourcePath: source, height: scenePreviewHeightRef.current })
+        .then((plan) => {
+          if (currentSourceEpoch(source) !== epoch) return;
+          setPlaybackPlans((current) => ({ ...current, [source]: plan }));
+        })
+        .catch((planError) => {
+          if (currentSourceEpoch(source) !== epoch) return;
+          logFrontend("warn", "frontend.clip.playback_plan.warning", "Could not compute playback plan", {
+            source,
+            error: safeLogValue(planError),
+          });
+        })
+        .finally(() => {
+          if (currentSourceEpoch(source) !== epoch) return;
+          planInFlightRef.current.delete(source);
+        });
+    }
+  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, scenePreviewHeight]);
+
+  /* When the preview-quality cap changes, discard the cached per-source plans and
+   * proxy paths so both re-run at the new height: the plan re-probes (a source can
+   * flip direct<->proxy when the cap crosses its height) and the proxy rebuilds at
+   * the new resolution (the Rust cache key folds in the height, so distinct heights
+   * are separate proxies — the old one stays on disk and is reused if reverted). */
+  const prevScenePreviewHeightRef = React.useRef(scenePreviewHeight);
+  React.useEffect(() => {
+    if (prevScenePreviewHeightRef.current === scenePreviewHeight) return;
+    prevScenePreviewHeightRef.current = scenePreviewHeight;
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    planInFlightRef.current.clear();
+    proxyInFlightRef.current.clear();
+    failedProxiesRef.current.clear();
+    setPlaybackPlans({});
+    setSourceProxyPaths({});
+  }, [scenePreviewHeight]);
+
+  /* Kick exactly ONE build_source_proxy for a source, deduping on the in-flight
+   * ref. Used both by the lazy on-scroll effect below AND by startExtraction to
+   * overlap the build with scene detection. Dedup is proxyInFlightRef-only (a ref,
+   * always current); it deliberately does NOT read sourceProxyPaths (that would
+   * need it as a dep / could be stale) — callers that can skip an already-built
+   * source do their own sourceProxyPaths check before calling. */
+  const kickProxyBuild = React.useCallback((source: string) => {
+    if (proxyInFlightRef.current.has(source)) return;
+    proxyInFlightRef.current.add(source);
+    const epoch = currentSourceEpoch(source);
+    // "extract again" marks the source for a forced rebuild so the Rust side
+    // skips its cache; consumed below so only the first build after a re-extract
+    // is forced (later tile interactions reuse the freshly-built proxy).
+    const forceRebuild = forceProxyRebuildRef.current.has(source);
+    void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild, height: scenePreviewHeightRef.current })
+      .then((proxyPath) => {
+        if (currentSourceEpoch(source) !== epoch) return;
+        if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
+      })
+      .catch((proxyError) => {
+        if (currentSourceEpoch(source) !== epoch) return;
+        // A FAILED build is terminal: mark it so the graceful-poster decision
+        // no longer counts this source as "pending" (otherwise a pinned
+        // proxyProgress entry would spin forever), and drop its stale progress
+        // tick so nothing else reads it as an in-flight build.
+        failedProxiesRef.current.add(source);
+        setProxyProgress((cur) => {
+          const { [source]: _dropped, ...rest } = cur;
+          return rest;
+        });
+        logFrontend("warn", "frontend.clip.source_proxy.warning", "Could not build source proxy", {
+          source,
+          error: safeLogValue(proxyError),
+        });
+      })
+      .finally(() => {
+        if (currentSourceEpoch(source) !== epoch) return;
+        proxyInFlightRef.current.delete(source);
+        // One-shot: the forced rebuild has happened (or failed); drop the mark
+        // so subsequent builds for this source cache normally.
+        forceProxyRebuildRef.current.delete(source);
+      });
+  }, []);
+
+  /* DEV TOOLS: for proxy-mode sources with an active visible tile, kick exactly
+   * ONE build_source_proxy per source on first interaction. The proxy-progress
+   * listener tracks the build; on resolve we record the proxy path which flips
+   * those tiles from WebP poster to live offset <video>. Never pre-warmed. */
+  React.useEffect(() => {
+    if (!featherweightActive || !hasClips) return;
+    const sources = new Set<string>();
+    for (const clip of displayedClips) {
+      if (!activeGridClipIds.has(clip.id) || !clip.path) continue;
+      // Featherweight previews always use the lightweight proxy (even for "direct"
+      // sources) — concurrent full-res decoders starve rVFC and the loop overshoots
+      // its margin. Build once the plan has resolved (so we skip unprobeable files).
+      if (!playbackPlans[clip.path]) continue;
+      if (sourceProxyPaths[clip.path] || proxyInFlightRef.current.has(clip.path)) continue;
+      sources.add(clip.path);
+    }
+    for (const source of sources) kickProxyBuild(source);
+  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths, kickProxyBuild]);
 
   function startPreviewRenderBatch(batch: ClipPreviewItem[], token: number) {
     const renderable = batch.filter((clip) => clip.path);
@@ -613,6 +1494,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   React.useEffect(() => {
     if (!hasClips || !gridPreview) return;
+    /* DEV TOOLS: when featherweight is active the live offset <video> tiles
+     * replace the baked animated-WebP grid entirely, so skip the heavy
+     * preview-bake batch (the "X/N previews cached" grind) altogether. Flag-off
+     * keeps the batch scheduler running verbatim. */
+    if (featherweightActive) return;
 
     const token = previewTokenRef.current;
     const ordered = [...clips].sort((left, right) => {
@@ -644,13 +1530,35 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (availableBatches > 0 && nextBatch.length > 0) {
       startPreviewRenderBatch(nextBatch, token);
     }
-  }, [activeGridClipIds, clipMode, clips, gridPreview, hasClips, previewStates]);
+  }, [activeGridClipIds, clipMode, clips, gridPreview, hasClips, previewStates, featherweightActive]);
 
   async function startExtraction(overrideVideos?: string[], options?: { force?: boolean; proxies?: Record<string, string> }) {
     const videos = overrideVideos ?? selectedVideos;
     if (videos.length === 0 || isExtracting) return;
     const force = options?.force ?? false;
     const proxies = options?.proxies ?? detectorProxies;
+
+    // "Extract again" (force) must be a COMPLETE redo: scene detection already
+    // bypasses its cache via the force flag below, but the source proxy has its
+    // own on-disk cache. Mark each re-extracted source so its next proxy build
+    // rebuilds instead of cache-hitting a stale/buggy file. Consumed one-shot in
+    // the lazy proxy-build effect. Without this, no proxy fix is ever testable.
+    if (force) {
+      for (const video of videos) forceProxyRebuildRef.current.add(video);
+    }
+
+    // Reset per-source plan/proxy state ONCE here at extraction start (it used to
+    // live in the result?.input effect). Doing it here — before the concurrent
+    // proxy build is kicked below — means detection's results landing mid-extraction
+    // won't wipe the in-flight proxy or its proxyInFlightRef marker. failedProxiesRef
+    // is cleared too so a prior terminal failure doesn't poison the new build.
+    setPlaybackPlans({});
+    setSourceProxyPaths({});
+    setProxyProgress({});
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    planInFlightRef.current.clear();
+    proxyInFlightRef.current.clear();
+    failedProxiesRef.current.clear();
 
     // GPU mode no longer blocks on a codec preflight. The Python backend
     // routes any codec NVDEC/nelux can't decode straight to software decode ->
@@ -708,6 +1616,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             error: safeLogValue(warmupError),
           });
         });
+      }
+
+      // Overlap: start the source-proxy build(s) concurrently with detection. The proxy
+      // (NVDEC+NVENC) and TransNet detection (tensor cores) mostly use different GPU
+      // silicon; they only share the decoder. Fire-and-forget — do NOT await — so the
+      // ~23s proxy overlaps the ~21s detection instead of running after it. force is
+      // honored via forceProxyRebuildRef (set above on "extract again").
+      if (featherweightActive) {
+        for (const video of videos) kickProxyBuild(video);
       }
 
       const results: ClipExtractionResult[] = [];
@@ -930,7 +1847,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     const target = ordered[targetPos];
     selectionCursorIdRef.current = target.id;
     const rowIndex = Math.floor(target.index / gridCols);
-    virtuosoRef.current?.scrollToIndex({ index: rowIndex, align: "center", behavior: "smooth" });
+    // Instant (not smooth) jump: smooth-scrolling the whole list makes the grid's
+    // IntersectionObserver mount + play every row's preview <video> along the path
+    // (severe lag). Jumping straight to the target renders only the destination's
+    // tiles, so nothing loads "along the way".
+    virtuosoRef.current?.scrollToIndex({ index: rowIndex, align: "center", behavior: "auto" });
   }
 
   function toggleAllClipSelection() {
@@ -1128,6 +2049,25 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setViewerClipId(clip.id);
   }
 
+  /* Snapshot live on-screen rects (+ thumbnail src) for the given display clip
+   * ids, scoped to the grid scroller. Tiles scrolled out of Virtuoso's overscan
+   * band aren't mounted and are silently skipped — the caller no-ops the merge
+   * animation when fewer than 2 are found, so it degrades cleanly. */
+  function captureMergeGhostRects(ids: string[]): MergeGhost[] {
+    const root = scrollerEl;
+    if (!root || typeof document === "undefined") return [];
+    const out: MergeGhost[] = [];
+    ids.forEach((id) => {
+      const node = root.querySelector<HTMLElement>(`[data-clip-id="${CSS.escape(id)}"]`);
+      if (!node) return;
+      const r = node.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      const img = node.querySelector<HTMLImageElement>("img.clip-static-thumbnail");
+      out.push({ id, left: r.left, top: r.top, width: r.width, height: r.height, thumb: img?.src ?? null });
+    });
+    return out;
+  }
+
   function unifySelectedInGrid() {
     if (mergeOrder.length < 2) return;
 
@@ -1175,24 +2115,35 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       }
     });
 
+    // Snapshot where the selected tiles sit RIGHT NOW (before the layout
+    // collapses and their DOM recycles) so we can fly ghost copies into the new
+    // card. Query by the rendered display ids (mergeOrder), not the underlying
+    // ids — an already-unified selected card renders under its `unified-...` id.
+    const combinedId = `unified-${selectedUnderlyingIds.join("_")}`;
+    const ghostRects = captureMergeGhostRects(mergeOrder);
+
     setActiveGridItems(nextLayout);
     setMergeOrder([]);
     setMergeMode(false);
 
+    // Spring the freshly-formed card in, and — if we measured ≥2 source tiles —
+    // converge their ghosts into the tiles' shared centre. Both clear on one timer.
+    setJustMergedId(combinedId);
+    if (ghostRects.length >= 2) {
+      const tx = ghostRects.reduce((s, g) => s + g.left + g.width / 2, 0) / ghostRects.length;
+      const ty = ghostRects.reduce((s, g) => s + g.top + g.height / 2, 0) / ghostRects.length;
+      setMergeGhosts({ ghosts: ghostRects, tx, ty });
+    }
+    if (mergeAnimTimerRef.current != null) window.clearTimeout(mergeAnimTimerRef.current);
+    mergeAnimTimerRef.current = window.setTimeout(() => {
+      setMergeGhosts(null);
+      setJustMergedId(null);
+      mergeAnimTimerRef.current = null;
+    }, 360);
+
     // Automatically trigger preview merge & WebP generation in the background!
-    const combinedId = `unified-${selectedUnderlyingIds.join("_")}`;
     const constituentClips = selectedUnderlyingIds.map(id => clips.find(c => c.id === id)!).filter(Boolean);
-    const segments = constituentClips.flatMap((c) =>
-      c.isUnified && c.segments
-        ? c.segments
-        : [{
-            source: c.path!,
-            start: c.sourceStart,
-            end: c.sourceEnd,
-            index: c.index,
-            fps: c.fps,
-          }]
-    );
+    const segments = buildSegments(constituentClips);
 
     void (async () => {
       setPreviewStates((current) => ({
@@ -1250,9 +2201,37 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     })();
   }
 
+  // SINGLE-SOURCE MERGES ONLY. The canonical source identity of a clip is its
+  // source file path. For a unified clip every segment already shares one source
+  // (this very rule guarantees it), so its first segment's source is that key;
+  // single clips key on `clip.path`. Returns null only if neither is known.
+  function clipSourceKey(clip: ClipPreviewItem): string | null {
+    if (clip.isUnified && clip.segments && clip.segments.length > 0) {
+      return clip.segments[0].source ?? clip.path ?? null;
+    }
+    return clip.path ?? null;
+  }
+
   function toggleMergeOrder(clipId: string) {
     setMergeOrder((prev) => {
+      // Removing is always allowed (and clears the source lock when emptied).
       if (prev.includes(clipId)) return prev.filter((id) => id !== clipId);
+
+      const candidate = displayedClips.find((c) => c.id === clipId);
+      if (!candidate) return prev;
+
+      // The FIRST pick sets the allowed source. Subsequent picks from a
+      // different source are rejected (no-op) — cross-episode / cross-source
+      // merges are forbidden. The merge corner-select renders disabled for
+      // those tiles, but guard here too so every add path is covered.
+      const allowedSource = prev
+        .map((id) => displayedClips.find((c) => c.id === id))
+        .map((c) => (c ? clipSourceKey(c) : null))
+        .find((key) => key != null);
+      if (allowedSource != null && clipSourceKey(candidate) !== allowedSource) {
+        return prev;
+      }
+
       return [...prev, clipId];
     });
   }
@@ -1274,169 +2253,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return map;
   }, [mergeOrder]);
 
-  async function startPreviewMerge() {
-    if (mergeOrderedClips.length < 2 || isExtracting || isPreviewMerging) return;
-
-    setError(null);
-    setIsPreviewMerging(true);
-
-    const exportClips = mergeOrderedClips.flatMap((clip) => {
-      if (clip.isUnified && clip.segments) {
-        return clip.segments;
-      }
-      return [
-        {
-          source: clip.path!,
-          start: clip.sourceStart,
-          end: clip.sourceEnd,
-          index: clip.index,
-          fps: clip.fps,
-        },
-      ];
-    });
-
-    try {
-      const raw = await invoke<string>("clip_preview_merge", {
-        clips: exportClips,
-      });
-      const payload = parseBridgePayload<{ path: string; duration: number }>(raw);
-      
-      const mockClip: ClipPreviewItem = {
-        id: "merged-preview",
-        index: 9999,
-        label: `Merged Preview (${mergeFilenameStem})`,
-        range: `${mergeOrderedClips.length} clips combined`,
-        sourceName: "Merged Preview",
-        sourceSrc: "",
-        sourceStart: 0,
-        sourceEnd: payload.duration,
-        previewStart: 0,
-        previewEnd: payload.duration,
-        path: payload.path,
-        fps: 24,
-      };
-
-      setMergedPreviewClip(mockClip);
-      setViewerClipId("merged-preview");
-    } catch (e) {
-      const errorText = readBridgeError(e);
-      setError(errorText);
-    } finally {
-      setIsPreviewMerging(false);
+  // The source the in-progress merge is locked to: set by the first pick,
+  // null while the merge selection is empty. Single-source merges only — clips
+  // from any other source can't join, so the grid disables their corner-select.
+  const mergeLockedSource = React.useMemo<string | null>(() => {
+    for (const id of mergeOrder) {
+      const clip = displayedClips.find((c) => c.id === id);
+      const key = clip ? clipSourceKey(clip) : null;
+      if (key != null) return key;
     }
-  }
-
-  async function startMergeExport() {
-    if (mergeOrderedClips.length < 2 || isExtracting) return;
-    if (selectedExportOption?.disabled) {
-      setError(selectedExportOption.reason ?? "This export format is not available on the current hardware/mode.");
-      return;
-    }
-
-    const selected = await open({
-      multiple: false,
-      directory: true,
-      title: "Select output folder for merged clip",
-    });
-    if (!selected || Array.isArray(selected)) return;
-
-    const exportClips = mergeOrderedClips.flatMap((clip) => {
-      if (clip.isUnified && clip.segments) {
-        return clip.segments;
-      }
-      return [
-        {
-          source: clip.path!,
-          start: clip.sourceStart,
-          end: clip.sourceEnd,
-          index: clip.index,
-          fps: clip.fps,
-        },
-      ];
-    });
-
-    setError(null);
-    setIsExtracting(true);
-    const mergeRow: ClipExportRow = {
-      id: `merge-${mergeFilenameStem}`,
-      label: `${mergeFilenameStem}.${mergeExt}`,
-      range: `${mergeOrderedClips.length} clips`,
-      status: "active",
-    };
-    setExportMinimized(false);
-    setExportSession({
-      mode: "merge",
-      rows: [mergeRow],
-      activeIndex: 0,
-      activePercent: 0,
-      activeFps: null,
-      activeSpeed: null,
-      activeMessage: `Merging ${exportClips.length} clips into ${mergeFilenameStem}.${mergeExt}...`,
-      phase: "running",
-      outputDir: selected,
-    });
-
-    let cancelled = false;
-    let failed = false;
-    let errorText: string | null = null;
-
-    try {
-      await invoke<string>("clip_export_merged", {
-        clips: exportClips,
-        outputDir: selected,
-        preset: exportFormat,
-        qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
-      });
-      setExportSession((current) =>
-        current
-          ? {
-              ...current,
-              activePercent: 100,
-              rows: current.rows.map((row, idx) =>
-                idx === 0 ? { ...row, status: "done" } : row,
-              ),
-            }
-          : current,
-      );
-    } catch (e) {
-      if (clipCancellingRef.current) {
-        cancelled = true;
-      } else {
-        failed = true;
-        errorText = readBridgeError(e);
-      }
-      setExportSession((current) =>
-        current
-          ? {
-              ...current,
-              rows: current.rows.map((row, idx) =>
-                idx === 0
-                  ? {
-                      ...row,
-                      status: cancelled ? "cancelled" : "error",
-                      errorMessage: errorText ?? row.errorMessage,
-                    }
-                  : row,
-              ),
-            }
-          : current,
-      );
-    } finally {
-      const finalPhase = cancelled ? "cancelled" : failed ? "error" : "complete";
-      setExportSession((current) =>
-        current ? { ...current, phase: finalPhase } : current,
-      );
-      if (!cancelled && !failed) {
-        setMergeOrder([]);
-        setMergeMode(false);
-      }
-      if (failed && errorText) {
-        setError(errorText);
-      }
-      clipCancellingRef.current = false;
-      setIsExtracting(false);
-    }
-  }
+    return null;
+  }, [mergeOrder, displayedClips]);
 
   async function startExport() {
     if (selectedClipIds.size === 0 || isExtracting) return;
@@ -1603,10 +2430,91 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
   }
 
+  /* DEV TOOLS: surface an in-flight proxy build in the featherweight status line.
+   * A source is building when proxy-progress has emitted a percent for it but its
+   * resolved path isn't in sourceProxyPaths yet; once built it reverts to the
+   * normal ready text. Pick the lowest percent so the line reflects the slowest
+   * build still finishing. */
+  const proxyBuildPct = React.useMemo(() => {
+    if (!featherweightActive) return null;
+    let lowest: number | null = null;
+    for (const [source, percent] of Object.entries(proxyProgress)) {
+      if (sourceProxyPaths[source]) continue;
+      if (lowest === null || percent < lowest) lowest = percent;
+    }
+    return lowest;
+  }, [featherweightActive, proxyProgress, sourceProxyPaths]);
+
+  /* The prep bar carries the proxy-build / WebP-cache progress now, so this
+   * caption is just the scene-ready summary — no duplicated build % or cached
+   * count. Featherweight bakes nothing, so it reads "live previews". */
   const runMessage = error
     ?? (result
-      ? `${result.sceneCount} scenes ready - ${readyPreviewCount}/${displayedClips.length} previews cached`
+      ? (featherweightActive
+          ? `${displayedClips.length} scenes ready - live previews`
+          : `${result.sceneCount} scenes ready`)
       : progress?.message ?? "");
+
+  /* Per-task progress bars. The detection feed and the secondary preview-prep
+   * task run CONCURRENTLY, so each bar is driven SOLELY by its own signal and
+   * never fights the other. There is no synthetic roll-up: two purpose-built
+   * bars already convey state, and a fixed-weight blend of two parallel tasks
+   * with no fixed cost ratio reads as broken (Overall at 60% while detection is
+   * 100% above it) and pulls a completed bar backward when a post-detection lazy
+   * proxy build kicks. Each task simply shows its own honest fraction.
+   *
+   * - detection: progress.percent (already cross-episode overall via
+   *   mapClipBatchProgress). Indeterminate while extracting before any percent.
+   * - prep (exactly one runs per mode — proxy ON / WebP OFF):
+   *     featherweight ON  -> source-proxy build (proxyBuildPct). Bar appears
+   *       only while a build is in flight or has resolved; absent otherwise so
+   *       a non-running stage hides rather than showing 0%. proxyBuildPct===null
+   *       with resolved paths => done (100%); building with no percent yet =>
+   *       indeterminate. Failed sources are already excluded from proxyBuildPct.
+   *     featherweight OFF -> WebP preview bake (settledPreviewCount / clips).
+   *       Cache hits flip clips to ready immediately so the bar renders complete;
+   *       errors count as settled so a single failure can't peg the bar < 100%.
+   */
+  const proxyResolvedCount = Object.keys(sourceProxyPaths).length;
+  const prepBar = React.useMemo<{
+    label: string;
+    percent: number;
+    indeterminate: boolean;
+  } | null>(() => {
+    if (featherweightActive) {
+      // No proxy in flight and none resolved => no build ran this mode: hide.
+      if (proxyBuildPct === null && proxyResolvedCount === 0) return null;
+      if (proxyBuildPct === null) {
+        return { label: "Preview proxy", percent: 100, indeterminate: false };
+      }
+      return {
+        label: "Building preview proxy",
+        percent: Math.max(0, Math.min(100, proxyBuildPct)),
+        // No percent yet (cache-miss build just kicked) => indeterminate sweep.
+        indeterminate: proxyBuildPct <= 0,
+      };
+    }
+    // WebP bake only runs with a visible grid and at least one clip; otherwise
+    // there is no prep task to report, so hide the bar rather than show 0%.
+    if (!gridPreview || displayedClips.length === 0) return null;
+    return {
+      label: `Caching previews (${readyPreviewCount}/${displayedClips.length})`,
+      // Drive the fill off SETTLED (ready + error) previews so a permanently
+      // failed bake can't keep the bar below 100% once all work has finished.
+      percent: Math.round((settledPreviewCount / displayedClips.length) * 100),
+      indeterminate: false,
+    };
+  }, [
+    featherweightActive,
+    proxyBuildPct,
+    proxyResolvedCount,
+    gridPreview,
+    displayedClips.length,
+    readyPreviewCount,
+    settledPreviewCount,
+  ]);
+
+  const detectionIndeterminate = isExtracting && (!progress || progress.percent <= 0);
 
   return (
     <section
@@ -1691,7 +2599,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               max={4}
               step={1}
               value={gridCols}
-              onChange={(e) => setGridCols(Math.min(4, Math.max(1, Number(e.currentTarget.value))))}
+              onChange={(e) => changeGridCols(Number(e.currentTarget.value))}
               aria-label="Grid column count"
             />
             <div className="clip-cols-ticks">
@@ -1700,7 +2608,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                   key={n}
                   type="button"
                   className={`clip-cols-tick ${gridCols === n ? "is-active" : ""}`}
-                  onClick={() => setGridCols(n)}
+                  onClick={() => changeGridCols(n)}
                   aria-label={`${n} column${n === 1 ? "" : "s"}`}
                 >{n}</button>
               ))}
@@ -1766,68 +2674,49 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           </button>
 
           {mergeMode && (
-            <>
-              <button
-                type="button"
-                className="clip-confirm-button spring-motion"
-                disabled={mergeOrder.length < 2 || isExtracting || isPreviewMerging}
-                onClick={startPreviewMerge}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to preview" : "Preview merged clips"}
-              >
-                {isPreviewMerging ? (
-                  <Loader2 className="is-spinning" size={17} strokeWidth={2.1} />
-                ) : (
-                  <Play size={17} strokeWidth={2.1} />
-                )}
-                <span>
-                  {mergeOrder.length < 2
-                    ? "Select 2+ clips"
-                    : isPreviewMerging ? "Merging..." : "Preview merge"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className="clip-confirm-button spring-motion"
-                disabled={mergeOrder.length < 2 || isExtracting}
-                onClick={unifySelectedInGrid}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to merge in real time" : "Merge selected clips in real time into a single grid card"}
-              >
-                <Film size={17} strokeWidth={2.1} />
-                <span>
-                  {mergeOrder.length < 2
-                    ? "Select 2+ clips"
-                    : "Merge in real time"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className="clip-confirm-button spring-motion accent-glow"
-                disabled={mergeOrder.length < 2 || isExtracting}
-                onClick={startMergeExport}
-                title={mergeOrder.length < 2 ? "Select at least 2 clips to merge" : `Merge into ${mergeFilenameStem}.${mergeExt}`}
-              >
-                <CheckCircle2 size={17} strokeWidth={2.1} />
-                <span>
-                  {mergeOrder.length < 2
-                    ? "Select 2+ clips"
-                    : `Merge into ${mergeFilenameStem}.${mergeExt}`}
-                </span>
-              </button>
-            </>
+            <button
+              type="button"
+              className="clip-confirm-button spring-motion accent-glow"
+              disabled={mergeOrder.length < 2 || isExtracting}
+              onClick={unifySelectedInGrid}
+              title={
+                mergeOrder.length < 2
+                  ? "Select at least 2 clips to merge"
+                  : "Merge the selected clips into one — preview it by clicking the card, export it with Export"
+              }
+            >
+              <Film size={17} strokeWidth={2.1} />
+              <span>{mergeOrder.length < 2 ? "Select 2+ clips" : `Merge ${mergeOrder.length} clips`}</span>
+            </button>
           )}
         </div>
 
         {!exportSession && (progress || error || result) && (
           <div className={`clip-run-card glass ${error ? "is-error" : ""}`}>
-            <div className="clip-run-line">
-              <strong>{error ? "Extraction failed" : formatClipProgressStage(progress?.stage)}</strong>
-              {progress && <span>{Math.round(progress.percent)}%</span>}
-            </div>
-            {progress && (
-              <div className={`clip-progress-track ${isExtracting && progress.percent <= 0 ? "is-indeterminate" : ""}`}>
-                <span className="spring-motion" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} />
+            {/* Scene detection — always present; the core task. */}
+            {(progress || error) && (
+              <div className="clip-bar-row">
+                <div className="clip-run-line">
+                  <strong>{error ? "Extraction failed" : formatClipProgressStage(progress?.stage)}</strong>
+                  {progress && !error && <span>{Math.round(progress.percent)}%</span>}
+                </div>
+                {progress && !error && (
+                  <div className={`clip-progress-track ${detectionIndeterminate ? "is-indeterminate" : ""}`}>
+                    <span className="spring-motion" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} />
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Preview prep — exactly one of proxy build / WebP bake, only when it actually runs. */}
+            {!error && prepBar && (
+              <div className="clip-bar-row">
+                <div className="clip-run-line">
+                  <strong>{prepBar.label}</strong>
+                  {!prepBar.indeterminate && <span>{prepBar.percent}%</span>}
+                </div>
+                <div className={`clip-progress-track ${prepBar.indeterminate ? "is-indeterminate" : ""}`}>
+                  <span className="spring-motion" style={{ width: `${prepBar.percent}%` }} />
+                </div>
               </div>
             )}
             <p>{runMessage}</p>
@@ -1877,36 +2766,131 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       <div className="clip-extractor-stage">
         {hasClips ? (
           <Virtuoso
+            /* Remount on column change so Virtuoso discards its per-row size
+             * cache and re-measures from scratch. Without this, switching from
+             * 1 column (tall rows) to multi-column (short rows) leaves every
+             * OFF-SCREEN row cached at the old tall height — only mounted rows
+             * re-measure — so the scroll spacer stays massively over-reserved
+             * (the "deadzone" empty region). A window resize cleared it before
+             * by forcing a full re-measure; this does the same automatically. */
+            key={gridCols}
             ref={virtuosoRef}
             data={clipRows}
+            /* Anchor-preserve across the key={gridCols} remount above: a clip's identity is
+             * stable, only its row index changes with column count. Re-open the fresh list
+             * scrolled so the clip that was at the top stays at the top. null ref (initial
+             * load / no prior column change) -> index 0 -> opens at the top. */
+            initialTopMostItemIndex={
+              anchorClipIndexRef.current == null
+                ? 0
+                : {
+                    index: Math.min(
+                      Math.max(0, Math.floor(anchorClipIndexRef.current / gridCols)),
+                      Math.max(0, clipRows.length - 1),
+                    ),
+                    align: "start",
+                  }
+            }
             overscan={1000}
             increaseViewportBy={1000}
-            style={{ '--clip-cols': gridCols } as React.CSSProperties}
-            components={{ Scroller: ClipPreviewScroller }}
-            computeItemKey={(index, row) => `row-${gridCols}-${index}-${row[0]?.id ?? ""}`}
+            style={virtuosoStyle}
+            components={virtuosoComponents}
+            computeItemKey={computeRowKey}
+            /* DEV TOOLS: capture the real scroll element so the viewport-fill
+             * video-budget ResizeObserver can measure it. Stable handler (above)
+             * so Virtuoso's scroll-attach effect doesn't loop. */
+            scrollerRef={handleScrollerRef}
             rangeChanged={setVisibleRowRange}
             itemContent={(_index, row) => (
               <div
                 className="clip-preview-grid-row"
                 style={{ '--clip-cols': gridCols } as React.CSSProperties}
               >
-                {row.map((clip) => (
+                {row.map((clip) => {
+                  // SINGLE-SOURCE MERGES ONLY: while a merge is locked to a
+                  // source, tiles from any other source can't be added. Already
+                  // selected tiles are never disabled (they can still be removed).
+                  const mergeDisabled =
+                    mergeMode &&
+                    mergeLockedSource != null &&
+                    !mergePositions.has(clip.id) &&
+                    clipSourceKey(clip) !== mergeLockedSource;
+                  /* STEP D — GRACEFUL POSTER signal. For a featherweight tile with
+                   * no resolved playbackSrc, distinguish a build that is GENUINELY
+                   * expected (spinner) from a source that simply has no playable
+                   * form yet (static poster — no indefinite spinner).
+                   *
+                   * A source is PENDING iff EITHER:
+                   *  - its PlaybackPlan probe hasn't returned yet (still in flight /
+                   *    not recorded), OR
+                   *  - the plan resolved as PROXY mode and the proxy is genuinely
+                   *    expected: no proxy path yet AND the build has not FAILED.
+                   *    (The build being actively running / queued — proxyInFlightRef
+                   *    or a live proxyProgress tick — also keeps it pending, but a
+                   *    FAILED build, which drops its progress entry and is recorded
+                   *    in failedProxiesRef, no longer counts.)
+                   *
+                   * A DIRECT-mode plan resolves playbackSrc immediately, so it is
+                   * never pending here. Net effect: the spinner shows continuously
+                   * from plan-resolve through proxy completion for proxy sources,
+                   * while a FAILED build settles to the neutral merged poster instead
+                   * of spinning forever. Flag-off this is unused (the tile ignores it). */
+                  const sourceKey = clipSourceKey(clip);
+                  const planForKey = sourceKey != null ? playbackPlans[sourceKey] : undefined;
+                  // FIX A — a probe (plan + proxy) is only ever scheduled for a tile
+                  // that is in activeGridClipIds (both probe effects gate on it). The
+                  // spinner, however, is gated on the IntersectionObserver play area, so
+                  // a tile could be spinner-eligible while NO probe is scheduled for it
+                  // -> permanent spinner. Require `scheduled` on BOTH pending sub-conditions
+                  // so a tile that is NOT slated for a probe reports pending=false (and
+                  // falls to the neutral merged poster) instead of spinning forever; an
+                  // ACTIVE tile whose proxy is genuinely building still reports pending.
+                  const scheduled = activeGridClipIds.has(clip.id);
+                  const proxyExpected =
+                    scheduled &&
+                    sourceKey != null &&
+                    planForKey?.mode === "proxy" &&
+                    !sourceProxyPaths[sourceKey] &&
+                    !failedProxiesRef.current.has(sourceKey);
+                  const planPending =
+                    scheduled &&
+                    sourceKey != null &&
+                    (!planForKey || planInFlightRef.current.has(sourceKey));
+                  const playbackPending =
+                    featherweightActive &&
+                    !clip.playbackSrc &&
+                    sourceKey != null &&
+                    (planPending || proxyExpected);
+                  return (
                   <ClipPreviewTile
                     key={clip.id}
                     clip={clip}
                     mergeMode={mergeMode}
+                    mergeDisabled={mergeDisabled}
                     mergePosition={mergePositions.get(clip.id) ?? null}
                     paused={!gridPreview || Boolean(viewerClip)}
                     playable={activeGridClipIds.has(clip.id)}
                     selected={mergeMode ? mergePositions.has(clip.id) : selectedClipIds.has(clip.id)}
                     activationEpoch={activationEpoch}
                     clipHoverPreview={hoverPlayOnly}
+                    /* DEV TOOLS: featherweight gate */
+                    featherweightEnabled={featherweightActive}
+                    playbackPending={playbackPending}
+                    /* DEV TOOLS: CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount gate.
+                     * The panel's own scroll geometry is the SOLE authority for
+                     * which tiles may mount a live offset <video> (the per-tile
+                     * IntersectionObserver was retired from the mount path). The
+                     * set size never exceeds the decoder ceiling, and a fast fling
+                     * grants no new mounts. Flag-off mayMountVideoIds is empty. */
+                    mayMountVideo={mayMountVideoIds.has(clip.id)}
+                    justMerged={justMergedId === clip.id}
                     onClick={(modifiers) => handleClipClick(clip, modifiers)}
                     onToggleSelect={() =>
                       mergeMode ? toggleMergeOrder(clip.id) : toggleClipSelection(clip.id)
                     }
                   />
-                ))}
+                  );
+                })}
               </div>
             )}
           />
@@ -1924,6 +2908,34 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             {Array.from({ length: 12 }, (_, index) => <div key={index} className="clip-preview-skeleton" />)}
           </div>
         )}
+
+        {/* Real-time merge: ghost clones of the just-merged tiles, flying into
+            their shared centre while the new unified card springs in. Portalled
+            to <body> so fixed-position viewport coords are never thrown off by a
+            transformed ancestor; pointer-transparent and torn down on a timer. */}
+        {mergeGhosts &&
+          createPortal(
+            <div className="clip-merge-ghosts" aria-hidden="true">
+              {mergeGhosts.ghosts.map((g) => (
+                <span
+                  key={g.id}
+                  className="clip-merge-ghost"
+                  style={
+                    {
+                      left: g.left,
+                      top: g.top,
+                      width: g.width,
+                      height: g.height,
+                      backgroundImage: g.thumb ? `url("${g.thumb}")` : undefined,
+                      "--gx": `${mergeGhosts.tx - (g.left + g.width / 2)}px`,
+                      "--gy": `${mergeGhosts.ty - (g.top + g.height / 2)}px`,
+                    } as React.CSSProperties
+                  }
+                />
+              ))}
+            </div>,
+            document.body,
+          )}
 
         {hasClips && selectedClipIds.size > 0 && !mergeMode && (
           <div className="clip-jump-pill" role="group" aria-label="Jump through selected clips">
@@ -2136,6 +3148,38 @@ function titleCaseStage(stage: string): string {
     .join(" ");
 }
 
+// Short, stable per-episode tag for multi-episode runs. The full source
+// filename is REDUNDANT noise on a tile (it's identical for every clip of
+// the same episode); a compact tag is all the user needs to tell which
+// episode a clip came from. CONSERVATIVE on purpose: a wrong tag is worse
+// than no tag, so resolution/codec/year digits must NEVER be read as an
+// episode number — anything ambiguous falls back to the full stem (today's
+// behavior), so multi-episode never loses distinction.
+function episodeTag(sourcePath: string): string {
+  const stem = fileStem(sourcePath);
+  // PRIMARY: SxxExx (S01E01, s1e1, S1E01) -> normalized "S01E01" (2-digit,
+  // uppercase, zero-padded). Optional whitespace between season and episode.
+  const se = stem.match(/\bS(\d{1,2})\s*E(\d{1,3})\b/i);
+  if (se) {
+    return `S${se[1].padStart(2, "0")}E${se[2].padStart(2, "0")}`;
+  }
+  // SECONDARY: explicit "Episode N" / "Ep N" / "Ep07" word token -> "E07".
+  const ep = stem.match(/\b(?:episode|ep)\s*[._-]?\s*(\d{1,3})\b/i);
+  if (ep) {
+    return `E${ep[1].padStart(2, "0")}`;
+  }
+  // SECONDARY: well-anchored fansub dash-episode " - 07 " / " - 07(" /
+  // " - 07[" / end-of-stem " - 07". Requires the space-hyphen-space prefix so
+  // bare numbers (1080, 720, x265, 2019, CRC hashes) can't match.
+  const dash = stem.match(/\s-\s(\d{1,3})(?=\s|\(|\[|$)/);
+  if (dash) {
+    return `E${dash[1].padStart(2, "0")}`;
+  }
+  // FALLBACK: nothing recognizable -> full stem (worst case shows the long
+  // name, i.e. today's behavior; better than a wrong/empty tag).
+  return stem;
+}
+
 function combineClipResults(results: ClipExtractionResult[], mode: "cpu" | "gpu"): ClipExtractionResult {
   const scenes: ClipScene[] = [];
   let sceneOffset = 0;
@@ -2151,7 +3195,8 @@ function combineClipResults(results: ClipExtractionResult[], mode: "cpu" | "gpu"
       scenes.push({
         ...scene,
         index: sceneOffset + scene.index,
-        label: `${fileStem(scene.source)} · ${scene.label}`,
+        // Single episode: the filename is redundant on every tile, so show the bare per-episode "Scene N". Multiple episodes: prefix a SHORT episode tag (not the full filename) so identical "Scene N" labels from different episodes stay distinguishable.
+        label: results.length > 1 ? `${episodeTag(scene.source)} · ${scene.label}` : scene.label,
       });
     }
     sceneOffset += result.scenes.length;

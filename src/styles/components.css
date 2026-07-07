@@ -559,6 +559,65 @@
   color: var(--rose);
 }
 
+/* ErrorBoundary fallback (insurance for a catchable JS throw). Reuses the
+   startup-gate visual idiom and the shared .install-btn buttons. */
+.error-boundary-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #020203;
+}
+
+.error-boundary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(560px, 94vw);
+  max-height: 88vh;
+  overflow: auto;
+  padding: 26px 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+.error-boundary-card h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.error-boundary-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.error-boundary-detail {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error-boundary-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .startup-gate-card h2 {
   margin: 0;
   font-size: 22px;
