@@ -44,4 +44,20 @@ describe('ClipPreviewScroller', () => {
     render(<ClipPreviewScroller data-testid="scroller" />)
     expect(screen.getByTestId('scroller')).toBeInTheDocument()
   })
+
+  it('keeps Virtuoso inline styles but constrains the scroller inside the grid stage', () => {
+    render(
+      <ClipPreviewScroller
+        data-testid="scroller"
+        style={{ position: 'relative', width: '100%', height: '100%', opacity: 0.75 }}
+      />
+    )
+    const scroller = screen.getByTestId('scroller')
+    expect(scroller).toHaveStyle({
+      position: 'absolute',
+      width: 'auto',
+      height: 'auto',
+      opacity: '0.75',
+    })
+  })
 })

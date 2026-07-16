@@ -459,16 +459,30 @@
 
 .clip-preview-grid-scroller {
   position: absolute;
-  inset: 14px;
+  /* Keep the breathing room around the cards, but dock the scrollbar itself to
+     the workspace edge. The stable gutter below prevents the final card column
+     from running underneath it. */
+  inset: 14px 0 14px 14px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 6px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(139, 227, 136, 0.62) rgba(255, 255, 255, 0.04);
+  padding-right: 10px;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(139, 227, 136, 0.9) rgba(255, 255, 255, 0.05);
+  /* Grab-and-scroll: press-and-drag anywhere in the grid pans the list. */
+  cursor: grab;
   transition:
     filter 160ms ease,
     transform 160ms ease,
     opacity 160ms ease;
+}
+
+/* While a grab-drag is in progress the whole grid shows the closed-hand cursor
+   (overrides the per-tile pointer cursor) and text selection is suppressed. */
+.clip-preview-grid-scroller.is-grabbing,
+.clip-preview-grid-scroller.is-grabbing * {
+  cursor: grabbing !important;
+  user-select: none;
 }
 
 .clip-preview-grid-row {
@@ -496,7 +510,7 @@
   inset: 14px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 6px;
+  padding-right: 10px;
 }
 
 /* ── Floating jump-to-selection pill (bottom-right of the clip stage) ── */
@@ -571,21 +585,76 @@
   aspect-ratio: auto;
 }
 
+/* Wide, high-contrast, ALWAYS-VISIBLE scrollbar. Defining an explicit width
+   forces WebView2 to use a classic (non-overlay) bar that stays on screen the
+   whole time the grid can scroll, so it's easy to spot and grab over a wall of
+   thumbnails. The green thumb stays in the app's existing accent family. */
 .clip-preview-grid-scroller::-webkit-scrollbar,
 .clip-preview-grid::-webkit-scrollbar {
-  width: 9px;
+  width: 14px;
 }
 
 .clip-preview-grid-scroller::-webkit-scrollbar-track,
 .clip-preview-grid::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
 }
 
 .clip-preview-grid-scroller::-webkit-scrollbar-thumb,
 .clip-preview-grid::-webkit-scrollbar-thumb {
-  border: 2px solid rgba(5, 8, 9, 0.8);
+  min-height: 44px;
+  /* Dark inset ring (via padding-box clip) frames the bright green so the thumb
+     reads clearly against both dark tracks and light thumbnails behind it. */
+  border: 3px solid rgba(5, 8, 9, 0.85);
   border-radius: 999px;
-  background: var(--accent-border-strong);
+  background: rgba(139, 227, 136, 0.9);
+  background-clip: padding-box;
+}
+
+.clip-preview-grid-scroller::-webkit-scrollbar-thumb:hover,
+.clip-preview-grid::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 227, 136, 1);
+  background-clip: padding-box;
+}
+
+/* ── Selected-clip markers overlaid on the scrollbar gutter ──
+   A pointer-transparent rail down the right edge so the ticks can sit over the
+   native scrollbar without blocking a thumb grab; each tick re-enables pointer
+   events so it stays clickable to jump that clip into view. */
+.clip-scroll-markers {
+  position: absolute;
+  /* The scroller is docked to the workspace's far-right edge, so the marker
+     rail sits directly over that scrollbar gutter. */
+  top: 14px;
+  right: 0;
+  bottom: 14px;
+  width: 14px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.clip-scroll-marker {
+  position: absolute;
+  right: 3px;
+  width: 8px;
+  height: 4px;
+  margin: 0;
+  margin-top: -2px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: rgba(139, 227, 136, 1);
+  box-shadow:
+    0 0 0 1px rgba(3, 6, 7, 0.7),
+    0 0 6px rgba(139, 227, 136, 0.5);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.clip-scroll-marker:hover {
+  background: #ffffff;
+  transform: scaleX(1.5);
 }
 
 .clip-preview-skeleton,

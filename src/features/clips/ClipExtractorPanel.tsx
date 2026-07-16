@@ -196,6 +196,59 @@ function contiguousMergeWindow(
  * deterministically across a scripted fast-fling (jsdom has no real Virtuoso
  * geometry). The `geometryMountVideoIds` memo calls this verbatim.
  */
+/**
+ * Grab-and-scroll movement threshold (px). The pointer must travel farther than
+ * this between press and release for the gesture to count as a pan (scroll) that
+ * SUPPRESSES the click; below it the press is a normal click (select / open
+ * viewer). ~5px is the standard "was this a drag or a tap" slop.
+ */
+export const GRID_GRAB_DRAG_THRESHOLD_PX = 5;
+
+/**
+ * True once the pointer has moved far enough from its press origin to be treated
+ * as a drag rather than a click. Straight-line distance, so a diagonal wiggle
+ * counts the same as a pure vertical drag. Pure (no React / DOM) so the
+ * click-vs-drag decision is unit-testable without a real pointer.
+ */
+export function isPastDragThreshold(dx: number, dy: number, threshold: number): boolean {
+  return Math.hypot(dx, dy) > threshold;
+}
+
+/**
+ * The vertical positions (as a percent of the scroll track height) at which to
+ * draw a selected-clip marker on the custom scrollbar overlay. One marker per
+ * ROW that contains at least one selected clip (rows collapse duplicates so a
+ * fully-selected row shows a single tick, not `gridCols` stacked ticks). The
+ * marker sits at the CENTRE of its row's band — ((row + 0.5) / totalRows) — so it
+ * lines up with roughly where that row sits in the full scrollable list.
+ *
+ * Recompute whenever selection OR column count changes: the same clip lands on a
+ * different row when the grid re-columns, so its marker must move. Pure (no React)
+ * so the position math is unit-testable without a real Virtuoso/layout.
+ */
+export function computeSelectionMarkers(params: {
+  selectedIds: Set<string>;
+  clipIds: string[];
+  gridCols: number;
+  totalRows: number;
+}): { row: number; topPct: number }[] {
+  const { selectedIds, clipIds, gridCols, totalRows } = params;
+  if (selectedIds.size === 0 || clipIds.length === 0 || totalRows <= 0 || gridCols <= 0) {
+    return [];
+  }
+  const rows = new Set<number>();
+  for (let i = 0; i < clipIds.length; i += 1) {
+    if (selectedIds.has(clipIds[i])) rows.add(Math.floor(i / gridCols));
+  }
+  const markers: { row: number; topPct: number }[] = [];
+  for (const row of rows) {
+    const topPct = Math.max(0, Math.min(100, ((row + 0.5) / totalRows) * 100));
+    markers.push({ row, topPct });
+  }
+  markers.sort((a, b) => a.row - b.row);
+  return markers;
+}
+
 export function computeGeometryMountVideoIds(params: {
   clipRows: { id: string }[][];
   cap: number;
@@ -1026,6 +1079,129 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return rows;
   }, [displayedClips, gridCols, hasClips]);
 
+  // Ordered clip ids for the selected-clip scrollbar markers. Kept as its own
+  // memo so the marker computation doesn't re-run on every unrelated clip-object
+  // change (preview state ticks) — only when the id list itself changes.
+  const displayedClipIds = React.useMemo(
+    () => displayedClips.map((clip) => clip.id),
+    [displayedClips],
+  );
+
+  // Where to draw a tick on the custom scrollbar overlay for each selected clip:
+  // one per row that holds a selection, at that row's fractional position down
+  // the list. Recomputes when the selection changes AND when the column count
+  // changes (which moves clips onto different rows).
+  const selectionMarkers = React.useMemo(
+    () =>
+      computeSelectionMarkers({
+        selectedIds: selectedClipIds,
+        clipIds: displayedClipIds,
+        gridCols,
+        totalRows: clipRows.length,
+      }),
+    [selectedClipIds, displayedClipIds, gridCols, clipRows.length],
+  );
+
+  /* GRAB-AND-SCROLL (hand-drag panning). Press anywhere in the grid body and drag
+   * up/down to pan the list, like a phone map or a PDF hand tool. The clip tiles
+   * are clickable (a click selects / opens a clip), so a MOVEMENT THRESHOLD tells
+   * the two apart: if the pointer travels past the threshold before release we
+   * treat it as a pan (scroll the list, and swallow the click so no clip toggles);
+   * if it barely moves the normal click runs. Attached imperatively to the real
+   * scroll element Virtuoso hands us (scrollerEl) so it reuses the one scroll
+   * mechanism; hover-preview (mouse enter/leave) is untouched. */
+  React.useEffect(() => {
+    const el = scrollerEl;
+    if (!el || !hasClips) return undefined;
+
+    let activePointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let startScrollTop = 0;
+    let armed = false; // pointer is down, gesture undecided
+    let dragging = false; // moved past the threshold -> panning
+    // Set true the instant a press becomes a drag; consumed by the capture-phase
+    // click handler below to swallow the click that the browser fires after the
+    // drag so no clip gets selected/toggled.
+    let suppressNextClick = false;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return; // primary button only
+      // Leave the native scrollbar gutter to the browser so grabbing the thumb
+      // still does a normal scrollbar drag (don't double-drive scrollTop).
+      const scrollbarWidth = el.offsetWidth - el.clientWidth;
+      if (scrollbarWidth > 0) {
+        const rect = el.getBoundingClientRect();
+        if (e.clientX >= rect.right - scrollbarWidth) return;
+      }
+      armed = true;
+      dragging = false;
+      suppressNextClick = false;
+      activePointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      startScrollTop = el.scrollTop;
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!armed) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!dragging) {
+        if (!isPastDragThreshold(dx, dy, GRID_GRAB_DRAG_THRESHOLD_PX)) return;
+        dragging = true;
+        suppressNextClick = true;
+        el.classList.add("is-grabbing");
+        try {
+          if (activePointerId != null) el.setPointerCapture(activePointerId);
+        } catch {
+          /* capture can throw if the pointer already released; ignore */
+        }
+      }
+      // Drag down -> content follows the hand -> scrollTop decreases.
+      el.scrollTop = startScrollTop - dy;
+      e.preventDefault();
+    };
+
+    const endGesture = () => {
+      if (!armed) return;
+      armed = false;
+      if (dragging) {
+        dragging = false;
+        el.classList.remove("is-grabbing");
+        try {
+          if (activePointerId != null) el.releasePointerCapture(activePointerId);
+        } catch {
+          /* already released; ignore */
+        }
+      }
+      activePointerId = null;
+    };
+
+    // Capture phase so this runs BEFORE React's delegated bubble handler: a drag's
+    // trailing click is stopped here and never reaches a tile's onClick.
+    const onClickCapture = (e: MouseEvent) => {
+      if (!suppressNextClick) return;
+      suppressNextClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    };
+
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", endGesture);
+    el.addEventListener("pointercancel", endGesture);
+    el.addEventListener("click", onClickCapture, true);
+    return () => {
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", endGesture);
+      el.removeEventListener("pointercancel", endGesture);
+      el.removeEventListener("click", onClickCapture, true);
+      el.classList.remove("is-grabbing");
+    };
+  }, [scrollerEl, hasClips]);
+
   /* DEV TOOLS: measure the scroll viewport so the offset-<video> budget can be
    * sized to FILL the visible area (+ a small overscan) instead of a fixed cap.
    * Virtuoso's scrollerRef hands us the real scroll element (the
@@ -1113,7 +1289,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   /* DEV TOOLS: derive per-row pixel geometry from the real CSS layout so we can
    * count how many rows fill the viewport. Mirrors src/styles/clips.css:
-   *   .clip-preview-grid-scroller { padding-right: 6px }
+   *   .clip-preview-grid-scroller { padding-right: 10px }
    *   .clip-preview-grid-row { gap: 12px; padding-bottom: 12px }
    *   .clip-preview-tile { aspect-ratio: 16 / 9 }
    */
@@ -1122,7 +1298,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const rowHeightPx = React.useMemo(() => {
     if (viewportHeightPx <= 0 || viewportWidthPx <= 0) return 0;
     const ROW_GAP = 12; // column gap == row padding-bottom
-    const SCROLLBAR_PAD = 6; // scroller padding-right
+    const SCROLLBAR_PAD = 10; // scroller padding-right
     const usableWidth = viewportWidthPx - SCROLLBAR_PAD;
     if (usableWidth <= 0) return 0;
     const tileWidth = (usableWidth - (gridCols - 1) * ROW_GAP) / gridCols;
@@ -1286,8 +1462,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       let rowHeight = measured;
       if (rowHeight <= 0) {
         // No row rendered to measure: derive stride from the scroller's own width.
-        // tile is aspect-ratio 16/9; 12px column gap; scroller has padding-right:6px.
-        const innerWidth = el.clientWidth - 6;
+        // tile is aspect-ratio 16/9; 12px column gap; scroller has padding-right:10px.
+        const innerWidth = el.clientWidth - 10;
         const tileW = (innerWidth - 12 * (gridCols - 1)) / gridCols;
         rowHeight = tileW * (9 / 16) + 12; // +12px row stride (padding-bottom)
       }
@@ -2936,6 +3112,28 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             </div>,
             document.body,
           )}
+
+        {/* Selected-clip markers on the scrollbar: one tick per row that holds a
+            selection, positioned where that row sits in the full list. Clicking a
+            tick jumps that clip into view. The container is pointer-transparent so
+            it never steals a scrollbar-thumb grab — only the ticks are clickable. */}
+        {hasClips && selectionMarkers.length > 0 && (
+          <div className="clip-scroll-markers" role="group" aria-label="Selected clip markers">
+            {selectionMarkers.map((marker) => (
+              <button
+                key={marker.row}
+                type="button"
+                className="clip-scroll-marker"
+                style={{ top: `${marker.topPct}%` }}
+                title="Jump to selected clip"
+                aria-label="Jump to selected clip"
+                onClick={() =>
+                  virtuosoRef.current?.scrollToIndex({ index: marker.row, align: "center", behavior: "auto" })
+                }
+              />
+            ))}
+          </div>
+        )}
 
         {hasClips && selectedClipIds.size > 0 && !mergeMode && (
           <div className="clip-jump-pill" role="group" aria-label="Jump through selected clips">
