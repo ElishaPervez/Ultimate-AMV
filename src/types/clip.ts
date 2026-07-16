@@ -141,4 +141,4 @@ export type ClipExportFormat =
   | "hevc-cpu"
   | "lossless-cut";
 
-export type ClipExportRateMode = "quality" | "bitrate";
+export type ClipExportRateMode = "quality" | "vbr" | "cbr";

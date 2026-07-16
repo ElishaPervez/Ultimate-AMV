@@ -23,6 +23,11 @@ import {
 // `fastScrolling` flag stays set before clearing (ms). One short settle so the
 // geometry mount set recomputes promptly when the user releases a fling.
 const FAST_SCROLL_SETTLE_MS = 140;
+// Window resizing changes both the row height and Virtuoso's scrollTop. Those
+// layout-driven scroll events can look as fast as a user fling, but holding the
+// old mount set during them leaves the newly exposed rows black. Ignore fling
+// detection briefly while the viewport is being laid out at its new size.
+const VIEWPORT_RESIZE_SCROLL_GRACE_MS = 240;
 /* DEV TOOLS: featherweight tunables — the grid reads margins / max-video cap /
  * the DEV featherweight override from this store. In prod the store equals the
  * baked constants, so reading it is a constant read. */
@@ -58,6 +63,11 @@ import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
 import { ClipPreviewTile, offsetMarginWindow } from "./ClipPreviewTile";
+import {
+  GRID_GRAB_MOMENTUM_RELEASE_WINDOW_MS,
+  sampleGrabVelocity,
+  stepGrabMomentum,
+} from "./grabMomentum";
 import { SceneViewerModal } from "./SceneViewerModal";
 
 // Currently dead code : see FINDINGS.md. Moved here unchanged during the
@@ -214,6 +224,10 @@ export const GRID_GRAB_DRAG_THRESHOLD_PX = 5;
  */
 export function isPastDragThreshold(dx: number, dy: number, threshold: number): boolean {
   return Math.hypot(dx, dy) > threshold;
+}
+
+export function isResizeDrivenGridScroll(nowMs: number, resizeGraceUntilMs: number): boolean {
+  return nowMs < resizeGraceUntilMs;
 }
 
 /**
@@ -402,6 +416,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   // Virtuoso hands us the scroll element via scrollerRef — a ref wouldn't
   // re-trigger the effect and the first measurement could be missed.
   const [scrollerEl, setScrollerEl] = React.useState<HTMLElement | null>(null);
+  const viewportResizeGraceUntilRef = React.useRef(0);
   const [progress, setProgress] = React.useState<ClipProgress | null>(null);
   const [result, setResult] = React.useState<ClipExtractionResult | null>(null);
   const [previewStates, setPreviewStates] = React.useState<Record<string, ClipPreviewState>>({});
@@ -1127,13 +1142,57 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let startScrollTop = 0;
     let armed = false; // pointer is down, gesture undecided
     let dragging = false; // moved past the threshold -> panning
+    let dragVelocity = 0;
+    let lastDragScrollTop = 0;
+    let lastDragAt = 0;
+    let momentumVelocity = 0;
+    let momentumLastAt = 0;
+    let momentumFrame: number | null = null;
     // Set true the instant a press becomes a drag; consumed by the capture-phase
     // click handler below to swallow the click that the browser fires after the
     // drag so no clip gets selected/toggled.
     let suppressNextClick = false;
 
+    const stopMomentum = () => {
+      if (momentumFrame != null) {
+        cancelAnimationFrame(momentumFrame);
+        momentumFrame = null;
+      }
+      momentumVelocity = 0;
+    };
+
+    const advanceMomentum = (now: number) => {
+      const step = stepGrabMomentum(momentumVelocity, now - momentumLastAt);
+      const before = el.scrollTop;
+      el.scrollTop = before + step.distance;
+      momentumVelocity = step.velocity;
+      momentumLastAt = now;
+
+      // A clamped scrollTop means the grid reached its first or last row. Stop
+      // immediately instead of scheduling invisible work against the boundary.
+      if (momentumVelocity === 0 || Math.abs(el.scrollTop - before) < 0.01) {
+        stopMomentum();
+        return;
+      }
+      momentumFrame = requestAnimationFrame(advanceMomentum);
+    };
+
+    const startMomentum = () => {
+      const now = performance.now();
+      if (
+        Math.abs(dragVelocity) < 0.015
+        || now - lastDragAt > GRID_GRAB_MOMENTUM_RELEASE_WINDOW_MS
+      ) {
+        return;
+      }
+      momentumVelocity = dragVelocity;
+      momentumLastAt = now;
+      momentumFrame = requestAnimationFrame(advanceMomentum);
+    };
+
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return; // primary button only
+      stopMomentum();
       // Leave the native scrollbar gutter to the browser so grabbing the thumb
       // still does a normal scrollbar drag (don't double-drive scrollTop).
       const scrollbarWidth = el.offsetWidth - el.clientWidth;
@@ -1148,6 +1207,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       startX = e.clientX;
       startY = e.clientY;
       startScrollTop = el.scrollTop;
+      dragVelocity = 0;
+      lastDragScrollTop = el.scrollTop;
+      lastDragAt = performance.now();
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -1167,10 +1229,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       }
       // Drag down -> content follows the hand -> scrollTop decreases.
       el.scrollTop = startScrollTop - dy;
+      const now = performance.now();
+      dragVelocity = sampleGrabVelocity(
+        dragVelocity,
+        el.scrollTop - lastDragScrollTop,
+        now - lastDragAt,
+      );
+      lastDragScrollTop = el.scrollTop;
+      lastDragAt = now;
       e.preventDefault();
     };
 
-    const endGesture = () => {
+    const endGesture = (allowMomentum: boolean) => {
       if (!armed) return;
       armed = false;
       if (dragging) {
@@ -1183,7 +1253,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         }
       }
       activePointerId = null;
+      if (allowMomentum) startMomentum();
+      else suppressNextClick = false;
     };
+
+    const onPointerUp = () => endGesture(true);
+    const onPointerCancel = () => endGesture(false);
 
     // Capture phase so this runs BEFORE React's delegated bubble handler: a drag's
     // trailing click is stopped here and never reaches a tile's onClick.
@@ -1196,15 +1271,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
     el.addEventListener("pointerdown", onPointerDown);
     el.addEventListener("pointermove", onPointerMove);
-    el.addEventListener("pointerup", endGesture);
-    el.addEventListener("pointercancel", endGesture);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerCancel);
+    el.addEventListener("wheel", stopMomentum, { passive: true });
     el.addEventListener("click", onClickCapture, true);
     return () => {
       el.removeEventListener("pointerdown", onPointerDown);
       el.removeEventListener("pointermove", onPointerMove);
-      el.removeEventListener("pointerup", endGesture);
-      el.removeEventListener("pointercancel", endGesture);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerCancel);
+      el.removeEventListener("wheel", stopMomentum);
       el.removeEventListener("click", onClickCapture, true);
+      stopMomentum();
       el.classList.remove("is-grabbing");
     };
   }, [scrollerEl, hasClips]);
@@ -1223,14 +1301,35 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       return;
     }
     const el = scrollerEl;
+    let lastWidth = el.clientWidth;
+    let lastHeight = el.clientHeight;
+    const markViewportResize = () => {
+      viewportResizeGraceUntilRef.current = performance.now() + VIEWPORT_RESIZE_SCROLL_GRACE_MS;
+      // Release any mount set held for a preceding fling immediately. The next
+      // measured width/height render grants every tile exposed by the new size.
+      setFastScrolling(false);
+    };
     const measure = () => {
-      setViewportHeightPx(el.clientHeight);
-      setViewportWidthPx(el.clientWidth);
+      const height = el.clientHeight;
+      const width = el.clientWidth;
+      if (width !== lastWidth || height !== lastHeight) {
+        lastWidth = width;
+        lastHeight = height;
+        markViewportResize();
+      }
+      setViewportHeightPx(height);
+      setViewportWidthPx(width);
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
-    return () => observer.disconnect();
+    // Window resize fires before Virtuoso adjusts scrollTop, so it starts the
+    // grace period early enough to cover the layout-driven scroll event.
+    window.addEventListener("resize", markViewportResize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", markViewportResize);
+    };
     // scrollerEl changes when Virtuoso (re)mounts the scroll element — e.g. when
     // hasClips toggles — so re-running on it picks up the fresh target.
   }, [featherweightActive, hasClips, scrollerEl]);
@@ -1269,6 +1368,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         const velocity = Math.abs(top - lastTopPx);
         lastTopPx = top;
         setScrollTopPx(top);
+        if (isResizeDrivenGridScroll(performance.now(), viewportResizeGraceUntilRef.current)) {
+          // The window changed size; this scrollTop jump came from layout, not
+          // from the user. Let the new viewport mount set replace the old one.
+          clearSettle();
+          setFastScrolling(false);
+          return;
+        }
         if (velocity > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
           setFastScrolling(true);
           // Re-arm the settle timer on every fast frame so the flag clears only
@@ -2493,7 +2599,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let failed = false;
     let firstError: string | null = null;
     const rateMode = isH264TenBit ? h264RateMode : null;
-    const bitrateMbps = isH264TenBit && h264RateMode === "bitrate" ? h264BitrateMbps : null;
+    const bitrateMbps = isH264TenBit && h264RateMode !== "quality" ? h264BitrateMbps : null;
     const qualityValue = qualitySpec && (!isH264TenBit || h264RateMode === "quality")
       ? exportQuality[exportFormat]
       : null;

@@ -46,21 +46,34 @@ export function ClipRateControl({
           </button>
           <button
             type="button"
-            className={mode === "bitrate" ? "is-active" : ""}
+            className={mode === "vbr" ? "is-active" : ""}
             disabled={disabled}
-            aria-pressed={mode === "bitrate"}
-            onClick={() => onModeChange("bitrate")}
+            aria-pressed={mode === "vbr"}
+            onClick={() => onModeChange("vbr")}
           >
-            Target bitrate
+            VBR
+          </button>
+          <button
+            type="button"
+            className={mode === "cbr" ? "is-active" : ""}
+            disabled={disabled}
+            aria-pressed={mode === "cbr"}
+            onClick={() => onModeChange("cbr")}
+          >
+            CBR
           </button>
         </div>
       </div>
 
-      {mode === "bitrate" && (
-        <div className="clip-bitrate-row">
+      {mode !== "quality" && (
+        <div className={`clip-bitrate-row is-${mode}`}>
           <div>
-            <strong>Average bitrate</strong>
-            <small>Higher values preserve more detail and create larger files.</small>
+            <strong>{mode === "cbr" ? "Constant bitrate" : "Average target"}</strong>
+            <small>
+              {mode === "cbr"
+                ? "Pads simple clips so output stays at the chosen rate."
+                : "Adapts per scene. Simple clips may finish below this value."}
+            </small>
           </div>
           <label className="clip-bitrate-value">
             <input
@@ -69,7 +82,7 @@ export function ClipRateControl({
               step="0.1"
               value={draftBitrate}
               disabled={disabled}
-              aria-label="Target bitrate"
+              aria-label={mode === "cbr" ? "Constant bitrate" : "Average bitrate"}
               onChange={(event) => {
                 const next = event.currentTarget.value;
                 if (/^\d*(?:\.\d*)?$/.test(next)) setDraftBitrate(next);

@@ -41,6 +41,7 @@ import {
   ClipExtractorPanel,
   GRID_GRAB_DRAG_THRESHOLD_PX,
   isPastDragThreshold,
+  isResizeDrivenGridScroll,
   computeSelectionMarkers,
   clipQualitySpec,
   clipExportOptions,
@@ -167,6 +168,17 @@ describe('isPastDragThreshold — click-vs-drag decision', () => {
     expect(isPastDragThreshold(4, 4, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(true)
     // exactly on the threshold is NOT past it (strict >)
     expect(isPastDragThreshold(GRID_GRAB_DRAG_THRESHOLD_PX, 0, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(false)
+  })
+})
+
+describe('window resize scroll classification', () => {
+  it('does not treat layout movement during the resize grace period as a user fling', () => {
+    expect(isResizeDrivenGridScroll(1_100, 1_240)).toBe(true)
+  })
+
+  it('restores normal fling detection as soon as the resize grace period ends', () => {
+    expect(isResizeDrivenGridScroll(1_240, 1_240)).toBe(false)
+    expect(isResizeDrivenGridScroll(1_241, 1_240)).toBe(false)
   })
 })
 

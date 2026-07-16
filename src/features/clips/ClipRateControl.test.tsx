@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ClipRateControl } from "./ClipRateControl";
 
 describe("ClipRateControl", () => {
-  it("switches between quality and target bitrate", () => {
+  it("offers quality, VBR, and CBR as separate modes", () => {
     const onModeChange = vi.fn();
     render(
       <ClipRateControl
@@ -15,15 +15,18 @@ describe("ClipRateControl", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Target bitrate" }));
-    expect(onModeChange).toHaveBeenCalledWith("bitrate");
+    expect(screen.getByRole("button", { name: "Quality" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "VBR" }));
+    fireEvent.click(screen.getByRole("button", { name: "CBR" }));
+    expect(onModeChange).toHaveBeenNthCalledWith(1, "vbr");
+    expect(onModeChange).toHaveBeenNthCalledWith(2, "cbr");
   });
 
-  it("accepts an unrestricted decimal bitrate", () => {
+  it("accepts an unrestricted decimal VBR target", () => {
     const onBitrateChange = vi.fn();
     render(
       <ClipRateControl
-        mode="bitrate"
+        mode="vbr"
         bitrateMbps={20}
         disabled={false}
         onModeChange={() => undefined}
@@ -31,7 +34,8 @@ describe("ClipRateControl", () => {
       />,
     );
 
-    const input = screen.getByRole("spinbutton", { name: "Target bitrate" });
+    expect(screen.getByText("Adapts per scene. Simple clips may finish below this value.")).toBeVisible();
+    const input = screen.getByRole("spinbutton", { name: "Average bitrate" });
     fireEvent.change(input, { target: { value: "350.5" } });
     fireEvent.blur(input);
     expect(onBitrateChange).toHaveBeenCalledWith(350.5);
@@ -42,7 +46,7 @@ describe("ClipRateControl", () => {
     const onBitrateChange = vi.fn();
     render(
       <ClipRateControl
-        mode="bitrate"
+        mode="cbr"
         bitrateMbps={20}
         disabled={false}
         onModeChange={() => undefined}
@@ -50,7 +54,8 @@ describe("ClipRateControl", () => {
       />,
     );
 
-    const input = screen.getByRole("spinbutton", { name: "Target bitrate" });
+    expect(screen.getByText("Pads simple clips so output stays at the chosen rate.")).toBeVisible();
+    const input = screen.getByRole("spinbutton", { name: "Constant bitrate" });
     fireEvent.change(input, { target: { value: "0" } });
     fireEvent.blur(input);
     expect(onBitrateChange).not.toHaveBeenCalled();

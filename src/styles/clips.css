@@ -238,7 +238,7 @@
 
 .clip-rate-mode {
   display: grid;
-  grid-template-columns: 0.82fr 1.18fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 3px;
   padding: 3px;
   border: 1px solid rgba(255, 255, 255, 0.09);
@@ -284,6 +284,13 @@
   border: 1px solid rgb(var(--theme-accent-rgb) / 0.15);
   border-radius: 7px;
   background: linear-gradient(135deg, rgb(var(--theme-accent-rgb) / 0.07), rgba(255, 255, 255, 0.02));
+}
+
+.clip-bitrate-row.is-cbr {
+  border-color: rgb(var(--theme-accent-rgb) / 0.26);
+  background:
+    linear-gradient(90deg, rgb(var(--theme-accent-rgb) / 0.1), transparent 62%),
+    rgba(255, 255, 255, 0.02);
 }
 
 .clip-bitrate-row > div {

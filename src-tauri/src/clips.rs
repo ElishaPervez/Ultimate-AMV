@@ -211,14 +211,16 @@ fn clamp_quality(quality: Option<i32>, min: i32, max: i32, default: i32) -> i32 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum H264RateMode {
     Quality,
-    Bitrate,
+    Vbr,
+    Cbr,
 }
 
 fn h264_rate_mode(value: Option<&str>) -> Result<H264RateMode, String> {
     match value.unwrap_or("quality") {
         "quality" => Ok(H264RateMode::Quality),
-        "bitrate" => Ok(H264RateMode::Bitrate),
-        _ => Err("Rate control must be either quality or bitrate.".to_string()),
+        "vbr" | "bitrate" => Ok(H264RateMode::Vbr),
+        "cbr" => Ok(H264RateMode::Cbr),
+        _ => Err("Rate control must be quality, vbr, or cbr.".to_string()),
     }
 }
 
@@ -230,8 +232,16 @@ fn h264_bitrate_arg(value: Option<f64>) -> Result<String, String> {
     Ok(format!("{bitrate}M"))
 }
 
-// Direct High 10 H.264 presets. Quality 0 is deliberately accepted. Bitrate
-// mode accepts any positive Mbps target and adds no hidden maximum ceiling.
+fn h264_buffer_arg(value: Option<f64>) -> Result<String, String> {
+    let bitrate = value.unwrap_or(20.0);
+    if !bitrate.is_finite() || bitrate <= 0.0 {
+        return Err("Target bitrate must be greater than 0 Mbps.".to_string());
+    }
+    Ok(format!("{}M", bitrate * 2.0))
+}
+
+// Direct High 10 H.264 presets. Quality 0 is deliberately accepted. VBR and
+// CBR accept any positive Mbps target and add no hidden maximum ceiling.
 fn h264_10bit_nvenc_video_args(
     quality: Option<i32>,
     rate_mode: Option<&str>,
@@ -247,10 +257,21 @@ fn h264_10bit_nvenc_video_args(
             "-rc".to_string(), "constqp".to_string(),
             "-qp".to_string(), qp.to_string(),
         ]),
-        H264RateMode::Bitrate => args.extend([
+        H264RateMode::Vbr => args.extend([
             "-rc".to_string(), "vbr".to_string(),
             "-b:v".to_string(), h264_bitrate_arg(bitrate_mbps)?,
         ]),
+        H264RateMode::Cbr => {
+            let bitrate = h264_bitrate_arg(bitrate_mbps)?;
+            args.extend([
+                "-rc".to_string(), "cbr".to_string(),
+                "-b:v".to_string(), bitrate.clone(),
+                "-minrate".to_string(), bitrate.clone(),
+                "-maxrate".to_string(), bitrate,
+                "-bufsize".to_string(), h264_buffer_arg(bitrate_mbps)?,
+                "-cbr_padding".to_string(), "1".to_string(),
+            ]);
+        }
     }
     args.extend([
         "-profile:v".to_string(), "high10".to_string(),
@@ -277,9 +298,19 @@ fn h264_10bit_cpu_video_args(
         H264RateMode::Quality => args.extend([
             "-crf".to_string(), crf.to_string(),
         ]),
-        H264RateMode::Bitrate => args.extend([
+        H264RateMode::Vbr => args.extend([
             "-b:v".to_string(), h264_bitrate_arg(bitrate_mbps)?,
         ]),
+        H264RateMode::Cbr => {
+            let bitrate = h264_bitrate_arg(bitrate_mbps)?;
+            args.extend([
+                "-b:v".to_string(), bitrate.clone(),
+                "-minrate".to_string(), bitrate.clone(),
+                "-maxrate".to_string(), bitrate,
+                "-bufsize".to_string(), h264_buffer_arg(bitrate_mbps)?,
+                "-x264-params".to_string(), "nal-hrd=cbr".to_string(),
+            ]);
+        }
     }
     args.extend([
         "-profile:v".to_string(), "high10".to_string(),
@@ -315,9 +346,9 @@ mod h264_10bit_tests {
     }
 
     #[test]
-    fn bitrate_mode_reaches_both_encoders_without_quality_flags() {
-        let nvenc = h264_10bit_nvenc_video_args(None, Some("bitrate"), Some(20.5)).unwrap();
-        let cpu = h264_10bit_cpu_video_args(None, Some("bitrate"), Some(20.5)).unwrap();
+    fn vbr_mode_reaches_both_encoders_without_quality_flags() {
+        let nvenc = h264_10bit_nvenc_video_args(None, Some("vbr"), Some(20.5)).unwrap();
+        let cpu = h264_10bit_cpu_video_args(None, Some("vbr"), Some(20.5)).unwrap();
         assert_eq!(value_after(&nvenc, "-rc"), "vbr");
         assert_eq!(value_after(&nvenc, "-b:v"), "20.5M");
         assert_eq!(value_after(&cpu, "-b:v"), "20.5M");
@@ -326,10 +357,29 @@ mod h264_10bit_tests {
     }
 
     #[test]
+    fn cbr_mode_enforces_the_rate_for_both_encoders() {
+        let nvenc = h264_10bit_nvenc_video_args(None, Some("cbr"), Some(20.5)).unwrap();
+        let cpu = h264_10bit_cpu_video_args(None, Some("cbr"), Some(20.5)).unwrap();
+
+        assert_eq!(value_after(&nvenc, "-rc"), "cbr");
+        assert_eq!(value_after(&nvenc, "-b:v"), "20.5M");
+        assert_eq!(value_after(&nvenc, "-minrate"), "20.5M");
+        assert_eq!(value_after(&nvenc, "-maxrate"), "20.5M");
+        assert_eq!(value_after(&nvenc, "-bufsize"), "41M");
+        assert_eq!(value_after(&nvenc, "-cbr_padding"), "1");
+
+        assert_eq!(value_after(&cpu, "-b:v"), "20.5M");
+        assert_eq!(value_after(&cpu, "-minrate"), "20.5M");
+        assert_eq!(value_after(&cpu, "-maxrate"), "20.5M");
+        assert_eq!(value_after(&cpu, "-bufsize"), "41M");
+        assert_eq!(value_after(&cpu, "-x264-params"), "nal-hrd=cbr");
+    }
+
+    #[test]
     fn bitrate_has_no_upper_cap_but_rejects_zero() {
-        let cpu = h264_10bit_cpu_video_args(None, Some("bitrate"), Some(350.5)).unwrap();
+        let cpu = h264_10bit_cpu_video_args(None, Some("vbr"), Some(350.5)).unwrap();
         assert_eq!(value_after(&cpu, "-b:v"), "350.5M");
-        assert!(h264_10bit_nvenc_video_args(None, Some("bitrate"), Some(0.0)).is_err());
+        assert!(h264_10bit_nvenc_video_args(None, Some("cbr"), Some(0.0)).is_err());
     }
 
     #[test]
