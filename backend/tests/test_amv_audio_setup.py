@@ -51,6 +51,15 @@ def test_nelux_importable_returns_false_when_probe_fails(mocker):
     assert m._nelux_importable() is False
 
 
+def test_nelux_pytorch_mismatch_is_reported_as_a_version_problem():
+    m = _get_setup()
+    status, issue = m._nelux_failure_status(
+        "This Nelux wheel was built for PyTorch 2.13.x, but the imported PyTorch is 2.11.0+cu128."
+    )
+    assert status == "PyTorch version mismatch"
+    assert issue == "Install Nelux compatible with PyTorch 2.11.0"
+
+
 def test_nelux_importable_returns_false_on_timeout(mocker):
     m = _get_setup()
     mocker.patch(

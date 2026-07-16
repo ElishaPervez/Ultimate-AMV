@@ -4,6 +4,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 
 from .logs import add_log, append_terminal_log
+from .runtime_versions import NELUX_PACKAGE, TORCH_PACKAGES
 
 
 FEATURE_REQUIREMENTS = {
@@ -32,7 +33,7 @@ FEATURE_REQUIREMENTS = {
             ("typing_extensions", "typing_extensions"),
             ("numpy", "numpy"),
             ("transnetv2_pytorch", "transnetv2-pytorch"),
-            ("nelux", "nelux"),
+            ("nelux", NELUX_PACKAGE),
         ],
         "packages": [],
     },
@@ -70,7 +71,7 @@ KNOWN_MODULE_PACKAGES = {
     "julius": "julius",
     "librosa": "librosa",
     "ml_collections": "ml_collections",
-    "nelux": "nelux",
+    "nelux": NELUX_PACKAGE,
     "numpy": "numpy",
     "onnx": "onnx-weekly",
     "onnxruntime": "onnxruntime",
@@ -100,7 +101,6 @@ GPU_MODULE_PACKAGES = {
     "rembg": "rembg[gpu]>=2.0.50",
 }
 
-TORCH_PACKAGES = ["torch", "torchvision", "torchaudio"]
 AUDIO_RUNTIME_MODULES = [
     ("audioop", "audioop-lts"),
     ("beartype", "beartype>=0.18.5,<0.19.0"),

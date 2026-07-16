@@ -146,6 +146,16 @@ def test_get_gpu_switch_cmds_default_includes_torch_and_separator():
     assert any("audio-separator" in s for s in flat)
 
 
+def test_gpu_setup_pins_the_verified_torch_and_nelux_pair():
+    cmds = get_gpu_switch_cmds()
+    flat = [item for cmd in cmds for item in cmd]
+    assert "torch==2.11.0" in flat
+    assert "torchvision==0.26.0" in flat
+    assert "torchaudio==2.11.0" in flat
+    assert "nelux==0.11.0" in flat
+    assert "nelux" not in flat
+
+
 def test_get_gpu_switch_cmds_uninstalls_onnxruntime_cpu_not_gpu():
     """GPU switch pre-uninstalls onnxruntime (CPU runtime), not onnxruntime-gpu."""
     cmds = get_gpu_switch_cmds(cleanup_cpu_runtime=True)
@@ -167,6 +177,7 @@ def test_get_gpu_switch_cmds_force_reinstall_nelux():
     flat = [" ".join(c) for c in cmds]
     nelux_reinstall = [s for s in flat if "nelux" in s and "--force-reinstall" in s]
     assert nelux_reinstall, "force_reinstall_nelux=True must produce a nelux force-reinstall command"
+    assert all("nelux==0.11.0" in command.split() for command in nelux_reinstall)
 
 
 # ---------------------------------------------------------------------------

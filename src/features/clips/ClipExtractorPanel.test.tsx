@@ -37,7 +37,15 @@ import React from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
-import { ClipExtractorPanel } from './ClipExtractorPanel'
+import {
+  ClipExtractorPanel,
+  GRID_GRAB_DRAG_THRESHOLD_PX,
+  isPastDragThreshold,
+  computeSelectionMarkers,
+  clipQualitySpec,
+  clipExportOptions,
+  isH264TenBitFormat,
+} from './ClipExtractorPanel'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -135,6 +143,151 @@ describe('previewClipRange — padding semantics (shim)', () => {
     // start=0 => treated like index===0 (guard in source)
     const result = previewClipRange(0.0, 5.0, 24, 2)
     expect(result.start).toBe(0.0)
+  })
+})
+
+// ─── grab-and-scroll drag threshold ──────────────────────────────────────────
+
+describe('isPastDragThreshold — click-vs-drag decision', () => {
+  it('a still press (no movement) is NOT a drag', () => {
+    expect(isPastDragThreshold(0, 0, GRID_GRAB_DRAG_THRESHOLD_PX)) .toBe(false)
+  })
+
+  it('a tiny wiggle under the threshold is NOT a drag (click still selects)', () => {
+    expect(isPastDragThreshold(2, 2, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(false)
+  })
+
+  it('movement past the threshold IS a drag (click gets suppressed)', () => {
+    expect(isPastDragThreshold(0, 6, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(true)
+    expect(isPastDragThreshold(6, 0, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(true)
+  })
+
+  it('uses straight-line distance so a diagonal drag counts', () => {
+    // dx=4, dy=4 -> hypot ≈ 5.66 > 5
+    expect(isPastDragThreshold(4, 4, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(true)
+    // exactly on the threshold is NOT past it (strict >)
+    expect(isPastDragThreshold(GRID_GRAB_DRAG_THRESHOLD_PX, 0, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(false)
+  })
+})
+
+// ─── selected-clip scrollbar markers ──────────────────────────────────────────
+
+describe('computeSelectionMarkers — position math', () => {
+  const ids = ['a', 'b', 'c', 'd', 'e', 'f'] // 6 clips
+
+  it('returns nothing when nothing is selected', () => {
+    expect(
+      computeSelectionMarkers({ selectedIds: new Set(), clipIds: ids, gridCols: 2, totalRows: 3 }),
+    ).toEqual([])
+  })
+
+  it('one marker per row that holds a selection, centred in the row band', () => {
+    // 2 cols -> rows: [a,b][c,d][e,f]; select 'a' (row 0) and 'e' (row 2)
+    const markers = computeSelectionMarkers({
+      selectedIds: new Set(['a', 'e']),
+      clipIds: ids,
+      gridCols: 2,
+      totalRows: 3,
+    })
+    expect(markers.map((m) => m.row)).toEqual([0, 2])
+    // row 0 centre = (0 + 0.5)/3, row 2 centre = (2 + 0.5)/3
+    expect(markers[0].topPct).toBeCloseTo((0.5 / 3) * 100, 5)
+    expect(markers[1].topPct).toBeCloseTo((2.5 / 3) * 100, 5)
+  })
+
+  it('collapses several selected clips in the same row to a single marker', () => {
+    // both 'a' and 'b' are in row 0 at 2 cols
+    const markers = computeSelectionMarkers({
+      selectedIds: new Set(['a', 'b']),
+      clipIds: ids,
+      gridCols: 2,
+      totalRows: 3,
+    })
+    expect(markers).toHaveLength(1)
+    expect(markers[0].row).toBe(0)
+  })
+
+  it('re-columns the same selection onto different rows (marker moves)', () => {
+    // clip 'e' is index 4. At 2 cols it is row 2; at 4 cols it is row 1.
+    const at2 = computeSelectionMarkers({
+      selectedIds: new Set(['e']),
+      clipIds: ids,
+      gridCols: 2,
+      totalRows: 3,
+    })
+    const at4 = computeSelectionMarkers({
+      selectedIds: new Set(['e']),
+      clipIds: ids,
+      gridCols: 4,
+      totalRows: 2,
+    })
+    expect(at2[0].row).toBe(2)
+    expect(at4[0].row).toBe(1)
+  })
+
+  it('clamps positions into 0–100%', () => {
+    const markers = computeSelectionMarkers({
+      selectedIds: new Set(['a', 'f']),
+      clipIds: ids,
+      gridCols: 1,
+      totalRows: 6,
+    })
+    for (const m of markers) {
+      expect(m.topPct).toBeGreaterThanOrEqual(0)
+      expect(m.topPct).toBeLessThanOrEqual(100)
+    }
+  })
+})
+
+// ─── H.264 10-bit export controls ────────────────────────────────────────────
+
+describe('H.264 10-bit export controls', () => {
+  it('shows rate control only for the two 10-bit H.264 presets', () => {
+    expect(isH264TenBitFormat('h264-10bit-cpu')).toBe(true)
+    expect(isH264TenBitFormat('h264-10bit-nvenc')).toBe(true)
+    expect(isH264TenBitFormat('h264-cpu')).toBe(false)
+    expect(isH264TenBitFormat('prores-lt')).toBe(false)
+  })
+
+  it('allows the CPU and NVIDIA quality controls to reach zero', () => {
+    expect(clipQualitySpec('h264-10bit-cpu')).toMatchObject({ min: 0, max: 28, valueLabel: 'CRF' })
+    expect(clipQualitySpec('h264-10bit-nvenc')).toMatchObject({ min: 0, max: 28, valueLabel: 'QP' })
+  })
+
+  it('always offers CPU 10-bit and enables NVIDIA 10-bit when GPU support is ready', () => {
+    const cpuOptions = clipExportOptions('cpu', null)
+    expect(cpuOptions.find((option) => option.value === 'h264-10bit-cpu')?.disabled).toBe(false)
+    expect(cpuOptions.find((option) => option.value === 'h264-10bit-nvenc')?.disabled).toBe(true)
+
+    const gpuOptions = clipExportOptions('gpu', {
+      compatible: true,
+      hasNvidiaGpu: true,
+      hasFfmpeg: true,
+      hasFfprobe: true,
+      hasH264Cuvid: true,
+      hasHevcCuvid: true,
+      hasHevcNvenc: true,
+      hasH264Nvenc: true,
+      hasAv1Nvenc: true,
+      message: 'ready',
+    })
+    expect(gpuOptions.find((option) => option.value === 'h264-10bit-nvenc')?.disabled).toBe(false)
+  })
+
+  it('keeps a typed quality value of zero instead of resetting it to the default', async () => {
+    installMinimalMocks()
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    const formatButton = await screen.findByRole('button', { name: /ProRes LT MOV/i })
+    await user.click(formatButton)
+    await user.click(screen.getByRole('option', { name: /H\.264 10-bit CPU MP4/i }))
+
+    const qualityInput = await screen.findByRole('spinbutton', { name: /10-bit quality/i })
+    await user.clear(qualityInput)
+    await user.type(qualityInput, '0')
+    await user.tab()
+    expect(qualityInput).toHaveValue(0)
   })
 })
 

@@ -1,7 +1,7 @@
 import subprocess
 import sys
 
-TORCH_PACKAGES = ["torch", "torchvision", "torchaudio"]
+from .runtime_versions import NELUX_PACKAGE, TORCH_PACKAGES
 AUDIO_RUNTIME_PACKAGES = [
     "audioop-lts",
     "beartype>=0.18.5,<0.19.0",
@@ -48,7 +48,7 @@ def get_torch_install_cmd(gpu):
     base = [
         sys.executable, "-I", "-m", "pip", "install",
         "--upgrade", "--force-reinstall",
-        "torch", "torchvision", "torchaudio",
+        *TORCH_PACKAGES,
         "--index-url",
     ]
     if gpu:
@@ -83,12 +83,12 @@ def get_gpu_switch_cmds(
         cmds.append(get_torch_install_cmd(True))
     if install_audio_separator:
         # GPU mode: install audio-separator[gpu], nelux, and transnetv2-pytorch
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator[gpu]", "nelux", "transnetv2-pytorch", *AUDIO_RUNTIME_PACKAGES])
+        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator[gpu]", NELUX_PACKAGE, "transnetv2-pytorch", *AUDIO_RUNTIME_PACKAGES])
     if force_reinstall_nelux:
         # Wheel metadata says nelux is installed but the C extension cannot
         # actually load (e.g. a file was quarantined by AV). A plain `pip
         # install nelux` would short-circuit as already-satisfied.
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--force-reinstall", "--no-deps", "nelux"])
+        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--force-reinstall", "--no-deps", NELUX_PACKAGE])
     return cmds
 
 

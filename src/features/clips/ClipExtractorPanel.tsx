@@ -34,6 +34,7 @@ import { clampNumber } from "../../lib/numbers";
 import { extensionAccept, useFileDrop } from "../../lib/useFileDrop";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import { VideoOutputControl } from "../video/VideoOutputControl";
+import { ClipRateControl } from "./ClipRateControl";
 
 const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi"];
 const clipInputAccept = extensionAccept(CLIP_INPUT_EXTENSIONS);
@@ -42,6 +43,7 @@ import type {
   ClipAudioSettings,
   ClipBatchProgressContext,
   ClipExportFormat,
+  ClipExportRateMode,
   ClipExtractionResult,
   ClipPreviewBatchResult,
   ClipPreviewItem,
@@ -363,11 +365,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([]);
   const [selectedClipIds, setSelectedClipIds] = React.useState<Set<string>>(() => new Set());
   const [exportFormat, setExportFormat] = React.useState<ClipExportFormat>("prores-lt");
+  const [h264RateMode, setH264RateMode] = React.useState<ClipExportRateMode>("quality");
+  const [h264BitrateMbps, setH264BitrateMbps] = React.useState(20);
   const [exportQuality, setExportQuality] = React.useState<Record<ClipExportFormat, number>>({
     "gpu-intra": 16,
     "h264-nvenc": 18,
+    "h264-10bit-nvenc": 18,
     "av1-nvenc": 24,
     "h264-cpu": 18,
+    "h264-10bit-cpu": 18,
     "hevc-cpu": 18,
     "prores-lt": 0,
     "prores-hq": 0,
@@ -1050,12 +1056,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, [exportOptions]);
   const selectedExportOption = exportOptions.find((option) => option.value === exportFormat);
   const qualitySpec = React.useMemo(() => clipQualitySpec(exportFormat), [exportFormat]);
+  const isH264TenBit = isH264TenBitFormat(exportFormat);
 
   React.useEffect(() => {
     if (!qualitySpec) return;
     setExportQuality((current) => {
       const existing = current[exportFormat];
-      if (existing && existing >= qualitySpec.min && existing <= qualitySpec.max) {
+      if (existing != null && existing >= qualitySpec.min && existing <= qualitySpec.max) {
         return current;
       }
       return { ...current, [exportFormat]: qualitySpec.defaultValue };
@@ -2485,6 +2492,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let cancelled = false;
     let failed = false;
     let firstError: string | null = null;
+    const rateMode = isH264TenBit ? h264RateMode : null;
+    const bitrateMbps = isH264TenBit && h264RateMode === "bitrate" ? h264BitrateMbps : null;
+    const qualityValue = qualitySpec && (!isH264TenBit || h264RateMode === "quality")
+      ? exportQuality[exportFormat]
+      : null;
 
     try {
       for (let index = 0; index < selectedClips.length; index += 1) {
@@ -2515,7 +2527,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               clips: clip.segments,
               outputDir: outDir,
               preset: exportFormat,
-              qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
+              qualityValue,
+              rateMode,
+              bitrateMbps,
             });
           } else {
             await invoke<string>("clip_export", {
@@ -2530,7 +2544,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               ],
             outputDir: outDir,
             preset: exportFormat,
-            qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
+            qualityValue,
+            rateMode,
+            bitrateMbps,
           });
           }
           setExportSession((current) =>
@@ -2802,10 +2818,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               className="clip-export-format-dropdown"
             />
             {selectedExportOption?.reason && <small className="stream-warning">{selectedExportOption.reason}</small>}
-            {qualitySpec && (
+            {isH264TenBit && (
+              <ClipRateControl
+                mode={h264RateMode}
+                bitrateMbps={h264BitrateMbps}
+                disabled={isExtracting}
+                onModeChange={setH264RateMode}
+                onBitrateChange={setH264BitrateMbps}
+              />
+            )}
+            {qualitySpec && (!isH264TenBit || h264RateMode === "quality") && (
               <VideoOutputControl
                 spec={qualitySpec}
-                value={exportQuality[exportFormat] || qualitySpec.defaultValue}
+                value={exportQuality[exportFormat] ?? qualitySpec.defaultValue}
                 disabled={isExtracting}
                 onChange={(value) => {
                   const clamped = clampNumber(value, qualitySpec.min, qualitySpec.max);
@@ -3433,8 +3458,10 @@ function clipPresetExtension(format: ClipExportFormat): string {
     case "gpu-intra":
       return "mov";
     case "h264-cpu":
+    case "h264-10bit-cpu":
     case "hevc-cpu":
     case "h264-nvenc":
+    case "h264-10bit-nvenc":
     case "av1-nvenc":
       return "mp4";
     case "lossless-cut":
@@ -3444,7 +3471,7 @@ function clipPresetExtension(format: ClipExportFormat): string {
   }
 }
 
-function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
+export function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
   switch (format) {
     case "gpu-intra":
       return {
@@ -3463,6 +3490,17 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
         valueLabel: "CQ",
         help: "Lower values keep more detail and create larger files.",
         min: 14,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
+    case "h264-10bit-nvenc":
+      return {
+        label: "10-bit quality",
+        valueLabel: "QP",
+        help: "0 keeps maximum detail with no bitrate cap. Higher values create smaller files.",
+        min: 0,
         max: 28,
         step: 1,
         defaultValue: 18,
@@ -3490,6 +3528,17 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
         defaultValue: 18,
         suffix: "",
       };
+    case "h264-10bit-cpu":
+      return {
+        label: "10-bit quality",
+        valueLabel: "CRF",
+        help: "0 keeps maximum detail with no bitrate cap. Higher values create smaller files.",
+        min: 0,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
     case "hevc-cpu":
       return {
         label: "Constant rate factor",
@@ -3509,7 +3558,11 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
   }
 }
 
-function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null): ClipExportOption[] {
+export function isH264TenBitFormat(format: ClipExportFormat): boolean {
+  return format === "h264-10bit-nvenc" || format === "h264-10bit-cpu";
+}
+
+export function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null): ClipExportOption[] {
   const cpuModeReason = "GPU export presets are hidden in CPU clip mode. Switch clip extraction to GPU mode to use NVENC presets.";
   const gpuIntraReady = Boolean(gpuStatus?.hasHevcNvenc);
   const statusMessage = gpuStatus?.message ?? "Checking GPU export support...";
@@ -3543,6 +3596,12 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
       description: "Widely compatible delivery codec (libx264). Lower CRF = higher quality.",
     },
     {
+      value: "h264-10bit-cpu",
+      label: "H.264 10-bit CPU MP4",
+      disabled: false,
+      description: "High 10 H.264 via CPU. Quality reaches 0 with no bitrate cap.",
+    },
+    {
       value: "hevc-cpu",
       label: "HEVC CPU MP4",
       disabled: false,
@@ -3561,6 +3620,13 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
       disabled: !gpuMode || !h264NvencReady,
       reason: !gpuMode ? cpuModeReason : h264NvencReady ? undefined : "Bundled FFmpeg does not expose h264_nvenc on this machine.",
       description: "Fast GPU H.264 delivery encode. Lower CQ = higher quality.",
+    },
+    {
+      value: "h264-10bit-nvenc",
+      label: "H.264 10-bit NVENC MP4",
+      disabled: !gpuMode || !h264NvencReady,
+      reason: !gpuMode ? cpuModeReason : h264NvencReady ? undefined : "Bundled FFmpeg does not expose h264_nvenc on this machine.",
+      description: "High 10 H.264 on supported RTX GPUs; automatically retries on CPU if needed.",
     },
     {
       value: "av1-nvenc",

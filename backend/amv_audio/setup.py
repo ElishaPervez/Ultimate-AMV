@@ -8,6 +8,16 @@ from .gpu import check_nvidia_gpu, get_cpu_switch_cmds, get_gpu_switch_cmds
 from .dependencies import AUDIO_RUNTIME_MODULES
 from .hardware import refresh_hardware
 from .logs import add_log, append_terminal_log
+from .runtime_versions import TORCH_VERSION
+
+_LAST_NELUX_IMPORT_ERROR = None
+
+
+def _nelux_failure_status(error):
+    text = (error or "").lower()
+    if "built for pytorch" in text or "pytorch minor version" in text:
+        return "PyTorch version mismatch", f"Install Nelux compatible with PyTorch {TORCH_VERSION}"
+    return "Cannot load (repair)", "Repair Nelux native files"
 
 
 def _check_package(package):
@@ -24,6 +34,8 @@ def _check_package(package):
 
 
 def _nelux_importable():
+    global _LAST_NELUX_IMPORT_ERROR
+    _LAST_NELUX_IMPORT_ERROR = None
     # Nelux's C extension has two non-obvious load requirements that a bare
     # `python -c "import nelux"` subprocess would fail:
     #   1. tools/ffmpeg-shared/ must be on the Windows DLL search path so
@@ -61,8 +73,12 @@ def _nelux_importable():
             timeout=20,
             env=os.environ.copy(),
         )
+        if result.returncode != 0:
+            lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+            _LAST_NELUX_IMPORT_ERROR = lines[-1] if lines else "Nelux could not load"
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        _LAST_NELUX_IMPORT_ERROR = str(error)
         return False
 
 
@@ -130,16 +146,19 @@ def _collect_gpu_plan():
     ort_cpu = _check_package("onnxruntime")
     ort_gpu = _check_package("onnxruntime-gpu")
     nelux_installed = _check_package("nelux")
+    global _LAST_NELUX_IMPORT_ERROR
+    _LAST_NELUX_IMPORT_ERROR = None
     nelux_importable = nelux_installed and _nelux_importable()
     nelux = nelux_installed and nelux_importable
     nelux_broken_binaries = nelux_installed and not nelux_importable
+    nelux_failure_status, nelux_repair_issue = _nelux_failure_status(_LAST_NELUX_IMPORT_ERROR)
 
     rows.append({"component": "Detected GPU", "status": gpu_name or "No NVIDIA GPU found"})
     rows.append({"component": "Current Mode", "status": "NOT INSTALLED" if installed_mode == "missing" else installed_mode.upper()})
     rows.append({"component": "Target Mode", "status": "GPU (CUDA 12.8 / cu128)"})
     rows.append({"component": "PyTorch", "status": torch_version or "Missing"})
     rows.append({"component": "GPU Runtime", "status": "Installed" if ort_gpu else "Needs install"})
-    rows.append({"component": "Nelux", "status": "Installed" if nelux else ("Missing DLLs (reinstall)" if nelux_broken_binaries else "Needs install")})
+    rows.append({"component": "Nelux", "status": "Installed" if nelux else (nelux_failure_status if nelux_broken_binaries else "Needs install")})
     rows.append({"component": "audio-separator", "status": "Installed" if audio_separator else "Needs install"})
     rows.append({"component": "Audio runtime deps", "status": "Installed" if not missing_audio_runtime else f"Missing {len(missing_audio_runtime)}"})
     rows.append({"component": "typing_extensions", "status": "Installed" if typing_extensions else "Needs install"})
@@ -160,7 +179,7 @@ def _collect_gpu_plan():
     if install_audio_separator:
         issues.append("Install audio-separator[gpu], typing_extensions, and pydub")
     if nelux_broken_binaries:
-        issues.append("Reinstall Nelux (bundled FFmpeg DLLs missing)")
+        issues.append(nelux_repair_issue)
     if ort_cpu:
         issues.append("Remove CPU ONNX Runtime")
 

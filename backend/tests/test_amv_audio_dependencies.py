@@ -291,6 +291,7 @@ def test_known_module_packages_has_torch():
 
 def test_known_module_packages_has_nelux():
     assert "nelux" in deps_mod.KNOWN_MODULE_PACKAGES
+    assert deps_mod.KNOWN_MODULE_PACKAGES["nelux"] == "nelux==0.11.0"
 
 
 def test_known_module_packages_has_numpy():
