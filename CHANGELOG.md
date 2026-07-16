@@ -5,6 +5,19 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] : 2026-07-17
+
+### Added
+- Added direct H.264 10-bit export with three rate modes: Quality keeps visual quality consistent, VBR targets an average bitrate, and CBR keeps output at the selected bitrate. VBR and CBR accept any positive Mbps value without an artificial upper limit.
+- Added a visible, draggable scrollbar at the outer edge of the clip grid so long scene lists can be navigated precisely.
+
+### Changed
+- Dragging the clip grid now carries momentum after release and slows smoothly, while a new drag or mouse-wheel input stops it immediately.
+
+### Fixed
+- Fixed scene previews staying black after resizing the window until the user hovered them, switched columns, or restored the old window size. Newly visible scenes now load as soon as the layout settles.
+- Fixed the installed app repeatedly reporting missing GPU AI files after Repair. The check now validates the actual bundled runtime in the correct load order and shared-library location.
+
 ## [0.13.2] : 2026-06-17
 
 ### Fixed
@@ -250,6 +263,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.13.3]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.3
+[0.13.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.2
 [0.13.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.1
 [0.13.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.0
 [0.12.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.12.0
