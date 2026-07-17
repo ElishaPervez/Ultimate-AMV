@@ -5,6 +5,16 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] : 2026-07-17
+
+### Changed
+- Audio setup and extraction now verify the numerical processing code Python actually loads, repair the tested NumPy 2.4.4 and Numba 0.65.1 pair automatically, and remove stale package records left by earlier updates.
+- Release builds now stop before publishing if the bundled numerical processing code is not the verified version.
+
+### Fixed
+- Fixed vocal and instrumental extraction failing immediately after an app update because the installer could replace a compatible NumPy version with one that Numba refused to load.
+- When separation fails before producing stems, the app now reports the underlying processing error instead of replacing it with the generic message "Separation produced no output files."
+
 ## [0.13.3] : 2026-07-17
 
 ### Added
@@ -263,6 +273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.14.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.14.0
 [0.13.3]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.3
 [0.13.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.2
 [0.13.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.1
