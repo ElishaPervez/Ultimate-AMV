@@ -1,7 +1,12 @@
 import subprocess
 import sys
 
-from .runtime_versions import NELUX_PACKAGE, TORCH_PACKAGES
+from .runtime_versions import (
+    NELUX_PACKAGE,
+    NUMBA_PACKAGE,
+    NUMPY_PACKAGE,
+    TORCH_PACKAGES,
+)
 AUDIO_RUNTIME_PACKAGES = [
     "audioop-lts",
     "beartype>=0.18.5,<0.19.0",
@@ -10,6 +15,8 @@ AUDIO_RUNTIME_PACKAGES = [
     "julius",
     "librosa",
     "ml_collections",
+    NUMBA_PACKAGE,
+    NUMPY_PACKAGE,
     "onnx-weekly",
     "pyyaml",
     "requests",
@@ -62,12 +69,31 @@ def _get_uninstall_cmd(packages):
     return [sys.executable, "-I", "-m", "pip", "uninstall", "-y", *packages]
 
 
+def get_numeric_runtime_repair_cmd():
+    # A silent app update can overwrite NumPy's module files while leaving an
+    # older dist-info directory behind. --force-reinstall is required because
+    # a normal pip install trusts that stale metadata and reports the broken
+    # environment as already satisfied.
+    return [
+        sys.executable,
+        "-I",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--force-reinstall",
+        NUMPY_PACKAGE,
+        NUMBA_PACKAGE,
+    ]
+
+
 def get_gpu_switch_cmds(
     *,
     reinstall_torch=True,
     cleanup_cpu_runtime=True,
     install_audio_separator=True,
     force_reinstall_nelux=False,
+    repair_numeric_runtime=False,
 ):
     cmds = []
     # We only pre-uninstall the *opposite* runtime (onnxruntime CPU when
@@ -89,6 +115,10 @@ def get_gpu_switch_cmds(
         # actually load (e.g. a file was quarantined by AV). A plain `pip
         # install nelux` would short-circuit as already-satisfied.
         cmds.append([sys.executable, "-I", "-m", "pip", "install", "--force-reinstall", "--no-deps", NELUX_PACKAGE])
+    if repair_numeric_runtime:
+        # Run this last so another setup dependency cannot replace the tested
+        # NumPy/Numba pair afterward.
+        cmds.append(get_numeric_runtime_repair_cmd())
     return cmds
 
 
@@ -98,6 +128,7 @@ def get_cpu_switch_cmds(
     cleanup_gpu_runtime=True,
     install_onnxruntime=True,
     install_audio_separator=True,
+    repair_numeric_runtime=False,
 ):
     cmds = []
     # See get_gpu_switch_cmds for why only the opposite runtime is
@@ -113,4 +144,6 @@ def get_cpu_switch_cmds(
     if install_audio_separator:
         # CPU mode: install audio-separator and scenedetect
         cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator", "scenedetect>=0.6.7,<0.8", *AUDIO_RUNTIME_PACKAGES])
+    if repair_numeric_runtime:
+        cmds.append(get_numeric_runtime_repair_cmd())
     return cmds

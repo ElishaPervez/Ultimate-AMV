@@ -42,6 +42,21 @@ class TqdmCapture(io.StringIO):
         super().flush()
 
 
+def _last_separator_failure(stderr_text):
+    """Extract the useful reason that audio-separator logs before returning []."""
+    lines = [line.strip() for line in (stderr_text or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if "Failed to process file " not in line:
+            continue
+        # The file path may contain the Windows drive colon. The final colon
+        # separates that path from the actual processing failure.
+        _prefix, separator, reason = line.rpartition(": ")
+        if separator and reason:
+            return reason
+        return line
+    return None
+
+
 def _pad_audio_if_needed(input_path, output_dir):
     try:
         from pydub import AudioSegment
@@ -123,7 +138,10 @@ def _run_audio_separator(processing_input, output_dir, model_name, model_setting
         sys.stderr = original_stderr
 
     if not output_files:
-        raise RuntimeError("Separation produced no output files")
+        reason = _last_separator_failure(capture.getvalue())
+        if reason:
+            raise RuntimeError(f"Audio separation failed: {reason}")
+        raise RuntimeError("Audio separation produced no output files and reported no cause")
 
     return output_files
 

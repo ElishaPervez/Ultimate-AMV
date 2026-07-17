@@ -1,10 +1,19 @@
 import importlib.util
+import shutil
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from .logs import add_log, append_terminal_log
-from .runtime_versions import NELUX_PACKAGE, TORCH_PACKAGES
+from .runtime_versions import (
+    NELUX_PACKAGE,
+    NUMBA_PACKAGE,
+    NUMBA_VERSION,
+    NUMPY_PACKAGE,
+    NUMPY_VERSION,
+    TORCH_PACKAGES,
+)
 
 
 FEATURE_REQUIREMENTS = {
@@ -19,7 +28,7 @@ FEATURE_REQUIREMENTS = {
     "clip_cpu": {
         "modules": [
             ("typing_extensions", "typing_extensions"),
-            ("numpy", "numpy"),
+            ("numpy", NUMPY_PACKAGE),
             # CPU scene detection runs PySceneDetect's ContentDetector, which
             # pulls in cv2 for its HSV frame scoring (0.7 lists opencv-python as
             # a core dep, so no [opencv] extra needed). <0.8 caps the API we
@@ -31,7 +40,7 @@ FEATURE_REQUIREMENTS = {
     "clip_gpu": {
         "modules": [
             ("typing_extensions", "typing_extensions"),
-            ("numpy", "numpy"),
+            ("numpy", NUMPY_PACKAGE),
             ("transnetv2_pytorch", "transnetv2-pytorch"),
             ("nelux", NELUX_PACKAGE),
         ],
@@ -40,7 +49,7 @@ FEATURE_REQUIREMENTS = {
     "bgremove_cpu": {
         "modules": [
             ("typing_extensions", "typing_extensions"),
-            ("numpy", "numpy"),
+            ("numpy", NUMPY_PACKAGE),
             # cv2 listed explicitly: processor.py needs it for video decode and
             # rembg >= 2.0.7x no longer depends on opencv itself.
             ("cv2", "opencv-python"),
@@ -51,7 +60,7 @@ FEATURE_REQUIREMENTS = {
     "bgremove_gpu": {
         "modules": [
             ("typing_extensions", "typing_extensions"),
-            ("numpy", "numpy"),
+            ("numpy", NUMPY_PACKAGE),
             ("cv2", "opencv-python"),
             ("rembg", "rembg[gpu]>=2.0.50"),
         ],
@@ -72,7 +81,8 @@ KNOWN_MODULE_PACKAGES = {
     "librosa": "librosa",
     "ml_collections": "ml_collections",
     "nelux": NELUX_PACKAGE,
-    "numpy": "numpy",
+    "numba": NUMBA_PACKAGE,
+    "numpy": NUMPY_PACKAGE,
     "onnx": "onnx-weekly",
     "onnxruntime": "onnxruntime",
     "packaging": "packaging",
@@ -109,6 +119,7 @@ AUDIO_RUNTIME_MODULES = [
     ("julius", "julius"),
     ("librosa", "librosa"),
     ("ml_collections", "ml_collections"),
+    ("numba", NUMBA_PACKAGE),
     ("onnx", "onnx-weekly"),
     ("yaml", "pyyaml"),
     ("requests", "requests"),
@@ -271,6 +282,104 @@ def _summarize_command_error(output_lines, code):
     return lines[-1] if lines else f"Command failed with exit code {code}"
 
 
+def _numeric_runtime_probe_error():
+    """Return why the loaded NumPy/Numba pair is unusable, or None.
+
+    This must run outside the current process. If the probe finds a broken
+    NumPy build, pip needs to replace its files; importing NumPy here would
+    keep native modules loaded while that replacement happens on Windows.
+    """
+    probe = (
+        "import numpy\n"
+        f"assert numpy.__version__ == {NUMPY_VERSION!r}, "
+        "f'Expected NumPy " + NUMPY_VERSION + ", loaded {numpy.__version__}'\n"
+        "import numba\n"
+        f"assert numba.__version__ == {NUMBA_VERSION!r}, "
+        "f'Expected Numba " + NUMBA_VERSION + ", loaded {numba.__version__}'\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        return str(error)
+    if result.returncode == 0:
+        return None
+    lines = [
+        line.strip()
+        for line in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
+        if line.strip()
+    ]
+    return lines[-1] if lines else "NumPy and Numba could not load together"
+
+
+def _numeric_runtime_ready():
+    return _numeric_runtime_probe_error() is None
+
+
+def _site_packages_dir():
+    # The app's embeddable Python is the environment. Never consult PATH or a
+    # user/system site directory when cleaning its package records.
+    return Path(sys.executable).resolve().parent / "Lib" / "site-packages"
+
+
+def _prune_stale_numeric_metadata():
+    """Remove only obsolete NumPy/Numba version records after a good probe."""
+    if not _numeric_runtime_ready():
+        return []
+
+    site_packages = _site_packages_dir()
+    if not site_packages.is_dir():
+        return []
+
+    removed = []
+    expected = {
+        "numpy": f"numpy-{NUMPY_VERSION}.dist-info".lower(),
+        "numba": f"numba-{NUMBA_VERSION}.dist-info".lower(),
+    }
+    for package, expected_name in expected.items():
+        for candidate in site_packages.glob(f"{package}-*.dist-info"):
+            if not candidate.is_dir() or candidate.name.lower() == expected_name:
+                continue
+            try:
+                shutil.rmtree(candidate)
+            except OSError as error:
+                raise RuntimeError(
+                    f"The audio runtime is repaired, but the stale package record "
+                    f"{candidate.name} could not be removed: {error}"
+                ) from error
+            removed.append(candidate.name)
+    if removed:
+        add_log(
+            "deps.numeric_metadata.pruned",
+            "Removed stale numeric package records",
+            details={"removed": removed},
+        )
+    return removed
+
+
+def _repair_numeric_runtime(progress_callback=None):
+    _run_pip_install(
+        [
+            "--upgrade",
+            "--force-reinstall",
+            NUMPY_PACKAGE,
+            NUMBA_PACKAGE,
+        ],
+        progress_callback,
+    )
+    error = _numeric_runtime_probe_error()
+    if error:
+        raise RuntimeError(
+            "NumPy and Numba were reinstalled, but audio processing still cannot start. "
+            f"Last load error: {error}"
+        )
+    _prune_stale_numeric_metadata()
+
+
 def _torch_import_error():
     try:
         import torch
@@ -378,6 +487,8 @@ def missing_feature_dependencies(feature, gpu=False):
             missing.append(("onnxruntime", "onnxruntime-gpu" if gpu else "onnxruntime"))
         if not _torch_ready(gpu):
             missing.append(("torch", "torch CUDA" if gpu else "torch CPU"))
+        if not _numeric_runtime_ready():
+            missing.append(("numeric_runtime", f"{NUMPY_PACKAGE} + {NUMBA_PACKAGE}"))
     elif feature == "clip_gpu":
         if not _torch_ready(True):
             missing.append(("torch", "torch CUDA"))
@@ -394,6 +505,11 @@ def missing_feature_dependencies(feature, gpu=False):
 def ensure_feature_dependencies(feature, gpu=False, progress_callback=None):
     missing = missing_feature_dependencies(feature, gpu=gpu)
     if not missing:
+        if feature == "audio":
+            # A fixed update can restore the correct module files while stale
+            # dist-info records from the broken update remain. Remove those
+            # records before pip has another chance to trust them.
+            _prune_stale_numeric_metadata()
         return False
 
     labels = [package for _module, package in missing]
@@ -413,12 +529,20 @@ def ensure_feature_dependencies(feature, gpu=False, progress_callback=None):
 
     pip_packages = []
     for module_name, package_name in missing:
-        if module_name in {"torch", "onnxruntime"}:
+        if module_name in {"torch", "onnxruntime", "numeric_runtime"}:
             continue
         if package_name not in pip_packages:
             pip_packages.append(package_name)
     if pip_packages:
         _run_pip_install(pip_packages, progress_callback)
+
+    if feature == "audio" and not _numeric_runtime_ready():
+        # Re-check after every other installation. A transitive dependency
+        # must not be allowed to replace the verified pair mid-repair.
+        _repair_numeric_runtime(progress_callback)
+
+    if feature == "audio":
+        _prune_stale_numeric_metadata()
 
     remaining = missing_feature_dependencies(feature, gpu=gpu)
     if remaining:

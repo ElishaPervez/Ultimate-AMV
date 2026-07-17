@@ -5,7 +5,11 @@ import importlib.util
 
 from .config import load_config, save_config
 from .gpu import check_nvidia_gpu, get_cpu_switch_cmds, get_gpu_switch_cmds
-from .dependencies import AUDIO_RUNTIME_MODULES
+from .dependencies import (
+    AUDIO_RUNTIME_MODULES,
+    _numeric_runtime_ready,
+    _prune_stale_numeric_metadata,
+)
 from .hardware import refresh_hardware
 from .logs import add_log, append_terminal_log
 from .runtime_versions import TORCH_VERSION
@@ -143,6 +147,7 @@ def _collect_gpu_plan():
     typing_extensions = _check_package("typing_extensions")
     pydub = _check_package("pydub")
     missing_audio_runtime = _missing_audio_runtime_modules()
+    numeric_runtime = _numeric_runtime_ready()
     ort_cpu = _check_package("onnxruntime")
     ort_gpu = _check_package("onnxruntime-gpu")
     nelux_installed = _check_package("nelux")
@@ -161,11 +166,12 @@ def _collect_gpu_plan():
     rows.append({"component": "Nelux", "status": "Installed" if nelux else (nelux_failure_status if nelux_broken_binaries else "Needs install")})
     rows.append({"component": "audio-separator", "status": "Installed" if audio_separator else "Needs install"})
     rows.append({"component": "Audio runtime deps", "status": "Installed" if not missing_audio_runtime else f"Missing {len(missing_audio_runtime)}"})
+    rows.append({"component": "NumPy / Numba", "status": "Installed" if numeric_runtime else "Needs repair"})
     rows.append({"component": "typing_extensions", "status": "Installed" if typing_extensions else "Needs install"})
     rows.append({"component": "pydub", "status": "Installed" if pydub else "Needs install"})
     rows.append({"component": "CPU Runtime", "status": "Installed (will remove)" if ort_cpu else "Not installed"})
 
-    ready = bool(gpu_name) and installed_mode == "gpu" and ort_gpu and nelux and audio_separator and typing_extensions and pydub and not missing_audio_runtime and not ort_cpu
+    ready = bool(gpu_name) and installed_mode == "gpu" and ort_gpu and nelux and audio_separator and typing_extensions and pydub and not missing_audio_runtime and numeric_runtime and not ort_cpu
     if ready:
         return {"mode": "gpu", "rows": rows, "issues": [], "installs": [], "success_mode": "gpu", "gpu_name": gpu_name}
 
@@ -178,6 +184,8 @@ def _collect_gpu_plan():
         issues.append("Install PyTorch with CUDA 12.8")
     if install_audio_separator:
         issues.append("Install audio-separator[gpu], typing_extensions, and pydub")
+    if not numeric_runtime:
+        issues.append("Repair the NumPy/Numba audio runtime")
     if nelux_broken_binaries:
         issues.append(nelux_repair_issue)
     if ort_cpu:
@@ -192,6 +200,7 @@ def _collect_gpu_plan():
             cleanup_cpu_runtime=ort_cpu,
             install_audio_separator=install_audio_separator,
             force_reinstall_nelux=nelux_broken_binaries,
+            repair_numeric_runtime=not numeric_runtime,
         ),
         "success_mode": None,
         "gpu_name": gpu_name,
@@ -207,6 +216,7 @@ def _collect_cpu_plan():
     typing_extensions = _check_package("typing_extensions")
     pydub = _check_package("pydub")
     missing_audio_runtime = _missing_audio_runtime_modules()
+    numeric_runtime = _numeric_runtime_ready()
     ort_cpu = _check_package("onnxruntime")
     ort_gpu = _check_package("onnxruntime-gpu")
 
@@ -216,11 +226,12 @@ def _collect_cpu_plan():
     rows.append({"component": "ONNX Runtime", "status": "Installed" if ort_cpu else "Needs install"})
     rows.append({"component": "audio-separator", "status": "Installed" if audio_separator else "Needs install"})
     rows.append({"component": "Audio runtime deps", "status": "Installed" if not missing_audio_runtime else f"Missing {len(missing_audio_runtime)}"})
+    rows.append({"component": "NumPy / Numba", "status": "Installed" if numeric_runtime else "Needs repair"})
     rows.append({"component": "typing_extensions", "status": "Installed" if typing_extensions else "Needs install"})
     rows.append({"component": "pydub", "status": "Installed" if pydub else "Needs install"})
     rows.append({"component": "GPU Runtime", "status": "Installed (will remove)" if ort_gpu else "Not installed"})
 
-    ready = installed_mode == "cpu" and ort_cpu and audio_separator and typing_extensions and pydub and not missing_audio_runtime and not ort_gpu
+    ready = installed_mode == "cpu" and ort_cpu and audio_separator and typing_extensions and pydub and not missing_audio_runtime and numeric_runtime and not ort_gpu
     if ready:
         return {"mode": "cpu", "rows": rows, "issues": [], "installs": [], "success_mode": "cpu", "gpu_name": None}
 
@@ -231,6 +242,8 @@ def _collect_cpu_plan():
         issues.append("Install onnxruntime")
     if not audio_separator or not typing_extensions or not pydub or missing_audio_runtime:
         issues.append("Install audio-separator, typing_extensions, and pydub")
+    if not numeric_runtime:
+        issues.append("Repair the NumPy/Numba audio runtime")
     if ort_gpu:
         issues.append("Remove GPU ONNX Runtime")
 
@@ -243,6 +256,7 @@ def _collect_cpu_plan():
             cleanup_gpu_runtime=ort_gpu,
             install_onnxruntime=not ort_cpu,
             install_audio_separator=not audio_separator or not typing_extensions or not pydub or bool(missing_audio_runtime),
+            repair_numeric_runtime=not numeric_runtime,
         ),
         "success_mode": None,
         "gpu_name": None,
@@ -306,6 +320,7 @@ def install_setup(mode, progress_callback):
     plan = collect_setup_plan(mode)
     installs = plan["installs"]
     if not installs:
+        _prune_stale_numeric_metadata()
         apply_success_mode(mode)
         return {"ok": True, "mode": mode, "plan": plan}
 
@@ -322,6 +337,7 @@ def install_setup(mode, progress_callback):
         progress_callback(index, total, "done", f"Step {index}/{total} complete")
         add_log("audio.setup.step.complete", f"Setup step {index}/{total} complete", details={"mode": mode})
 
+    _prune_stale_numeric_metadata()
     apply_success_mode(mode)
     return {"ok": True, "mode": mode, "plan": collect_setup_plan(mode)}
 

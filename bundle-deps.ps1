@@ -4,7 +4,7 @@
 #
 # What this installs (overlapping essentials for both CPU/GPU modes):
 #   pip             - bootstraps the environment
-#   numpy           - core math for everything
+#   numpy 2.4.4     - core math; pinned below 2.5 for Numba 0.65.1
 #   pydub           - core audio for everything
 #   pillow          - core image handling for thumbnails
 #   tqdm            - progress bars for CLI tools
@@ -49,8 +49,11 @@ Write-Host "Upgrading pip..."
 if ($LASTEXITCODE -ne 0) { Write-Error "pip self-upgrade failed (exit $LASTEXITCODE)" }
 
 Write-Host "Installing overlapping core dependencies..."
-& $python -I -m pip install numpy pydub pillow tqdm typing_extensions
+& $python -I -m pip install "numpy==2.4.4" pydub pillow tqdm typing_extensions
 if ($LASTEXITCODE -ne 0) { Write-Error "dependency install failed (exit $LASTEXITCODE)" }
+
+& $python -I -c "import numpy; assert numpy.__version__ == '2.4.4', f'Expected NumPy 2.4.4, loaded {numpy.__version__}'"
+if ($LASTEXITCODE -ne 0) { Write-Error "NumPy runtime verification failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
 Write-Host "Done. python/Lib/site-packages/ is populated with THIN bundle and ready."

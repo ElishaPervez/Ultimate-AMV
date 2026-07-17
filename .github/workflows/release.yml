@@ -44,6 +44,11 @@ jobs:
         shell: pwsh
         run: ./bundle-deps.ps1
 
+      - name: Verify pinned numeric runtime
+        shell: pwsh
+        run: |
+          ./python/python.exe -I -c "import numpy; assert numpy.__version__ == '2.4.4', f'Expected NumPy 2.4.4, loaded {numpy.__version__}'"
+
       # ── Tools manifest sanity check ───────────────────────────────────────
       # tools/ is no longer bundled into the installer. The app downloads
       # ffmpeg/ffprobe/yt-dlp on first launch into a per-user cache,

@@ -152,7 +152,8 @@ def test_installed_torch_mode_missing_returns_missing(mocker):
 def _patch_setup_checks(mocker, *, nvidia=True, installed_mode="gpu", ort_gpu=True,
                          ort_cpu=False, audio_sep=True, typing_ext=True,
                          pydub=True, missing_audio_rt=None,
-                         nelux_installed=True, nelux_importable=True):
+                         nelux_installed=True, nelux_importable=True,
+                         numeric_runtime=True):
     missing_audio_rt = missing_audio_rt or []
     mocker.patch("amv_audio.setup.check_nvidia_gpu", return_value="RTX 4090" if nvidia else None)
     mocker.patch("amv_audio.setup._installed_torch_mode", return_value=(installed_mode, "2.3.0+cu128", installed_mode == "gpu"))
@@ -166,6 +167,7 @@ def _patch_setup_checks(mocker, *, nvidia=True, installed_mode="gpu", ort_gpu=Tr
     }.get(pkg, False))
     mocker.patch("amv_audio.setup._missing_audio_runtime_modules", return_value=missing_audio_rt)
     mocker.patch("amv_audio.setup._nelux_importable", return_value=nelux_importable)
+    mocker.patch("amv_audio.setup._numeric_runtime_ready", return_value=numeric_runtime)
 
 
 def test_collect_gpu_plan_has_required_keys(mocker):
@@ -201,6 +203,18 @@ def test_collect_gpu_plan_reports_wrong_torch_mode(mocker):
     assert any("PyTorch" in issue or "CUDA" in issue for issue in plan["issues"])
 
 
+def test_collect_gpu_plan_repairs_incompatible_numeric_runtime(mocker):
+    m = _get_setup()
+    _patch_setup_checks(mocker, numeric_runtime=False)
+
+    plan = m.collect_setup_plan("gpu")
+
+    assert any("NumPy/Numba" in issue for issue in plan["issues"])
+    assert "--force-reinstall" in plan["installs"][-1]
+    assert "numpy==2.4.4" in plan["installs"][-1]
+    assert "numba==0.65.1" in plan["installs"][-1]
+
+
 def test_collect_cpu_plan_has_required_keys(mocker):
     m = _get_setup()
     _patch_setup_checks(mocker, installed_mode="cpu", ort_cpu=True, ort_gpu=False)
@@ -224,6 +238,22 @@ def test_collect_cpu_plan_reports_gpu_runtime_present(mocker):
     _patch_setup_checks(mocker, installed_mode="cpu", ort_cpu=True, ort_gpu=True)
     plan = m.collect_setup_plan("cpu")
     assert any("GPU" in issue or "onnxruntime" in issue.lower() for issue in plan["issues"])
+
+
+def test_collect_cpu_plan_repairs_incompatible_numeric_runtime(mocker):
+    m = _get_setup()
+    _patch_setup_checks(
+        mocker,
+        installed_mode="cpu",
+        ort_cpu=True,
+        ort_gpu=False,
+        numeric_runtime=False,
+    )
+
+    plan = m.collect_setup_plan("cpu")
+
+    assert any("NumPy/Numba" in issue for issue in plan["issues"])
+    assert "--force-reinstall" in plan["installs"][-1]
 
 
 def test_collect_plan_raises_for_invalid_mode():

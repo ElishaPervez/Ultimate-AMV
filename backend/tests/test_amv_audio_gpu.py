@@ -23,6 +23,7 @@ from amv_audio.gpu import (
     get_torch_install_cmd,
     get_gpu_switch_cmds,
     get_cpu_switch_cmds,
+    get_numeric_runtime_repair_cmd,
     TORCH_PACKAGES,
 )
 
@@ -156,6 +157,20 @@ def test_gpu_setup_pins_the_verified_torch_and_nelux_pair():
     assert "nelux" not in flat
 
 
+def test_gpu_and_cpu_audio_setup_pin_the_verified_numeric_pair():
+    for commands in (get_gpu_switch_cmds(), get_cpu_switch_cmds()):
+        flat = [item for command in commands for item in command]
+        assert "numpy==2.4.4" in flat
+        assert "numba==0.65.1" in flat
+
+
+def test_numeric_runtime_repair_command_cannot_short_circuit_on_stale_metadata():
+    command = get_numeric_runtime_repair_cmd()
+    assert "--force-reinstall" in command
+    assert "numpy==2.4.4" in command
+    assert "numba==0.65.1" in command
+
+
 def test_get_gpu_switch_cmds_uninstalls_onnxruntime_cpu_not_gpu():
     """GPU switch pre-uninstalls onnxruntime (CPU runtime), not onnxruntime-gpu."""
     cmds = get_gpu_switch_cmds(cleanup_cpu_runtime=True)
@@ -178,6 +193,11 @@ def test_get_gpu_switch_cmds_force_reinstall_nelux():
     nelux_reinstall = [s for s in flat if "nelux" in s and "--force-reinstall" in s]
     assert nelux_reinstall, "force_reinstall_nelux=True must produce a nelux force-reinstall command"
     assert all("nelux==0.11.0" in command.split() for command in nelux_reinstall)
+
+
+def test_get_gpu_switch_cmds_repairs_numeric_runtime_last():
+    commands = get_gpu_switch_cmds(repair_numeric_runtime=True)
+    assert commands[-1] == get_numeric_runtime_repair_cmd()
 
 
 # ---------------------------------------------------------------------------
@@ -215,3 +235,8 @@ def test_get_cpu_switch_cmds_torch_uses_cpu_index_url():
     torch_cmds = [s for s in flat if "torch" in s and "index-url" in s]
     assert torch_cmds
     assert all("cpu" in s for s in torch_cmds)
+
+
+def test_get_cpu_switch_cmds_repairs_numeric_runtime_last():
+    commands = get_cpu_switch_cmds(repair_numeric_runtime=True)
+    assert commands[-1] == get_numeric_runtime_repair_cmd()

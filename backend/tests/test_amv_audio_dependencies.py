@@ -126,6 +126,7 @@ def test_missing_feature_dependencies_audio_includes_torch_check(mocker):
     mocker.patch("amv_audio.dependencies._audio_runtime_missing", return_value=False)
     mocker.patch("amv_audio.dependencies._runtime_ready", return_value=True)
     mocker.patch("amv_audio.dependencies._torch_ready", return_value=False)
+    mocker.patch("amv_audio.dependencies._numeric_runtime_ready", return_value=True)
     result = deps_mod.missing_feature_dependencies("audio", gpu=False)
     module_names = [m for m, _p in result]
     assert "torch" in module_names
@@ -136,6 +137,7 @@ def test_missing_feature_dependencies_audio_empty_when_everything_ready(mocker):
     mocker.patch("amv_audio.dependencies._audio_runtime_missing", return_value=False)
     mocker.patch("amv_audio.dependencies._runtime_ready", return_value=True)
     mocker.patch("amv_audio.dependencies._torch_ready", return_value=True)
+    mocker.patch("amv_audio.dependencies._numeric_runtime_ready", return_value=True)
     result = deps_mod.missing_feature_dependencies("audio", gpu=False)
     assert result == []
 
@@ -296,3 +298,106 @@ def test_known_module_packages_has_nelux():
 
 def test_known_module_packages_has_numpy():
     assert "numpy" in deps_mod.KNOWN_MODULE_PACKAGES
+    assert deps_mod.KNOWN_MODULE_PACKAGES["numpy"] == "numpy==2.4.4"
+
+
+def test_known_module_packages_has_numba_pin():
+    assert deps_mod.KNOWN_MODULE_PACKAGES["numba"] == "numba==0.65.1"
+
+
+# ---------------------------------------------------------------------------
+# NumPy/Numba compatibility — do not trust stale dist-info metadata
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_runtime_probe_accepts_the_verified_pair(mocker):
+    mocker.patch(
+        "amv_audio.dependencies.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="", stderr=""),
+    )
+    assert deps_mod._numeric_runtime_probe_error() is None
+
+
+def test_numeric_runtime_probe_returns_the_loaded_version_failure(mocker):
+    mocker.patch(
+        "amv_audio.dependencies.subprocess.run",
+        return_value=MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="ImportError: Numba needs NumPy 2.4 or less. Got NumPy 2.5.\n",
+        ),
+    )
+    assert deps_mod._numeric_runtime_probe_error().endswith("Got NumPy 2.5.")
+
+
+def test_audio_dependencies_flag_incompatible_numeric_runtime(mocker):
+    mocker.patch("amv_audio.dependencies._module_exists", return_value=True)
+    mocker.patch("amv_audio.dependencies._audio_runtime_missing", return_value=False)
+    mocker.patch("amv_audio.dependencies._runtime_ready", return_value=True)
+    mocker.patch("amv_audio.dependencies._torch_ready", return_value=True)
+    mocker.patch("amv_audio.dependencies._numeric_runtime_ready", return_value=False)
+
+    result = deps_mod.missing_feature_dependencies("audio", gpu=True)
+
+    assert ("numeric_runtime", "numpy==2.4.4 + numba==0.65.1") in result
+
+
+def test_numeric_runtime_repair_force_reinstalls_the_verified_pair(mocker):
+    pip_install = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mocker.patch("amv_audio.dependencies._numeric_runtime_probe_error", return_value=None)
+    mocker.patch("amv_audio.dependencies._prune_stale_numeric_metadata")
+
+    deps_mod._repair_numeric_runtime()
+
+    assert pip_install.call_args[0][0] == [
+        "--upgrade",
+        "--force-reinstall",
+        "numpy==2.4.4",
+        "numba==0.65.1",
+    ]
+
+
+def test_ensure_audio_dependencies_routes_collision_to_numeric_repair(mocker):
+    missing = [("numeric_runtime", "numpy==2.4.4 + numba==0.65.1")]
+    mocker.patch(
+        "amv_audio.dependencies.missing_feature_dependencies",
+        side_effect=[missing, []],
+    )
+    repair = mocker.patch("amv_audio.dependencies._repair_numeric_runtime")
+    mocker.patch("amv_audio.dependencies._numeric_runtime_ready", return_value=False)
+    normal_install = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mocker.patch("amv_audio.dependencies._prune_stale_numeric_metadata")
+    mocker.patch("amv_audio.dependencies.add_log")
+
+    assert deps_mod.ensure_feature_dependencies("audio", gpu=True) is True
+
+    repair.assert_called_once_with(None)
+    normal_install.assert_not_called()
+
+
+def test_prune_stale_numeric_metadata_keeps_only_verified_records(mocker, tmp_path):
+    site_packages = tmp_path / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    for name in (
+        "numpy-2.4.4.dist-info",
+        "numpy-2.5.1.dist-info",
+        "numpy-2.4.6.dist-info",
+        "numba-0.65.1.dist-info",
+        "numba-0.64.0.dist-info",
+        "unrelated-1.0.dist-info",
+    ):
+        (site_packages / name).mkdir()
+    mocker.patch("amv_audio.dependencies._numeric_runtime_ready", return_value=True)
+    mocker.patch("amv_audio.dependencies._site_packages_dir", return_value=site_packages)
+    mocker.patch("amv_audio.dependencies.add_log")
+
+    removed = deps_mod._prune_stale_numeric_metadata()
+
+    assert set(removed) == {
+        "numpy-2.5.1.dist-info",
+        "numpy-2.4.6.dist-info",
+        "numba-0.64.0.dist-info",
+    }
+    assert (site_packages / "numpy-2.4.4.dist-info").is_dir()
+    assert (site_packages / "numba-0.65.1.dist-info").is_dir()
+    assert (site_packages / "unrelated-1.0.dist-info").is_dir()

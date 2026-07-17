@@ -1,4 +1,9 @@
-"""Pinned native runtime versions that must be upgraded as one tested pair."""
+"""Pinned native runtime versions that must be upgraded as tested sets."""
+
+NUMPY_VERSION = "2.4.4"
+NUMPY_PACKAGE = f"numpy=={NUMPY_VERSION}"
+NUMBA_VERSION = "0.65.1"
+NUMBA_PACKAGE = f"numba=={NUMBA_VERSION}"
 
 TORCH_VERSION = "2.11.0"
 TORCH_PACKAGES = [

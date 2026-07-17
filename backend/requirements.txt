@@ -1,6 +1,7 @@
 audio-separator>=0.40.0
 pydub>=0.25.1
-numpy>=1.26.0
+numpy==2.4.4
+numba==0.65.1
 typing_extensions>=4.0.0
 transnetv2-pytorch
 scenedetect>=0.6.7,<0.8
