@@ -41,11 +41,17 @@ pub struct ToolBinary {
     pub name: String,
     pub url: String,
     pub sha256: String,
+    #[serde(default = "startup_default")]
+    pub startup: bool,
     #[serde(default)]
     #[allow(dead_code)]
     pub size: Option<u64>,
     #[serde(flatten)]
     pub kind: BinaryKind,
+}
+
+fn startup_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +191,7 @@ pub fn tools_status(app: AppHandle) -> Result<ToolsStatus, String> {
     let binaries: Vec<BinaryStatus> = manifest
         .binaries
         .iter()
+        .filter(|binary| binary.startup)
         .map(|binary| binary_status(&dir, binary))
         .collect();
     let ok = binaries.iter().all(|b| b.present);
@@ -195,8 +202,8 @@ pub fn tools_status(app: AppHandle) -> Result<ToolsStatus, String> {
     })
 }
 
-fn emit_progress(window: &Window, payload: Value) {
-    let _ = window.emit("tools-progress", payload);
+fn emit_progress_to(window: &Window, event: &str, payload: Value) {
+    let _ = window.emit(event, payload);
 }
 
 fn cleanup_partial(path: &Path) {
@@ -205,8 +212,9 @@ fn cleanup_partial(path: &Path) {
     }
 }
 
-async fn download_with_progress(
+async fn download_with_progress_to(
     window: &Window,
+    progress_event: &str,
     binary_name: &str,
     url: &str,
     dest: &Path,
@@ -241,8 +249,9 @@ async fn download_with_progress(
     let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
 
-    emit_progress(
+    emit_progress_to(
         window,
+        progress_event,
         json!({
             "type": "download-start",
             "binary": binary_name,
@@ -267,8 +276,9 @@ async fn download_with_progress(
 
         if last_emit.elapsed().as_millis() >= 100 {
             last_emit = Instant::now();
-            emit_progress(
+            emit_progress_to(
                 window,
+                progress_event,
                 json!({
                     "type": "download-progress",
                     "binary": binary_name,
@@ -282,8 +292,9 @@ async fn download_with_progress(
     file.flush().ok();
     drop(file);
 
-    emit_progress(
+    emit_progress_to(
         window,
+        progress_event,
         json!({
             "type": "download-progress",
             "binary": binary_name,
@@ -291,8 +302,9 @@ async fn download_with_progress(
             "totalBytes": total.or(Some(downloaded)),
         }),
     );
-    emit_progress(
+    emit_progress_to(
         window,
+        progress_event,
         json!({
             "type": "download-complete",
             "binary": binary_name,
@@ -497,12 +509,38 @@ fn install_binary(
     }
 }
 
-#[tauri::command]
-pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String> {
+async fn install_tools(
+    app: &AppHandle,
+    window: &Window,
+    requested_names: Option<&[&str]>,
+    progress_event: &str,
+) -> Result<(), String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
-    let manifest = load_manifest(&app)?;
-    let dir = tools_dir(&app)?;
+    let manifest = load_manifest(app)?;
+    let selected: Vec<&ToolBinary> = manifest
+        .binaries
+        .iter()
+        .filter(|binary| {
+            requested_names
+                .map(|names| names.iter().any(|name| *name == binary.name))
+                .unwrap_or(binary.startup)
+        })
+        .collect();
+    if let Some(names) = requested_names {
+        let missing_names: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| !selected.iter().any(|binary| binary.name == *name))
+            .collect();
+        if !missing_names.is_empty() {
+            return Err(format!(
+                "Unknown optional tools requested: {}",
+                missing_names.join(", ")
+            ));
+        }
+    }
+    let dir = tools_dir(app)?;
     fs::create_dir_all(&dir)
         .map_err(|error| format!("Could not create tools dir: {error}"))?;
 
@@ -511,15 +549,16 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
         "Starting tools install",
         json!({
             "tools_dir": dir.display().to_string(),
-            "binary_count": manifest.binaries.len(),
+            "binary_count": selected.len(),
         }),
     );
 
-    emit_progress(
-        &window,
+    emit_progress_to(
+        window,
+        progress_event,
         json!({
             "type": "install-start",
-            "binaries": manifest.binaries.iter().map(|b| &b.name).collect::<Vec<_>>(),
+            "binaries": selected.iter().map(|b| &b.name).collect::<Vec<_>>(),
         }),
     );
 
@@ -527,7 +566,7 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
     fs::create_dir_all(&download_root)
         .map_err(|error| format!("Could not create download cache: {error}"))?;
 
-    for binary in &manifest.binaries {
+    for binary in selected {
         let status = binary_status(&dir, binary);
         if status.present {
             log_info(
@@ -535,8 +574,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
                 "Binary already present, skipping",
                 json!({ "binary": binary.name }),
             );
-            emit_progress(
-                &window,
+            emit_progress_to(
+                window,
+                progress_event,
                 json!({
                     "type": "binary-skip",
                     "binary": binary.name,
@@ -545,8 +585,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
             continue;
         }
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "binary-start",
                 "binary": binary.name,
@@ -566,10 +607,18 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
                 .unwrap_or("download")
         ));
 
-        download_with_progress(&window, &binary.name, &binary.url, &download_path).await?;
+        download_with_progress_to(
+            window,
+            progress_event,
+            &binary.name,
+            &binary.url,
+            &download_path,
+        )
+        .await?;
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "verify-start",
                 "binary": binary.name,
@@ -585,8 +634,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
             return Err(format!("{}: {}", binary.name, error));
         }
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "install-step",
                 "binary": binary.name,
@@ -614,8 +664,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
             ));
         }
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "binary-done",
                 "binary": binary.name,
@@ -630,13 +681,28 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
         "Tools install completed",
         json!({ "tools_dir": dir.display().to_string() }),
     );
-    emit_progress(
-        &window,
+    emit_progress_to(
+        window,
+        progress_event,
         json!({
             "type": "install-complete",
         }),
     );
     Ok(())
+}
+
+#[tauri::command]
+pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String> {
+    install_tools(&app, &window, None, "tools-progress").await
+}
+
+pub(crate) async fn install_named(
+    app: &AppHandle,
+    window: &Window,
+    names: &[&str],
+    progress_event: &str,
+) -> Result<(), String> {
+    install_tools(app, window, Some(names), progress_event).await
 }
 
 #[tauri::command]
@@ -646,6 +712,10 @@ pub fn tools_cancel() {
         "Tools install cancelled by user",
         Value::Null,
     );
+    CANCEL_FLAG.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn cancel_active_install() {
     CANCEL_FLAG.store(true, Ordering::SeqCst);
 }
 
@@ -691,6 +761,29 @@ mod tests {
             "**/bin/*.dll",
             "ffmpeg-8.1.1-full_build-shared/share/man/man1/ffmpeg.1.txt"
         ));
+    }
+
+    #[test]
+    fn startup_defaults_to_required_but_optional_models_can_opt_out() {
+        let required: ToolBinary = serde_json::from_value(json!({
+            "name": "ffmpeg",
+            "url": "https://example.invalid/ffmpeg.exe",
+            "sha256": "abc",
+            "kind": "single",
+            "dest": "ffmpeg.exe"
+        }))
+        .expect("required tool manifest entry");
+        let optional: ToolBinary = serde_json::from_value(json!({
+            "name": "rife-4.25",
+            "url": "https://example.invalid/rife.zip",
+            "sha256": "abc",
+            "startup": false,
+            "kind": "zip",
+            "extract": [{ "from": "**/flownet.pkl", "to": "models/rife425/flownet.pkl" }]
+        }))
+        .expect("optional tool manifest entry");
+        assert!(required.startup);
+        assert!(!optional.startup);
     }
 }
 

@@ -134,6 +134,10 @@ pub(crate) fn bgremove_cli_path(root: &Path) -> PathBuf {
     root.join("backend").join("bgremove_cli.py")
 }
 
+pub(crate) fn interpolate_cli_path(root: &Path) -> PathBuf {
+    root.join("backend").join("interpolate_cli.py")
+}
+
 /// Returns a copy of the bridge `args` safe to write to the on-disk log.
 /// `set-config <key> <value>` carries a secret value when `<key>` is sensitive
 /// (e.g. `tsukyio_api_key`), so mask that argument before it reaches the log
@@ -261,6 +265,59 @@ pub(crate) fn run_bgremove_cli(args: &[&str]) -> Result<String, String> {
         log_error(
             "bgremove.bridge.error",
             "Background removal bridge command failed",
+            json!({
+                "args": args,
+                "code": output.status.code(),
+                "stderr": truncate_log_text(&stderr),
+            }),
+        );
+        Err(stderr)
+    }
+}
+
+pub(crate) fn run_interpolate_cli(args: &[&str]) -> Result<String, String> {
+    let root = app_root()?;
+    log_info(
+        "interpolate.bridge.start",
+        "Starting frame interpolation bridge command",
+        json!({ "args": args }),
+    );
+    let mut command = cmd(python_exe(&root));
+    command
+        .arg("-I")
+        .arg(interpolate_cli_path(&root))
+        .args(args)
+        .current_dir(&root);
+    apply_python_env(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Python frame interpolation bridge: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        log_info(
+            "interpolate.bridge.complete",
+            "Frame interpolation bridge command completed",
+            json!({ "args": args }),
+        );
+        Ok(stdout)
+    } else if !stdout.is_empty() {
+        log_error(
+            "interpolate.bridge.error",
+            "Frame interpolation bridge command failed",
+            json!({
+                "args": args,
+                "code": output.status.code(),
+                "stdout": truncate_log_text(&stdout),
+                "stderr": truncate_log_text(&stderr),
+            }),
+        );
+        Err(stdout)
+    } else {
+        log_error(
+            "interpolate.bridge.error",
+            "Frame interpolation bridge command failed",
             json!({
                 "args": args,
                 "code": output.status.code(),
