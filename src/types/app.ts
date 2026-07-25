@@ -46,6 +46,8 @@ export type AppConfig = {
    * by set_config (0/144/240/360/480/720/1080); threaded into the Rust proxy
    * commands as the `height` invoke arg (Rust never reads config.json). */
   scene_preview_height: number;
+  /** Playback multiplier for featherweight clip-grid tiles only. */
+  clip_preview_speed: number;
   tsukyio_api_key: string;
 };
 

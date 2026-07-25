@@ -34,6 +34,7 @@ function configJson(overrides: Record<string, unknown> = {}): string {
     audio_output_format: 'wav',
     clip_hover_preview: false,
     scene_preview_height: 240,
+    clip_preview_speed: 1,
     tsukyio_api_key: '',
     ...overrides,
   }

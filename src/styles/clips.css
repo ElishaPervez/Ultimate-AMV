@@ -217,6 +217,10 @@
   background: rgba(255, 255, 255, 0.035);
 }
 
+.clip-cols-control.is-disabled {
+  opacity: 0.52;
+}
+
 .clip-rate-control {
   display: grid;
   gap: 9px;

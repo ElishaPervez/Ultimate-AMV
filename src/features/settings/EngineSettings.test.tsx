@@ -35,6 +35,7 @@ const baseConfig: AppConfig = {
   clip_hover_preview: false,
   featherweight_previews: false,
   scene_preview_height: 240,
+  clip_preview_speed: 1,
   tsukyio_api_key: '',
 }
 

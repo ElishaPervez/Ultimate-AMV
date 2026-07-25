@@ -52,6 +52,109 @@ beforeAll(() => {
   })
 })
 
+describe('useOffsetLoop — playback speed', () => {
+  it('applies the requested speed when metadata loads', async () => {
+    const { useOffsetLoop } = await import('./useOffsetLoop')
+    const { video, ref } = makeVideo()
+
+    renderHook(() =>
+      useOffsetLoop(ref, {
+        startSec: 1,
+        endSec: 2,
+        active: true,
+        forceFallback: true,
+        rate: 2,
+      }),
+    )
+
+    act(() => {
+      video.dispatchEvent(new Event('loadedmetadata'))
+    })
+
+    expect(video.playbackRate).toBe(2)
+  })
+
+  it('changes speed in place without seeking back to the start', async () => {
+    const { useOffsetLoop } = await import('./useOffsetLoop')
+    const { video, ref } = makeVideo()
+
+    const { rerender } = renderHook(
+      ({ rate }) =>
+        useOffsetLoop(ref, {
+          startSec: 1,
+          endSec: 3,
+          active: true,
+          forceFallback: true,
+          rate,
+        }),
+      { initialProps: { rate: 1 } },
+    )
+
+    act(() => {
+      video.dispatchEvent(new Event('loadedmetadata'))
+    })
+    video.currentTime = 2.25
+
+    act(() => {
+      rerender({ rate: 1.5 })
+    })
+
+    expect(video.playbackRate).toBe(1.5)
+    expect(video.currentTime).toBe(2.25)
+  })
+
+  it('scales the fallback timer by playback speed', async () => {
+    vi.useFakeTimers()
+    const timeoutSpy = vi.spyOn(window, 'setTimeout')
+    const { useOffsetLoop } = await import('./useOffsetLoop')
+    const { video, ref } = makeVideo()
+
+    renderHook(() =>
+      useOffsetLoop(ref, {
+        startSec: 1,
+        endSec: 2,
+        active: true,
+        forceFallback: true,
+        rate: 0.5,
+      }),
+    )
+
+    act(() => {
+      video.dispatchEvent(new Event('loadedmetadata'))
+    })
+    video.currentTime = 1.6
+    act(() => {
+      video.dispatchEvent(new Event('timeupdate'))
+    })
+
+    expect(
+      timeoutSpy.mock.calls.some(
+        ([, delay]) => typeof delay === 'number' && Math.abs(delay - 800) < 0.01,
+      ),
+    ).toBe(true)
+  })
+
+  it('defaults to normal speed', async () => {
+    const { useOffsetLoop } = await import('./useOffsetLoop')
+    const { video, ref } = makeVideo()
+
+    renderHook(() =>
+      useOffsetLoop(ref, {
+        startSec: 1,
+        endSec: 2,
+        active: true,
+        forceFallback: true,
+      }),
+    )
+
+    act(() => {
+      video.dispatchEvent(new Event('loadedmetadata'))
+    })
+
+    expect(video.playbackRate).toBe(1)
+  })
+})
+
 /**
  * Build a real <video> element plus a ref to it, and capture the rVFC callback
  * the hook registers (when rVFC is present).
@@ -63,6 +166,7 @@ function makeVideo() {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.resetModules()
   // Wipe any rVFC stub a test installed so the next test starts clean.

@@ -431,6 +431,78 @@ describe('ClipExtractorPanel — hover-preview default is false', () => {
   })
 })
 
+describe('ClipExtractorPanel — grid preview speed', () => {
+  it('shows the saved speed with the full supported range', async () => {
+    installMinimalMocks()
+    render(<ClipExtractorPanel active={true} />)
+
+    const slider = await screen.findByRole('slider', { name: 'Grid preview playback speed' })
+    expect(slider).toHaveAttribute('min', '0.25')
+    expect(slider).toHaveAttribute('max', '4')
+    expect(slider).toHaveAttribute('step', '0.25')
+    expect(slider).toHaveValue('1')
+    expect(screen.getByText('1.0x')).toBeInTheDocument()
+  })
+
+  it('disables speed changes when lightweight previews are off', async () => {
+    mockInvoke('get_config', () =>
+      JSON.stringify({
+        clip_extraction_mode: 'cpu',
+        clip_hover_preview: false,
+        featherweight_previews: false,
+        clip_preview_speed: 1,
+      }),
+    )
+    mockInvoke('video_gpu_status', () =>
+      JSON.stringify({ hasHevcNvenc: false, hasH264Nvenc: false, hasAv1Nvenc: false }),
+    )
+    mockInvoke('discord_set_state', () => null)
+    render(<ClipExtractorPanel active={true} />)
+
+    const slider = await screen.findByRole('slider', { name: 'Grid preview playback speed' })
+    expect(slider).toBeDisabled()
+    expect(slider.closest('.clip-cols-control')).toHaveAttribute(
+      'title',
+      'Preview speed needs the featherweight preview engine. Turn it on in Settings.',
+    )
+  })
+
+  it('updates immediately and saves after the slider settles', async () => {
+    installMinimalMocks()
+    mockInvoke('set_config', () => null)
+    render(<ClipExtractorPanel active={true} />)
+    const slider = await screen.findByRole('slider', { name: 'Grid preview playback speed' })
+
+    fireEvent.change(slider, { target: { value: '2' } })
+
+    expect(screen.getByText('2.0x')).toBeInTheDocument()
+    await waitFor(
+      () => {
+        expect(mockInvokeFn).toHaveBeenCalledWith('set_config', {
+          key: 'clip_preview_speed',
+          value: '2',
+        })
+      },
+      { timeout: 600 },
+    )
+  })
+
+  it('reflects a speed change made in Settings', async () => {
+    installMinimalMocks()
+    render(<ClipExtractorPanel active={true} />)
+    await screen.findByRole('slider', { name: 'Grid preview playback speed' })
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('clip-preview-speed-changed', { detail: { speed: 1.75 } }),
+      )
+    })
+
+    expect(screen.getByRole('slider', { name: 'Grid preview playback speed' })).toHaveValue('1.75')
+    expect(screen.getByText('1.75x')).toBeInTheDocument()
+  })
+})
+
 // ─── hover-preview toggle ─────────────────────────────────────────────────────
 
 describe('ClipExtractorPanel — hover-preview toggle', () => {

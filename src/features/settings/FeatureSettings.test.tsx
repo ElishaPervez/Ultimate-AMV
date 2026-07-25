@@ -4,7 +4,7 @@
  */
 
 import React from 'react'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
 import { FeatureSettings } from './FeatureSettings'
@@ -35,6 +35,7 @@ const baseConfig: AppConfig = {
   clip_hover_preview: false,
   featherweight_previews: false,
   scene_preview_height: 240,
+  clip_preview_speed: 1,
   tsukyio_api_key: '',
 }
 
@@ -201,5 +202,49 @@ describe('FeatureSettings', () => {
     const option = screen.getByRole('option', { name: /720p/i })
     await user.click(option)
     expect(persistConfigField).toHaveBeenCalledWith('scene_preview_height', '720')
+  })
+
+  it('changing grid preview speed persists the new multiplier', () => {
+    const { persistConfigField } = renderFeatureSettings({
+      backendConfig: { ...baseConfig, featherweight_previews: true },
+    })
+    const speedSlider = screen
+      .getAllByLabelText('Grid preview speed')
+      .find((element) => element.getAttribute('type') === 'range')
+
+    fireEvent.change(speedSlider!, { target: { value: '2' } })
+
+    expect(persistConfigField).toHaveBeenCalledWith('clip_preview_speed', '2')
+  })
+
+  it('disables grid preview speed when lightweight previews are off', () => {
+    renderFeatureSettings({
+      backendConfig: { ...baseConfig, featherweight_previews: false },
+    })
+
+    for (const control of screen.getAllByLabelText('Grid preview speed')) {
+      expect(control).toBeDisabled()
+    }
+    expect(screen.getAllByText('Grid preview speed')[0].closest('.setting-row')).toHaveAttribute(
+      'title',
+      'Preview speed needs the featherweight preview engine. Turn it on in Settings.',
+    )
+  })
+
+  it('updates grid preview speed when the clip grid changes it', () => {
+    renderFeatureSettings({
+      backendConfig: { ...baseConfig, featherweight_previews: true },
+    })
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('clip-preview-speed-changed', { detail: { speed: 1.75 } }),
+      )
+    })
+
+    const speedNumber = screen
+      .getAllByLabelText('Grid preview speed')
+      .find((element) => element.getAttribute('type') === 'number')
+    expect(speedNumber).toHaveValue(1.75)
   })
 })

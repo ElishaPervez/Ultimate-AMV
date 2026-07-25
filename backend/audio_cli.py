@@ -105,6 +105,7 @@ def _config_payload(cfg):
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
         "featherweight_previews": bool(cfg.get("featherweight_previews", True)),
         "scene_preview_height": int(cfg.get("scene_preview_height", 240)),
+        "clip_preview_speed": float(cfg.get("clip_preview_speed", 1.0)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
     }
 
@@ -232,6 +233,13 @@ def set_config(key, value):
         cfg["clip_hover_preview"] = value.lower() == "true"
     elif key == "featherweight_previews":
         cfg["featherweight_previews"] = value.lower() == "true"
+    elif key == "clip_preview_speed":
+        try:
+            number = float(value)
+        except ValueError:
+            emit({"type": "error", "message": "clip_preview_speed must be a number"})
+            return 1
+        cfg["clip_preview_speed"] = max(0.25, min(4.0, number))
     elif key == "scene_preview_height":
         # Max preview-proxy height in px. 0 is the sentinel for the
         # "Source"/unlimited preset (Rust maps 0 -> None). Snap to the fixed

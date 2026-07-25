@@ -31,6 +31,7 @@ class TestSetConfig(unittest.TestCase):
             "clip_hover_preview": False,
             "featherweight_previews": True,
             "scene_preview_height": 240,
+            "clip_preview_speed": 1.0,
             "tsukyio_api_key": "",
         }
         payload.update(overrides)

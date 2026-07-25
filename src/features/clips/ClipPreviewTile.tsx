@@ -143,6 +143,7 @@ export function ClipPreviewTile({
   activationEpoch,
   clipHoverPreview,
   featherweightEnabled,
+  previewRate = 1,
   playbackPending = false,
   mayMountVideo = false,
   justMerged = false,
@@ -165,6 +166,8 @@ export function ClipPreviewTile({
   /* DEV TOOLS: featherweight flag (config-gated; prod default false). When off,
    * the tile renders byte-for-byte as before — pure WebP grid. */
   featherweightEnabled: boolean;
+  /** Playback speed for featherweight grid tiles. Legacy WebP previews ignore it. */
+  previewRate?: number;
   /* STEP D — GRACEFUL POSTER. featherweight only: true while a playback source
    * for this tile is genuinely being resolved/built (plan probe in flight or the
    * shared proxy still building). When false AND there's no playbackSrc, a merge
@@ -351,6 +354,7 @@ export function ClipPreviewTile({
              * byte-for-byte unchanged. */
             previewStart={clip.isContiguous ? clip.previewStart : undefined}
             previewEnd={clip.isContiguous ? clip.previewEnd : undefined}
+            rate={previewRate}
             onError={() => setVideoErrored(true)}
           />
         ) : useOffsetPlaylist && clip.playbackSrc ? (
@@ -363,6 +367,7 @@ export function ClipPreviewTile({
             metricId={clip.id}
             src={clip.playbackSrc}
             segments={clip.segments ?? []}
+            rate={previewRate}
             onError={() => setVideoErrored(true)}
           />
         ) : (
@@ -468,6 +473,7 @@ function OffsetVideoLayer({
   fps,
   previewStart,
   previewEnd,
+  rate,
   onError,
 }: {
   metricId: string;
@@ -481,6 +487,7 @@ function OffsetVideoLayer({
    * caller that passes neither behaves byte-for-byte as before — pure superset. */
   previewStart?: number;
   previewEnd?: number;
+  rate: number;
   onError: () => void;
 }) {
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
@@ -550,6 +557,7 @@ function OffsetVideoLayer({
     endSec,
     active: true,
     forceFallback: tunables.forceTimeupdateFallback,
+    rate,
     onProgress: handleProgress,
   });
 
@@ -610,6 +618,7 @@ function OffsetPlaylistLayer({
   metricId,
   src,
   segments,
+  rate,
   onError,
 }: {
   metricId: string;
@@ -617,6 +626,7 @@ function OffsetPlaylistLayer({
   /* The unified clip's stored segments. Only ones with a finite
    * [previewStart, previewEnd] window are played, in stored order. */
   segments: NonNullable<ClipPreviewItem["segments"]>;
+  rate: number;
   onError: () => void;
 }) {
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
@@ -711,6 +721,7 @@ function OffsetPlaylistLayer({
     segments: playlistSegments,
     active: true,
     forceFallback: tunables.forceTimeupdateFallback,
+    rate,
     onProgress: handleProgress,
   });
 

@@ -455,8 +455,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
    * below ever populate and the grid renders byte-for-byte as before.
    *  - playbackPlans:    sourcePath -> PlaybackPlan (probe once per distinct source).
    *  - sourceProxyPaths: sourcePath -> resolved proxy file path (proxy plans only).
-   * Mirrors the detectorProxies Record state pattern. */
+  * Mirrors the detectorProxies Record state pattern. */
   const [featherweightPreviews, setFeatherweightPreviews] = React.useState(false);
+  const [clipPreviewSpeed, setClipPreviewSpeed] = React.useState(1);
+  const previewSpeedSaveTimerRef = React.useRef(0);
   /* Max preview-proxy height (Settings "Preview quality"). 0 = Source/unlimited.
    * Threaded into clip_playback_plan + build_source_proxy as the `height` invoke
    * arg. kickProxyBuild is a []-deps useCallback that reads only refs, so mirror
@@ -620,6 +622,20 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return () => window.removeEventListener("scene-preview-height-changed", handler);
   }, []);
 
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const speed = (e as CustomEvent<{ speed: number }>).detail.speed;
+      setClipPreviewSpeed(clampNumber(speed, 0.25, 4));
+    };
+    window.addEventListener("clip-preview-speed-changed", handler);
+    return () => window.removeEventListener("clip-preview-speed-changed", handler);
+  }, []);
+
+  React.useEffect(
+    () => () => window.clearTimeout(previewSpeedSaveTimerRef.current),
+    [],
+  );
+
   async function refreshClipMode() {
     try {
       const raw = await invoke<string>("get_config");
@@ -630,6 +646,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
        * by the Settings toggle routes back to the classic WebP/scene_clip path. */
       setFeatherweightPreviews(payload.featherweight_previews ?? true);
       setScenePreviewHeight(payload.scene_preview_height ?? 240);
+      setClipPreviewSpeed(clampNumber(payload.clip_preview_speed ?? 1, 0.25, 4));
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
@@ -637,6 +654,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       // matching SceneViewerModal — a transient failure shouldn't silently
       // drop the grid back to the classic path.
       setFeatherweightPreviews(true);
+      setClipPreviewSpeed(1);
       setClipModeLoaded(true);
       logFrontend("error", "frontend.clip.config.error", "Could not load clip extraction mode", {
         error: safeLogValue(configError),
@@ -1604,6 +1622,21 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
     setGridCols(cols);
   }, [gridCols, scrollerEl, clipRows.length]);
+
+  const changeClipPreviewSpeed = React.useCallback((value: number) => {
+    const next = clampNumber(value, 0.25, 4);
+    setClipPreviewSpeed(next);
+    window.dispatchEvent(
+      new CustomEvent("clip-preview-speed-changed", { detail: { speed: next } }),
+    );
+    window.clearTimeout(previewSpeedSaveTimerRef.current);
+    previewSpeedSaveTimerRef.current = window.setTimeout(() => {
+      void invoke("set_config", {
+        key: "clip_preview_speed",
+        value: String(next),
+      });
+    }, 200);
+  }, []);
 
   /* DEV TOOLS: lazily probe a PlaybackPlan for each distinct source that has an
    * active visible tile (first preview interaction). One invoke per source. */
@@ -2933,6 +2966,47 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             </div>
           </div>
 
+          <div
+            className={`clip-cols-control ${featherweightPreviews ? "" : "is-disabled"}`}
+            title={
+              featherweightPreviews
+                ? undefined
+                : "Preview speed needs the featherweight preview engine. Turn it on in Settings."
+            }
+          >
+            <div className="clip-cols-label">
+              <span>Preview speed</span>
+              <strong>
+                {clipPreviewSpeed.toFixed(clipPreviewSpeed % 0.5 === 0 ? 1 : 2)}x
+              </strong>
+            </div>
+            <input
+              type="range"
+              className="clip-cols-slider"
+              min={0.25}
+              max={4}
+              step={0.25}
+              value={clipPreviewSpeed}
+              disabled={!featherweightPreviews}
+              onChange={(e) => changeClipPreviewSpeed(Number(e.currentTarget.value))}
+              aria-label="Grid preview playback speed"
+            />
+            <div className="clip-cols-ticks">
+              {[0.5, 1, 2].map((speed) => (
+                <button
+                  key={speed}
+                  type="button"
+                  className={`clip-cols-tick ${clipPreviewSpeed === speed ? "is-active" : ""}`}
+                  disabled={!featherweightPreviews}
+                  onClick={() => changeClipPreviewSpeed(speed)}
+                  aria-label={`${speed}x preview speed`}
+                >
+                  {speed}x
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="clip-cols-control">
             <div className="clip-cols-label">
               <span>Export Format</span>
@@ -3207,6 +3281,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     clipHoverPreview={hoverPlayOnly}
                     /* DEV TOOLS: featherweight gate */
                     featherweightEnabled={featherweightActive}
+                    previewRate={clipPreviewSpeed}
                     playbackPending={playbackPending}
                     /* DEV TOOLS: CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount gate.
                      * The panel's own scroll geometry is the SOLE authority for
