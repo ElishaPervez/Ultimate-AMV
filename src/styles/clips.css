@@ -236,6 +236,13 @@
   text-transform: uppercase;
 }
 
+.clip-rate-mode-help {
+  color: #83929d;
+  font-size: 9px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+
 .clip-rate-mode {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

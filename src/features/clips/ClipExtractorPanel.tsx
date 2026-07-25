@@ -379,8 +379,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([]);
   const [selectedClipIds, setSelectedClipIds] = React.useState<Set<string>>(() => new Set());
   const [exportFormat, setExportFormat] = React.useState<ClipExportFormat>("prores-lt");
-  const [h264RateMode, setH264RateMode] = React.useState<ClipExportRateMode>("quality");
-  const [h264BitrateMbps, setH264BitrateMbps] = React.useState(20);
+  const [rateMode, setRateMode] = React.useState<ClipExportRateMode>("quality");
+  const [exportBitrate, setExportBitrate] = React.useState<Record<ClipExportFormat, number>>({
+    "gpu-intra": 60,
+    "h264-nvenc": 20,
+    "h264-10bit-nvenc": 20,
+    "av1-nvenc": 8,
+    "h264-cpu": 20,
+    "h264-10bit-cpu": 20,
+    "hevc-cpu": 12,
+    "prores-lt": 20,
+    "prores-hq": 20,
+    "lossless-cut": 20,
+  });
   const [exportQuality, setExportQuality] = React.useState<Record<ClipExportFormat, number>>({
     "gpu-intra": 16,
     "h264-nvenc": 18,
@@ -1071,7 +1082,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, [exportOptions]);
   const selectedExportOption = exportOptions.find((option) => option.value === exportFormat);
   const qualitySpec = React.useMemo(() => clipQualitySpec(exportFormat), [exportFormat]);
-  const isH264TenBit = isH264TenBitFormat(exportFormat);
+  const supportsRateControl = formatSupportsRateControl(exportFormat);
+
+  React.useEffect(() => {
+    if (!supportsRateControl) {
+      setRateMode("quality");
+    }
+  }, [supportsRateControl]);
 
   React.useEffect(() => {
     if (!qualitySpec) return;
@@ -2598,9 +2615,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let cancelled = false;
     let failed = false;
     let firstError: string | null = null;
-    const rateMode = isH264TenBit ? h264RateMode : null;
-    const bitrateMbps = isH264TenBit && h264RateMode !== "quality" ? h264BitrateMbps : null;
-    const qualityValue = qualitySpec && (!isH264TenBit || h264RateMode === "quality")
+    const supportsRc = formatSupportsRateControl(exportFormat);
+    const rateModeArg = supportsRc ? rateMode : null;
+    const bitrateMbps = supportsRc && rateMode !== "quality"
+      ? (exportBitrate[exportFormat] ?? clipBitrateDefault(exportFormat))
+      : null;
+    const qualityValue = qualitySpec && rateMode === "quality"
       ? exportQuality[exportFormat]
       : null;
 
@@ -2634,7 +2654,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               outputDir: outDir,
               preset: exportFormat,
               qualityValue,
-              rateMode,
+              rateMode: rateModeArg,
               bitrateMbps,
             });
           } else {
@@ -2651,7 +2671,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             outputDir: outDir,
             preset: exportFormat,
             qualityValue,
-            rateMode,
+            rateMode: rateModeArg,
             bitrateMbps,
           });
           }
@@ -2924,16 +2944,21 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               className="clip-export-format-dropdown"
             />
             {selectedExportOption?.reason && <small className="stream-warning">{selectedExportOption.reason}</small>}
-            {isH264TenBit && (
+            {supportsRateControl && (
               <ClipRateControl
-                mode={h264RateMode}
-                bitrateMbps={h264BitrateMbps}
+                mode={rateMode}
+                bitrateMbps={exportBitrate[exportFormat] ?? clipBitrateDefault(exportFormat)}
                 disabled={isExtracting}
-                onModeChange={setH264RateMode}
-                onBitrateChange={setH264BitrateMbps}
+                onModeChange={setRateMode}
+                onBitrateChange={(bitrateMbps) => {
+                  setExportBitrate((current) => ({
+                    ...current,
+                    [exportFormat]: bitrateMbps,
+                  }));
+                }}
               />
             )}
-            {qualitySpec && (!isH264TenBit || h264RateMode === "quality") && (
+            {qualitySpec && rateMode === "quality" && (
               <VideoOutputControl
                 spec={qualitySpec}
                 value={exportQuality[exportFormat] ?? qualitySpec.defaultValue}
@@ -3664,8 +3689,28 @@ export function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | nu
   }
 }
 
-export function isH264TenBitFormat(format: ClipExportFormat): boolean {
-  return format === "h264-10bit-nvenc" || format === "h264-10bit-cpu";
+export function formatSupportsRateControl(format: ClipExportFormat): boolean {
+  switch (format) {
+    case "prores-lt":
+    case "prores-hq":
+    case "lossless-cut":
+      return false;
+    default:
+      return true;
+  }
+}
+
+export function clipBitrateDefault(format: ClipExportFormat): number {
+  switch (format) {
+    case "gpu-intra":
+      return 60;
+    case "hevc-cpu":
+      return 12;
+    case "av1-nvenc":
+      return 8;
+    default:
+      return 20;
+  }
 }
 
 export function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null): ClipExportOption[] {

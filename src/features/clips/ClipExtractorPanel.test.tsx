@@ -37,15 +37,17 @@ import React from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
+import { mockDialogOpen } from '../../../tests/setup/dialog'
 import {
   ClipExtractorPanel,
   GRID_GRAB_DRAG_THRESHOLD_PX,
   isPastDragThreshold,
   isResizeDrivenGridScroll,
   computeSelectionMarkers,
+  clipBitrateDefault,
   clipQualitySpec,
   clipExportOptions,
-  isH264TenBitFormat,
+  formatSupportsRateControl,
 } from './ClipExtractorPanel'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -254,11 +256,25 @@ describe('computeSelectionMarkers — position math', () => {
 // ─── H.264 10-bit export controls ────────────────────────────────────────────
 
 describe('H.264 10-bit export controls', () => {
-  it('shows rate control only for the two 10-bit H.264 presets', () => {
-    expect(isH264TenBitFormat('h264-10bit-cpu')).toBe(true)
-    expect(isH264TenBitFormat('h264-10bit-nvenc')).toBe(true)
-    expect(isH264TenBitFormat('h264-cpu')).toBe(false)
-    expect(isH264TenBitFormat('prores-lt')).toBe(false)
+  it('supports rate control on every re-encoding preset with a bitrate target', () => {
+    expect(formatSupportsRateControl('gpu-intra')).toBe(true)
+    expect(formatSupportsRateControl('h264-nvenc')).toBe(true)
+    expect(formatSupportsRateControl('h264-10bit-nvenc')).toBe(true)
+    expect(formatSupportsRateControl('av1-nvenc')).toBe(true)
+    expect(formatSupportsRateControl('h264-cpu')).toBe(true)
+    expect(formatSupportsRateControl('h264-10bit-cpu')).toBe(true)
+    expect(formatSupportsRateControl('hevc-cpu')).toBe(true)
+    expect(formatSupportsRateControl('prores-lt')).toBe(false)
+    expect(formatSupportsRateControl('prores-hq')).toBe(false)
+    expect(formatSupportsRateControl('lossless-cut')).toBe(false)
+  })
+
+  it('uses format-appropriate bitrate defaults', () => {
+    expect(clipBitrateDefault('gpu-intra')).toBe(60)
+    expect(clipBitrateDefault('av1-nvenc')).toBe(8)
+    expect(clipBitrateDefault('hevc-cpu')).toBe(12)
+    expect(clipBitrateDefault('h264-cpu')).toBe(20)
+    expect(clipBitrateDefault('h264-10bit-nvenc')).toBe(20)
   })
 
   it('allows the CPU and NVIDIA quality controls to reach zero', () => {
@@ -300,6 +316,102 @@ describe('H.264 10-bit export controls', () => {
     await user.type(qualityInput, '0')
     await user.tab()
     expect(qualityInput).toHaveValue(0)
+  })
+
+  it('shows rate control for H.264 CPU and only shows quality while Quality is active', async () => {
+    installMinimalMocks()
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    await user.click(await screen.findByRole('button', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('option', { name: /H\.264 CPU MP4/i }))
+
+    expect(screen.getByRole('group', { name: /export rate control/i })).toBeVisible()
+    expect(screen.getByRole('spinbutton', { name: /constant rate factor/i })).toBeVisible()
+
+    await user.click(screen.getByRole('button', { name: 'VBR' }))
+    expect(screen.queryByRole('spinbutton', { name: /constant rate factor/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: /average bitrate/i })).toBeVisible()
+
+    await user.click(screen.getByRole('button', { name: 'Quality' }))
+    expect(screen.getByRole('spinbutton', { name: /constant rate factor/i })).toBeVisible()
+  })
+
+  it('returns to Quality after visiting a preset without rate control', async () => {
+    installMinimalMocks()
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    await user.click(await screen.findByRole('button', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('option', { name: /H\.264 CPU MP4/i }))
+    await user.click(screen.getByRole('button', { name: 'CBR' }))
+
+    await user.click(screen.getByRole('button', { name: /H\.264 CPU MP4/i }))
+    await user.click(screen.getByRole('option', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('button', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('option', { name: /H\.264 CPU MP4/i }))
+
+    expect(screen.getByRole('button', { name: 'Quality' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('spinbutton', { name: /constant rate factor/i })).toBeVisible()
+  })
+
+  it('sends CBR bitrate without a quality value for an 8-bit H.264 export', async () => {
+    mockInvoke('get_config', () =>
+      JSON.stringify({
+        clip_extraction_mode: 'cpu',
+        clip_hover_preview: false,
+        featherweight_previews: false,
+      }),
+    )
+    mockInvoke('video_gpu_status', () =>
+      JSON.stringify({ hasHevcNvenc: false, hasH264Nvenc: false, hasAv1Nvenc: false }),
+    )
+    mockInvoke('discord_set_state', () => null)
+    mockInvoke('discord_clear', () => null)
+    mockInvoke('clip_extract', () =>
+      JSON.stringify({
+        type: 'done',
+        mode: 'cpu',
+        input: 'C:\\episode.mp4',
+        scenes: [
+          { source: 'C:\\episode.mp4', start: 1, end: 3, index: 0, label: 'Scene 1' },
+        ],
+        cuts: [],
+        sceneCount: 1,
+        fps: 24,
+        duration: 3,
+        totalSeconds: 0.1,
+      }),
+    )
+    mockInvoke('clip_preview_generate_batch', () =>
+      JSON.stringify({ type: 'done', items: [] }),
+    )
+    mockInvoke('clip_export', () => JSON.stringify({ type: 'done' }))
+    mockDialogOpen
+      .mockResolvedValueOnce(['C:\\episode.mp4'])
+      .mockResolvedValueOnce('C:\\exports')
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await user.click(await screen.findByRole('button', { name: /select all clips/i }))
+
+    await user.click(screen.getByRole('button', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('option', { name: /H\.264 CPU MP4/i }))
+    await user.click(screen.getByRole('button', { name: 'CBR' }))
+    await user.click(screen.getByRole('button', { name: /Export 1 clips/i }))
+
+    await waitFor(() => {
+      const exportCall = mockInvokeFn.mock.calls.find(([command]) => command === 'clip_export')
+      expect(exportCall?.[1]).toMatchObject({
+        preset: 'h264-cpu',
+        qualityValue: null,
+        rateMode: 'cbr',
+        bitrateMbps: 20,
+      })
+    })
   })
 })
 

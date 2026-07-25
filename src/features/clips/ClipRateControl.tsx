@@ -34,7 +34,7 @@ export function ClipRateControl({
     <div className="clip-rate-control">
       <div className="clip-rate-control-head">
         <span>Rate control</span>
-        <div className="clip-rate-mode" role="group" aria-label="H.264 rate control">
+        <div className="clip-rate-mode" role="group" aria-label="Export rate control">
           <button
             type="button"
             className={mode === "quality" ? "is-active" : ""}
@@ -63,17 +63,19 @@ export function ClipRateControl({
             CBR
           </button>
         </div>
+        <small className="clip-rate-mode-help">
+          {mode === "quality"
+            ? "Picks the bitrate per scene to hit a consistent look. File size varies."
+            : mode === "vbr"
+              ? "Aims for this average bitrate; busy scenes may go over."
+              : "Holds this bitrate throughout. Predictable file size, safe for streaming."}
+        </small>
       </div>
 
       {mode !== "quality" && (
         <div className={`clip-bitrate-row is-${mode}`}>
           <div>
             <strong>{mode === "cbr" ? "Constant bitrate" : "Average target"}</strong>
-            <small>
-              {mode === "cbr"
-                ? "Pads simple clips so output stays at the chosen rate."
-                : "Adapts per scene. Simple clips may finish below this value."}
-            </small>
           </div>
           <label className="clip-bitrate-value">
             <input

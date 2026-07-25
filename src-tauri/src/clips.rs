@@ -209,22 +209,22 @@ fn clamp_quality(quality: Option<i32>, min: i32, max: i32, default: i32) -> i32 
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum H264RateMode {
+enum RateMode {
     Quality,
     Vbr,
     Cbr,
 }
 
-fn h264_rate_mode(value: Option<&str>) -> Result<H264RateMode, String> {
+fn parse_rate_mode(value: Option<&str>) -> Result<RateMode, String> {
     match value.unwrap_or("quality") {
-        "quality" => Ok(H264RateMode::Quality),
-        "vbr" | "bitrate" => Ok(H264RateMode::Vbr),
-        "cbr" => Ok(H264RateMode::Cbr),
+        "quality" => Ok(RateMode::Quality),
+        "vbr" | "bitrate" => Ok(RateMode::Vbr),
+        "cbr" => Ok(RateMode::Cbr),
         _ => Err("Rate control must be quality, vbr, or cbr.".to_string()),
     }
 }
 
-fn h264_bitrate_arg(value: Option<f64>) -> Result<String, String> {
+fn bitrate_arg(value: Option<f64>) -> Result<String, String> {
     let bitrate = value.unwrap_or(20.0);
     if !bitrate.is_finite() || bitrate <= 0.0 {
         return Err("Target bitrate must be greater than 0 Mbps.".to_string());
@@ -232,12 +232,74 @@ fn h264_bitrate_arg(value: Option<f64>) -> Result<String, String> {
     Ok(format!("{bitrate}M"))
 }
 
-fn h264_buffer_arg(value: Option<f64>) -> Result<String, String> {
+fn buffer_arg(value: Option<f64>) -> Result<String, String> {
     let bitrate = value.unwrap_or(20.0);
     if !bitrate.is_finite() || bitrate <= 0.0 {
         return Err("Target bitrate must be greater than 0 Mbps.".to_string());
     }
     Ok(format!("{}M", bitrate * 2.0))
+}
+
+/// NVENC family rate-control block.
+fn nvenc_rate_args(
+    rate_mode: Option<&str>,
+    quality: i32,
+    quality_flag: &str,
+    bitrate_mbps: Option<f64>,
+    cbr_padding: bool,
+) -> Result<Vec<String>, String> {
+    match parse_rate_mode(rate_mode)? {
+        RateMode::Quality => Ok(vec![
+            "-rc".to_string(), "constqp".to_string(),
+            quality_flag.to_string(), quality.to_string(),
+        ]),
+        RateMode::Vbr => Ok(vec![
+            "-rc".to_string(), "vbr".to_string(),
+            "-b:v".to_string(), bitrate_arg(bitrate_mbps)?,
+        ]),
+        RateMode::Cbr => {
+            let bitrate = bitrate_arg(bitrate_mbps)?;
+            let mut args = vec![
+                "-rc".to_string(), "cbr".to_string(),
+                "-b:v".to_string(), bitrate.clone(),
+                "-minrate".to_string(), bitrate.clone(),
+                "-maxrate".to_string(), bitrate,
+                "-bufsize".to_string(), buffer_arg(bitrate_mbps)?,
+            ];
+            if cbr_padding {
+                args.extend(["-cbr_padding".to_string(), "1".to_string()]);
+            }
+            Ok(args)
+        }
+    }
+}
+
+/// libx264 / libx265 rate-control block.
+fn x26x_rate_args(
+    rate_mode: Option<&str>,
+    quality: i32,
+    bitrate_mbps: Option<f64>,
+    cbr_params: Option<(&str, &str)>,
+) -> Result<Vec<String>, String> {
+    match parse_rate_mode(rate_mode)? {
+        RateMode::Quality => Ok(vec!["-crf".to_string(), quality.to_string()]),
+        RateMode::Vbr => Ok(vec![
+            "-b:v".to_string(), bitrate_arg(bitrate_mbps)?,
+        ]),
+        RateMode::Cbr => {
+            let bitrate = bitrate_arg(bitrate_mbps)?;
+            let mut args = vec![
+                "-b:v".to_string(), bitrate.clone(),
+                "-minrate".to_string(), bitrate.clone(),
+                "-maxrate".to_string(), bitrate,
+                "-bufsize".to_string(), buffer_arg(bitrate_mbps)?,
+            ];
+            if let Some((flag, value)) = cbr_params {
+                args.extend([flag.to_string(), value.to_string()]);
+            }
+            Ok(args)
+        }
+    }
 }
 
 // Direct High 10 H.264 presets. Quality 0 is deliberately accepted. VBR and
@@ -252,27 +314,7 @@ fn h264_10bit_nvenc_video_args(
         "-c:v".to_string(), "h264_nvenc".to_string(),
         "-preset".to_string(), "p7".to_string(),
     ];
-    match h264_rate_mode(rate_mode)? {
-        H264RateMode::Quality => args.extend([
-            "-rc".to_string(), "constqp".to_string(),
-            "-qp".to_string(), qp.to_string(),
-        ]),
-        H264RateMode::Vbr => args.extend([
-            "-rc".to_string(), "vbr".to_string(),
-            "-b:v".to_string(), h264_bitrate_arg(bitrate_mbps)?,
-        ]),
-        H264RateMode::Cbr => {
-            let bitrate = h264_bitrate_arg(bitrate_mbps)?;
-            args.extend([
-                "-rc".to_string(), "cbr".to_string(),
-                "-b:v".to_string(), bitrate.clone(),
-                "-minrate".to_string(), bitrate.clone(),
-                "-maxrate".to_string(), bitrate,
-                "-bufsize".to_string(), h264_buffer_arg(bitrate_mbps)?,
-                "-cbr_padding".to_string(), "1".to_string(),
-            ]);
-        }
-    }
+    args.extend(nvenc_rate_args(rate_mode, qp, "-qp", bitrate_mbps, true)?);
     args.extend([
         "-profile:v".to_string(), "high10".to_string(),
         "-highbitdepth".to_string(), "1".to_string(),
@@ -294,24 +336,12 @@ fn h264_10bit_cpu_video_args(
         "-c:v".to_string(), "libx264".to_string(),
         "-preset".to_string(), "slow".to_string(),
     ];
-    match h264_rate_mode(rate_mode)? {
-        H264RateMode::Quality => args.extend([
-            "-crf".to_string(), crf.to_string(),
-        ]),
-        H264RateMode::Vbr => args.extend([
-            "-b:v".to_string(), h264_bitrate_arg(bitrate_mbps)?,
-        ]),
-        H264RateMode::Cbr => {
-            let bitrate = h264_bitrate_arg(bitrate_mbps)?;
-            args.extend([
-                "-b:v".to_string(), bitrate.clone(),
-                "-minrate".to_string(), bitrate.clone(),
-                "-maxrate".to_string(), bitrate,
-                "-bufsize".to_string(), h264_buffer_arg(bitrate_mbps)?,
-                "-x264-params".to_string(), "nal-hrd=cbr".to_string(),
-            ]);
-        }
-    }
+    args.extend(x26x_rate_args(
+        rate_mode,
+        crf,
+        bitrate_mbps,
+        Some(("-x264-params", "nal-hrd=cbr")),
+    )?);
     args.extend([
         "-profile:v".to_string(), "high10".to_string(),
         "-pix_fmt".to_string(), "yuv420p10le".to_string(),
@@ -320,9 +350,144 @@ fn h264_10bit_cpu_video_args(
     Ok(args)
 }
 
+fn gpu_intra_video_args(
+    quality: Option<i32>,
+    rate_mode: Option<&str>,
+    bitrate_mbps: Option<f64>,
+) -> Result<Vec<String>, String> {
+    let qp = clamp_quality(quality, 10, 28, 16);
+    let mut args = vec![
+        "-c:v".to_string(), "hevc_nvenc".to_string(),
+        "-preset".to_string(), "p1".to_string(),
+    ];
+    args.extend(nvenc_rate_args(rate_mode, qp, "-qp", bitrate_mbps, true)?);
+    args.extend([
+        "-g".to_string(), "1".to_string(),
+        "-bf".to_string(), "0".to_string(),
+        "-profile:v".to_string(), "main10".to_string(),
+        "-highbitdepth".to_string(), "1".to_string(),
+    ]);
+    Ok(args)
+}
+
+fn h264_nvenc_video_args(
+    quality: Option<i32>,
+    rate_mode: Option<&str>,
+    bitrate_mbps: Option<f64>,
+) -> Result<Vec<String>, String> {
+    let cq = clamp_quality(quality, 14, 28, 18);
+    let mut args = vec![
+        "-c:v".to_string(), "h264_nvenc".to_string(),
+        "-preset".to_string(), "p4".to_string(),
+    ];
+    args.extend(nvenc_rate_args(rate_mode, cq, "-cq", bitrate_mbps, true)?);
+    args.extend([
+        "-spatial-aq".to_string(), "1".to_string(),
+        "-temporal-aq".to_string(), "1".to_string(),
+        "-movflags".to_string(), "+faststart".to_string(),
+    ]);
+    Ok(args)
+}
+
+fn av1_nvenc_video_args(
+    quality: Option<i32>,
+    rate_mode: Option<&str>,
+    bitrate_mbps: Option<f64>,
+) -> Result<Vec<String>, String> {
+    let cq = clamp_quality(quality, 18, 34, 24);
+    let mut args = vec![
+        "-c:v".to_string(), "av1_nvenc".to_string(),
+        "-preset".to_string(), "p4".to_string(),
+    ];
+    args.extend(nvenc_rate_args(rate_mode, cq, "-cq", bitrate_mbps, true)?);
+    args.extend([
+        "-spatial-aq".to_string(), "1".to_string(),
+        "-temporal-aq".to_string(), "1".to_string(),
+        "-movflags".to_string(), "+faststart".to_string(),
+    ]);
+    Ok(args)
+}
+
+fn h264_cpu_video_args(
+    quality: Option<i32>,
+    rate_mode: Option<&str>,
+    bitrate_mbps: Option<f64>,
+) -> Result<Vec<String>, String> {
+    let crf = clamp_quality(quality, 14, 28, 18);
+    let mut args = vec![
+        "-c:v".to_string(), "libx264".to_string(),
+        "-preset".to_string(), "slow".to_string(),
+    ];
+    args.extend(x26x_rate_args(
+        rate_mode,
+        crf,
+        bitrate_mbps,
+        Some(("-x264-params", "nal-hrd=cbr")),
+    )?);
+    args.extend(["-movflags".to_string(), "+faststart".to_string()]);
+    Ok(args)
+}
+
+fn hevc_cpu_video_args(
+    quality: Option<i32>,
+    rate_mode: Option<&str>,
+    bitrate_mbps: Option<f64>,
+) -> Result<Vec<String>, String> {
+    let crf = clamp_quality(quality, 14, 28, 18);
+    let mut args = vec![
+        "-c:v".to_string(), "libx265".to_string(),
+        "-tag:v".to_string(), "hvc1".to_string(),
+        "-preset".to_string(), "slow".to_string(),
+    ];
+    args.extend(x26x_rate_args(rate_mode, crf, bitrate_mbps, None)?);
+    args.extend(["-movflags".to_string(), "+faststart".to_string()]);
+    Ok(args)
+}
+
+fn gpu_cpu_fallback_video_args(
+    preset: &str,
+    quality: Option<i32>,
+    rate_mode: Option<&str>,
+    bitrate_mbps: Option<f64>,
+) -> Result<Vec<String>, String> {
+    if preset == "h264-10bit-nvenc" {
+        return h264_10bit_cpu_video_args(quality, rate_mode, bitrate_mbps);
+    }
+
+    let crf = if preset == "gpu-intra" {
+        clamp_quality(quality, 10, 28, 16)
+    } else if preset == "av1-nvenc" {
+        clamp_quality(quality, 18, 34, 24)
+    } else {
+        clamp_quality(quality, 14, 28, 18)
+    };
+    let mut args = vec![
+        "-c:v".to_string(), "libx264".to_string(),
+        "-preset".to_string(), "slow".to_string(),
+    ];
+    args.extend(x26x_rate_args(
+        rate_mode,
+        crf,
+        bitrate_mbps,
+        Some(("-x264-params", "nal-hrd=cbr")),
+    )?);
+    if preset == "gpu-intra" {
+        args.extend(["-pix_fmt".to_string(), "yuv420p".to_string()]);
+    }
+    Ok(args)
+}
+
+fn preset_supports_rate_control(preset: &str) -> bool {
+    !matches!(preset, "prores-lt" | "prores-hq" | "lossless-cut")
+}
+
 #[cfg(test)]
-mod h264_10bit_tests {
-    use super::{h264_10bit_cpu_video_args, h264_10bit_nvenc_video_args, preset_extension};
+mod rate_control_tests {
+    use super::{
+        av1_nvenc_video_args, gpu_cpu_fallback_video_args, gpu_intra_video_args,
+        h264_10bit_cpu_video_args, h264_10bit_nvenc_video_args, h264_cpu_video_args,
+        h264_nvenc_video_args, hevc_cpu_video_args, preset_extension,
+    };
 
     fn value_after<'a>(args: &'a [String], flag: &str) -> &'a str {
         let index = args.iter().position(|arg| arg == flag).expect("flag should exist");
@@ -393,6 +558,66 @@ mod h264_10bit_tests {
         assert_eq!(preset_extension("h264-10bit-nvenc"), "mp4");
         assert_eq!(preset_extension("h264-10bit-cpu"), "mp4");
     }
+
+    type VideoArgsFn = fn(Option<i32>, Option<&str>, Option<f64>) -> Result<Vec<String>, String>;
+
+    fn assert_all_rate_modes(build: VideoArgsFn, quality_flag: &str, expected_quality: &str) {
+        let quality = build(None, Some("quality"), None).unwrap();
+        assert_eq!(value_after(&quality, quality_flag), expected_quality);
+        assert!(!quality.iter().any(|arg| arg == "-b:v"));
+
+        let vbr = build(None, Some("vbr"), Some(12.5)).unwrap();
+        assert_eq!(value_after(&vbr, "-b:v"), "12.5M");
+        assert!(!vbr.iter().any(|arg| matches!(arg.as_str(), "-crf" | "-qp" | "-cq")));
+
+        let cbr = build(None, Some("cbr"), Some(12.5)).unwrap();
+        assert_eq!(value_after(&cbr, "-b:v"), "12.5M");
+        assert_eq!(value_after(&cbr, "-minrate"), "12.5M");
+        assert_eq!(value_after(&cbr, "-maxrate"), "12.5M");
+        assert_eq!(value_after(&cbr, "-bufsize"), "25M");
+    }
+
+    #[test]
+    fn newly_enabled_presets_emit_all_three_rate_modes() {
+        assert_all_rate_modes(gpu_intra_video_args, "-qp", "16");
+        assert_all_rate_modes(h264_nvenc_video_args, "-cq", "18");
+        assert_all_rate_modes(av1_nvenc_video_args, "-cq", "24");
+        assert_all_rate_modes(h264_cpu_video_args, "-crf", "18");
+        assert_all_rate_modes(hevc_cpu_video_args, "-crf", "18");
+    }
+
+    #[test]
+    fn bundled_nvenc_encoders_enable_cbr_padding() {
+        let h264 = h264_nvenc_video_args(None, Some("cbr"), Some(20.0)).unwrap();
+        let h264_10bit = h264_10bit_nvenc_video_args(None, Some("cbr"), Some(20.0)).unwrap();
+        let av1 = av1_nvenc_video_args(None, Some("cbr"), Some(20.0)).unwrap();
+        let hevc = gpu_intra_video_args(None, Some("cbr"), Some(20.0)).unwrap();
+
+        assert_eq!(value_after(&h264, "-cbr_padding"), "1");
+        assert_eq!(value_after(&h264_10bit, "-cbr_padding"), "1");
+        assert_eq!(value_after(&av1, "-cbr_padding"), "1");
+        assert_eq!(value_after(&hevc, "-cbr_padding"), "1");
+    }
+
+    #[test]
+    fn gpu_fallbacks_preserve_cbr_bitrate() {
+        for preset in ["gpu-intra", "h264-nvenc", "h264-10bit-nvenc", "av1-nvenc"] {
+            let args = gpu_cpu_fallback_video_args(preset, None, Some("cbr"), Some(37.5)).unwrap();
+            assert_eq!(value_after(&args, "-b:v"), "37.5M", "{preset}");
+            assert_eq!(value_after(&args, "-minrate"), "37.5M", "{preset}");
+            assert_eq!(value_after(&args, "-maxrate"), "37.5M", "{preset}");
+            assert_eq!(value_after(&args, "-bufsize"), "75M", "{preset}");
+            assert!(!args.iter().any(|arg| arg == "-crf"), "{preset}");
+        }
+    }
+
+    #[test]
+    fn fixed_profile_and_stream_copy_presets_do_not_support_rate_control() {
+        assert!(!super::preset_supports_rate_control("prores-lt"));
+        assert!(!super::preset_supports_rate_control("prores-hq"));
+        assert!(!super::preset_supports_rate_control("lossless-cut"));
+        assert!(super::preset_supports_rate_control("h264-cpu"));
+    }
 }
 
 // Corrected (start, duration) for a clip cut. The 1.5/fps offset guarantees we
@@ -421,6 +646,11 @@ fn run_clip_export(
     rate_mode: Option<String>,
     bitrate_mbps: Option<f64>,
 ) -> Result<String, String> {
+    let (rate_mode, bitrate_mbps) = if preset_supports_rate_control(&preset) {
+        (rate_mode, bitrate_mbps)
+    } else {
+        (None, None)
+    };
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
     let ffprobe = find_tool(&root, "ffprobe");
@@ -465,25 +695,13 @@ fn run_clip_export(
 
         let message = match preset.as_str() {
             "gpu-intra" => {
-                let qp = clamp_quality(quality_value, 10, 28, 16);
                 args.extend(input_args.iter().cloned());
+                args.extend(gpu_intra_video_args(
+                    quality_value,
+                    rate_mode.as_deref(),
+                    bitrate_mbps,
+                )?);
                 args.extend([
-                    "-c:v".to_string(),
-                    "hevc_nvenc".to_string(),
-                    "-preset".to_string(),
-                    "p1".to_string(),
-                    "-rc".to_string(),
-                    "constqp".to_string(),
-                    "-qp".to_string(),
-                    qp.to_string(),
-                    "-g".to_string(),
-                    "1".to_string(),
-                    "-bf".to_string(),
-                    "0".to_string(),
-                    "-profile:v".to_string(),
-                    "main10".to_string(),
-                    "-highbitdepth".to_string(),
-                    "1".to_string(),
                     "-c:a".to_string(),
                     "copy".to_string(),
                 ]);
@@ -510,27 +728,17 @@ fn run_clip_export(
                 format!("Encoding ProRes clip {}/{}", i + 1, clips.len())
             }
             "h264-nvenc" => {
-                let cq = clamp_quality(quality_value, 14, 28, 18);
                 args.extend(input_args.iter().cloned());
+                args.extend(h264_nvenc_video_args(
+                    quality_value,
+                    rate_mode.as_deref(),
+                    bitrate_mbps,
+                )?);
                 args.extend([
-                    "-c:v".to_string(),
-                    "h264_nvenc".to_string(),
-                    "-preset".to_string(),
-                    "p4".to_string(),
-                    "-rc".to_string(),
-                    "constqp".to_string(),
-                    "-cq".to_string(),
-                    cq.to_string(),
-                    "-spatial-aq".to_string(),
-                    "1".to_string(),
-                    "-temporal-aq".to_string(),
-                    "1".to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
-                    "-movflags".to_string(),
-                    "+faststart".to_string(),
                 ]);
                 format!("Encoding H.264 (NVENC) clip {}/{}", i + 1, clips.len())
             }
@@ -546,46 +754,32 @@ fn run_clip_export(
                 format!("Encoding H.264 10-bit (NVENC) clip {}/{}", i + 1, clips.len())
             }
             "av1-nvenc" => {
-                let cq = clamp_quality(quality_value, 18, 34, 24);
                 args.extend(input_args.iter().cloned());
+                args.extend(av1_nvenc_video_args(
+                    quality_value,
+                    rate_mode.as_deref(),
+                    bitrate_mbps,
+                )?);
                 args.extend([
-                    "-c:v".to_string(),
-                    "av1_nvenc".to_string(),
-                    "-preset".to_string(),
-                    "p4".to_string(),
-                    "-rc".to_string(),
-                    "constqp".to_string(),
-                    "-cq".to_string(),
-                    cq.to_string(),
-                    "-spatial-aq".to_string(),
-                    "1".to_string(),
-                    "-temporal-aq".to_string(),
-                    "1".to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
-                    "-movflags".to_string(),
-                    "+faststart".to_string(),
                 ]);
                 format!("Encoding AV1 (NVENC) clip {}/{}", i + 1, clips.len())
             }
             "h264-cpu" => {
-                let crf = clamp_quality(quality_value, 14, 28, 18);
                 args.extend(input_args.iter().cloned());
+                args.extend(h264_cpu_video_args(
+                    quality_value,
+                    rate_mode.as_deref(),
+                    bitrate_mbps,
+                )?);
                 args.extend([
-                    "-c:v".to_string(),
-                    "libx264".to_string(),
-                    "-preset".to_string(),
-                    "slow".to_string(),
-                    "-crf".to_string(),
-                    crf.to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
-                    "-movflags".to_string(),
-                    "+faststart".to_string(),
                 ]);
                 format!("Encoding H.264 (CPU) clip {}/{}", i + 1, clips.len())
             }
@@ -601,23 +795,17 @@ fn run_clip_export(
                 format!("Encoding H.264 10-bit (CPU) clip {}/{}", i + 1, clips.len())
             }
             "hevc-cpu" => {
-                let crf = clamp_quality(quality_value, 14, 28, 18);
                 args.extend(input_args.iter().cloned());
+                args.extend(hevc_cpu_video_args(
+                    quality_value,
+                    rate_mode.as_deref(),
+                    bitrate_mbps,
+                )?);
                 args.extend([
-                    "-c:v".to_string(),
-                    "libx265".to_string(),
-                    "-tag:v".to_string(),
-                    "hvc1".to_string(),
-                    "-preset".to_string(),
-                    "slow".to_string(),
-                    "-crf".to_string(),
-                    crf.to_string(),
                     "-c:a".to_string(),
                     "aac".to_string(),
                     "-b:a".to_string(),
                     "320k".to_string(),
-                    "-movflags".to_string(),
-                    "+faststart".to_string(),
                 ]);
                 format!("Encoding HEVC (CPU) clip {}/{}", i + 1, clips.len())
             }
@@ -681,15 +869,19 @@ fn run_clip_export(
         );
 
         if let Err(primary_error) = primary_result {
-            if preset == "gpu-intra" || preset == "h264-10bit-nvenc" {
-                let h264_10bit_fallback = preset == "h264-10bit-nvenc";
+            if matches!(
+                preset.as_str(),
+                "gpu-intra" | "h264-nvenc" | "h264-10bit-nvenc" | "av1-nvenc"
+            ) {
+                let fallback_message = match preset.as_str() {
+                    "h264-10bit-nvenc" => "H.264 10-bit NVENC failed; retrying with the CPU 10-bit encoder",
+                    "h264-nvenc" => "H.264 NVENC failed; retrying with libx264 software encoder",
+                    "av1-nvenc" => "AV1 NVENC failed; retrying with libx264 software encoder",
+                    _ => "GPU Intra NVENC failed; retrying with libx264 software encoder",
+                };
                 log_warn(
                     "clip.export.fallback",
-                    if h264_10bit_fallback {
-                        "H.264 10-bit NVENC failed; retrying with the CPU 10-bit encoder"
-                    } else {
-                        "GPU Intra NVENC failed; retrying with libx264 software encoder"
-                    },
+                    fallback_message,
                     json!({ "clip": i + 1, "preset": &preset, "error": &primary_error }),
                 );
                 let _ = fs::remove_file(&output);
@@ -703,21 +895,12 @@ fn run_clip_export(
                     "-vf".to_string(),
                     setparams_filter(&color),
                 ]);
-                if h264_10bit_fallback {
-                    fallback_args.extend(h264_10bit_cpu_video_args(quality_value, rate_mode.as_deref(), bitrate_mbps)?);
-                } else {
-                    let qp = clamp_quality(quality_value, 10, 28, 16);
-                    fallback_args.extend([
-                        "-c:v".to_string(),
-                        "libx264".to_string(),
-                        "-preset".to_string(),
-                        "slow".to_string(),
-                        "-crf".to_string(),
-                        qp.to_string(),
-                        "-pix_fmt".to_string(),
-                        "yuv420p".to_string(),
-                    ]);
-                }
+                fallback_args.extend(gpu_cpu_fallback_video_args(
+                    &preset,
+                    quality_value,
+                    rate_mode.as_deref(),
+                    bitrate_mbps,
+                )?);
                 fallback_args.extend([
                     "-c:a".to_string(),
                     "aac".to_string(),
@@ -810,6 +993,11 @@ fn run_clip_export_merged(
     rate_mode: Option<String>,
     bitrate_mbps: Option<f64>,
 ) -> Result<String, String> {
+    let (rate_mode, bitrate_mbps) = if preset_supports_rate_control(&preset) {
+        (rate_mode, bitrate_mbps)
+    } else {
+        (None, None)
+    };
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
     let ffprobe = find_tool(&root, "ffprobe");
@@ -943,17 +1131,11 @@ fn run_clip_export_merged(
 
     let encode_args: Vec<String> = match preset.as_str() {
         "gpu-intra" => {
-            let qp = clamp_quality(quality_value, 10, 28, 16);
-            let mut v = vec![
-                "-c:v".to_string(), "hevc_nvenc".to_string(),
-                "-preset".to_string(), "p1".to_string(),
-                "-rc".to_string(), "constqp".to_string(),
-                "-qp".to_string(), qp.to_string(),
-                "-g".to_string(), "1".to_string(),
-                "-bf".to_string(), "0".to_string(),
-                "-profile:v".to_string(), "main10".to_string(),
-                "-highbitdepth".to_string(), "1".to_string(),
-            ];
+            let mut v = gpu_intra_video_args(
+                quality_value,
+                rate_mode.as_deref(),
+                bitrate_mbps,
+            )?;
             if any_has_audio {
                 v.extend([
                     "-c:a".to_string(), "aac".to_string(),
@@ -977,16 +1159,11 @@ fn run_clip_export_merged(
             v
         }
         "h264-nvenc" => {
-            let cq = clamp_quality(quality_value, 14, 28, 18);
-            let mut v = vec![
-                "-c:v".to_string(), "h264_nvenc".to_string(),
-                "-preset".to_string(), "p4".to_string(),
-                "-rc".to_string(), "constqp".to_string(),
-                "-cq".to_string(), cq.to_string(),
-                "-spatial-aq".to_string(), "1".to_string(),
-                "-temporal-aq".to_string(), "1".to_string(),
-                "-movflags".to_string(), "+faststart".to_string(),
-            ];
+            let mut v = h264_nvenc_video_args(
+                quality_value,
+                rate_mode.as_deref(),
+                bitrate_mbps,
+            )?;
             if any_has_audio {
                 v.extend([
                     "-c:a".to_string(), "aac".to_string(),
@@ -1006,16 +1183,11 @@ fn run_clip_export_merged(
             v
         }
         "av1-nvenc" => {
-            let cq = clamp_quality(quality_value, 18, 34, 24);
-            let mut v = vec![
-                "-c:v".to_string(), "av1_nvenc".to_string(),
-                "-preset".to_string(), "p4".to_string(),
-                "-rc".to_string(), "constqp".to_string(),
-                "-cq".to_string(), cq.to_string(),
-                "-spatial-aq".to_string(), "1".to_string(),
-                "-temporal-aq".to_string(), "1".to_string(),
-                "-movflags".to_string(), "+faststart".to_string(),
-            ];
+            let mut v = av1_nvenc_video_args(
+                quality_value,
+                rate_mode.as_deref(),
+                bitrate_mbps,
+            )?;
             if any_has_audio {
                 v.extend([
                     "-c:a".to_string(), "aac".to_string(),
@@ -1025,13 +1197,11 @@ fn run_clip_export_merged(
             v
         }
         "h264-cpu" => {
-            let crf = clamp_quality(quality_value, 14, 28, 18);
-            let mut v = vec![
-                "-c:v".to_string(), "libx264".to_string(),
-                "-preset".to_string(), "slow".to_string(),
-                "-crf".to_string(), crf.to_string(),
-                "-movflags".to_string(), "+faststart".to_string(),
-            ];
+            let mut v = h264_cpu_video_args(
+                quality_value,
+                rate_mode.as_deref(),
+                bitrate_mbps,
+            )?;
             if any_has_audio {
                 v.extend([
                     "-c:a".to_string(), "aac".to_string(),
@@ -1051,14 +1221,11 @@ fn run_clip_export_merged(
             v
         }
         "hevc-cpu" => {
-            let crf = clamp_quality(quality_value, 14, 28, 18);
-            let mut v = vec![
-                "-c:v".to_string(), "libx265".to_string(),
-                "-tag:v".to_string(), "hvc1".to_string(),
-                "-preset".to_string(), "slow".to_string(),
-                "-crf".to_string(), crf.to_string(),
-                "-movflags".to_string(), "+faststart".to_string(),
-            ];
+            let mut v = hevc_cpu_video_args(
+                quality_value,
+                rate_mode.as_deref(),
+                bitrate_mbps,
+            )?;
             if any_has_audio {
                 v.extend([
                     "-c:a".to_string(), "aac".to_string(),
@@ -1105,30 +1272,29 @@ fn run_clip_export_merged(
         Some(&CLIP_CHILD_PID),
     );
     if let Err(primary_error) = primary_result {
-        if preset == "gpu-intra" || preset == "h264-10bit-nvenc" {
-            let h264_10bit_fallback = preset == "h264-10bit-nvenc";
+        if matches!(
+            preset.as_str(),
+            "gpu-intra" | "h264-nvenc" | "h264-10bit-nvenc" | "av1-nvenc"
+        ) {
+            let fallback_message = match preset.as_str() {
+                "h264-10bit-nvenc" => "H.264 10-bit NVENC failed during merge; retrying with the CPU 10-bit encoder",
+                "h264-nvenc" => "H.264 NVENC failed during merge; retrying with libx264 software encoder",
+                "av1-nvenc" => "AV1 NVENC failed during merge; retrying with libx264 software encoder",
+                _ => "GPU Intra NVENC failed during merge; retrying with libx264 software encoder",
+            };
             log_warn(
                 "clip.export_merged.fallback",
-                if h264_10bit_fallback {
-                    "H.264 10-bit NVENC failed during merge; retrying with the CPU 10-bit encoder"
-                } else {
-                    "GPU Intra NVENC failed during merge; retrying with libx264 software encoder"
-                },
+                fallback_message,
                 json!({ "preset": &preset, "error": &primary_error }),
             );
             let _ = fs::remove_file(&output);
             let mut fallback_args = pre_encode_args;
-            if h264_10bit_fallback {
-                fallback_args.extend(h264_10bit_cpu_video_args(quality_value, rate_mode.as_deref(), bitrate_mbps)?);
-            } else {
-                let crf = clamp_quality(quality_value, 10, 28, 16);
-                fallback_args.extend([
-                    "-c:v".to_string(), "libx264".to_string(),
-                    "-preset".to_string(), "slow".to_string(),
-                    "-crf".to_string(), crf.to_string(),
-                    "-pix_fmt".to_string(), "yuv420p".to_string(),
-                ]);
-            }
+            fallback_args.extend(gpu_cpu_fallback_video_args(
+                &preset,
+                quality_value,
+                rate_mode.as_deref(),
+                bitrate_mbps,
+            )?);
             if any_has_audio {
                 fallback_args.extend([
                     "-c:a".to_string(), "aac".to_string(),

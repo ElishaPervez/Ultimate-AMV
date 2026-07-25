@@ -34,7 +34,7 @@ describe("ClipRateControl", () => {
       />,
     );
 
-    expect(screen.getByText("Adapts per scene. Simple clips may finish below this value.")).toBeVisible();
+    expect(screen.getByText("Aims for this average bitrate; busy scenes may go over.")).toBeVisible();
     const input = screen.getByRole("spinbutton", { name: "Average bitrate" });
     fireEvent.change(input, { target: { value: "350.5" } });
     fireEvent.blur(input);
@@ -54,7 +54,7 @@ describe("ClipRateControl", () => {
       />,
     );
 
-    expect(screen.getByText("Pads simple clips so output stays at the chosen rate.")).toBeVisible();
+    expect(screen.getByText("Holds this bitrate throughout. Predictable file size, safe for streaming.")).toBeVisible();
     const input = screen.getByRole("spinbutton", { name: "Constant bitrate" });
     fireEvent.change(input, { target: { value: "0" } });
     fireEvent.blur(input);
