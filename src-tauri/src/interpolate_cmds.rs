@@ -69,6 +69,39 @@ pub(crate) async fn interpolate_status() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub(crate) fn interpolate_list_folder(folder: String) -> Result<Vec<String>, String> {
+    const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "webm", "avi", "m4v"];
+    let root = PathBuf::from(folder);
+    let entries = fs::read_dir(&root)
+        .map_err(|error| format!("Could not read {}: {error}", root.display()))?;
+    let mut videos: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| {
+                        VIDEO_EXTENSIONS
+                            .iter()
+                            .any(|accepted| extension.eq_ignore_ascii_case(accepted))
+                    })
+                    .unwrap_or(false)
+        })
+        .collect();
+    videos.sort_by_key(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+    Ok(videos
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect())
+}
+
+#[tauri::command]
 pub(crate) async fn cancel_interpolate() {
     cancel_interpolate_now();
 }
@@ -336,5 +369,18 @@ mod tests {
     #[test]
     fn cancelling_without_a_running_job_is_a_no_op() {
         cancel_interpolate_now();
+    }
+
+    #[test]
+    fn folder_listing_returns_only_video_files() {
+        let temp = tempfile::tempdir().expect("temporary folder");
+        fs::write(temp.path().join("B.MKV"), b"video").expect("mkv");
+        fs::write(temp.path().join("a.mp4"), b"video").expect("mp4");
+        fs::write(temp.path().join("notes.txt"), b"text").expect("text");
+        let files = interpolate_list_folder(temp.path().to_string_lossy().to_string())
+            .expect("folder listing");
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("a.mp4"));
+        assert!(files[1].ends_with("B.MKV"));
     }
 }

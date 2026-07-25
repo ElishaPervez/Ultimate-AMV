@@ -460,6 +460,7 @@ pub fn run() {
             bgremove_cmds::bgremove_save_preview,
             bgremove_cmds::cancel_bgremove,
             interpolate_cmds::interpolate_status,
+            interpolate_cmds::interpolate_list_folder,
             interpolate_cmds::interpolate_run,
             interpolate_cmds::cancel_interpolate,
             open_path,

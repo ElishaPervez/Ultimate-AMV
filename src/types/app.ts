@@ -7,6 +7,7 @@ export type SectionId =
   | "video-conversion"
   | "audio-conversion"
   | "bg-removal"
+  | "interpolation"
   | "logs"
   | "settings";
 

@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Download,
   Film,
+  Gauge,
   FolderKanban,
   Github,
   Home,
@@ -40,6 +41,7 @@ import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
+import { InterpolatePanel } from "../features/interpolate/InterpolatePanel";
 import { HomePanel } from "../features/home/HomePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -107,6 +109,7 @@ const RAIL_ENTRIES: RailEntry[] = (() => {
       { id: "audio-extraction", label: "Vocal Separation", Icon: AudioLines },
       { id: "clip-hunting", label: "Scene Splitter", Icon: Clapperboard },
       { id: "bg-removal", label: "BG Remover", Icon: Sparkles },
+      { id: "interpolation", label: "Frame Interpolation", Icon: Gauge },
       { id: "audio-conversion", label: "Audio Conversion", Icon: Music2 },
       { id: "video-conversion", label: "Video Conversion", Icon: Film },
     ],
@@ -200,6 +203,11 @@ const panelMeta: Record<SectionId, { kicker: string; title: string; stats: strin
     title: "BG Remover",
     stats: ["SkyTNT", "Alpha", "Fast GPU"],
   },
+  interpolation: {
+    kicker: "Motion",
+    title: "Frame Interpolation",
+    stats: ["RIFE", "Batch queue", "Audio sync"],
+  },
   settings: {
     kicker: "Options",
     title: "Settings",
@@ -275,6 +283,7 @@ export function App() {
   const isAudioConversion = active === "audio-conversion";
   const isVideoConversion = active === "video-conversion";
   const isBgRemoval = active === "bg-removal";
+  const isInterpolation = active === "interpolation";
   const isLogs = active === "logs";
   const isSettings = active === "settings";
 
@@ -346,6 +355,8 @@ export function App() {
         { id: "video", label: "Video Isolate" },
         { id: "image", label: "Image Isolate" },
       ] as const)
+      : isInterpolation
+        ? ([{ id: "interpolation", label: "Frame interpolation" }] as const)
       : isLogs
         ? ([{ id: "logs", label: "Logs" }] as const)
         : isSettings
@@ -499,7 +510,7 @@ export function App() {
           <div className="sidebar-group">
             <button
               type="button"
-              className={`sidebar-group-header ${["audio-extraction", "clip-hunting", "bg-removal", "audio-conversion", "video-conversion"].includes(active) ? "is-active" : ""}`}
+              className={`sidebar-group-header ${["audio-extraction", "clip-hunting", "bg-removal", "interpolation", "audio-conversion", "video-conversion"].includes(active) ? "is-active" : ""}`}
               onClick={() => setOpenGroups((g) => ({ ...g, media: !g.media }))}
             >
               <Layers size={18} strokeWidth={2} />
@@ -531,6 +542,14 @@ export function App() {
                 >
                   <Sparkles size={14} />
                   <span>BG Remover</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "interpolation" ? "is-active" : ""}`}
+                  onClick={() => setActive("interpolation")}
+                >
+                  <Gauge size={14} />
+                  <span>Frame Interpolation</span>
                 </button>
                 <button
                   type="button"
@@ -711,7 +730,10 @@ export function App() {
                 <div className={`panel-view spring-motion ${isTsukyio ? "is-active" : "is-hidden"}`} aria-hidden={!isTsukyio}>
                   <TsukyioPanel active={isTsukyio} onOpenSettings={() => setActive("settings")} />
                 </div>
-                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && (
+                <div className={`panel-view spring-motion ${isInterpolation ? "is-active" : "is-hidden"}`} aria-hidden={!isInterpolation}>
+                  <InterpolatePanel active={isInterpolation} />
+                </div>
+                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && !isInterpolation && (
                   <div className="panel-view is-active spring-motion">
                     {isHome ? <HomePanel onNavigate={handleHomeNavigate} />
                       : isAudioConversion ? <MediaToAudioPanel />
