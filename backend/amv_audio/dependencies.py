@@ -66,6 +66,24 @@ FEATURE_REQUIREMENTS = {
         ],
         "packages": [],
     },
+    "interpolate_cpu": {
+        "modules": [
+            ("typing_extensions", "typing_extensions"),
+            ("numpy", NUMPY_PACKAGE),
+            ("torch", "torch"),
+            ("torchvision", "torchvision"),
+        ],
+        "packages": [],
+    },
+    "interpolate_gpu": {
+        "modules": [
+            ("typing_extensions", "typing_extensions"),
+            ("numpy", NUMPY_PACKAGE),
+            ("torch", "torch"),
+            ("torchvision", "torchvision"),
+        ],
+        "packages": [],
+    },
 }
 
 KNOWN_MODULE_PACKAGES = {

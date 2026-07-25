@@ -29,6 +29,28 @@
       "extract": [
         { "from": "**/bin/*.dll", "to_dir": "ffmpeg-shared" }
       ]
+    },
+    {
+      "name": "rife-4.25",
+      "url": "https://drive.usercontent.google.com/download?id=1ZKjcbmt1hypiFprJPIKW0Tt0lr_2i7bg&export=download&confirm=t",
+      "sha256": "e63d481b7ae5d4a4e6ad7ac5b410ff78f3bf7be3b51b2e38ca8152747abde5b4",
+      "size": 22919050,
+      "startup": false,
+      "kind": "zip",
+      "extract": [
+        { "from": "**/flownet.pkl", "to": "models/rife425/flownet.pkl" }
+      ]
+    },
+    {
+      "name": "rife-4.6",
+      "url": "https://drive.usercontent.google.com/download?id=1EAbsfY7mjnXNa6RAsATj2ImAEqmHTjbE&export=download&confirm=t",
+      "sha256": "52b094d14cf275e925a5ae25381e46f94fab1c232a847dc45117cfd7c89ceec2",
+      "size": 19747567,
+      "startup": false,
+      "kind": "zip",
+      "extract": [
+        { "from": "**/flownet.pkl", "to": "models/rife46/flownet.pkl" }
+      ]
     }
   ]
 }
