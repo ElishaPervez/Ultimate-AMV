@@ -106,7 +106,7 @@ pub(crate) async fn cancel_interpolate() {
     cancel_interpolate_now();
 }
 
-fn cancel_interpolate_now() {
+pub(crate) fn cancel_interpolate_now() {
     log_info(
         "interpolate.cancel",
         "Cancelling active frame interpolation",
@@ -148,23 +148,14 @@ fn write_jobs_file(
     Ok(JobsFileGuard(path))
 }
 
-#[tauri::command]
-pub(crate) async fn interpolate_run(
-    app: tauri::AppHandle,
-    window: tauri::Window,
-    jobs: Vec<InterpolateJob>,
+fn interpolation_settings(
     factor: u32,
     target_fps: Option<f64>,
-    model: String,
-    gpu: bool,
-    half: bool,
+    model: &str,
     rate_mode: Option<String>,
     quality: Option<u32>,
     bitrate_mbps: Option<f64>,
-) -> Result<String, String> {
-    if jobs.is_empty() {
-        return Err("Add at least one clip before starting interpolation.".to_string());
-    }
+) -> Result<(&'static str, String, u32, f64), String> {
     if !matches!(factor, 2 | 3 | 4) {
         return Err("Frame interpolation supports 2x, 3x, or 4x speed factors.".to_string());
     }
@@ -186,28 +177,26 @@ pub(crate) async fn interpolate_run(
     if !bitrate_mbps.is_finite() || bitrate_mbps <= 0.0 {
         return Err("Target bitrate must be greater than 0 Mbps.".to_string());
     }
-    let model_tool = match model.as_str() {
+    let model_tool = match model {
         "rife4.25" => "rife-4.25",
         "rife4.6" => "rife-4.6",
         _ => return Err(format!("Unknown interpolation model: {model}")),
     };
+    Ok((model_tool, rate_mode, quality, bitrate_mbps))
+}
 
-    window
-        .emit(
-            "interpolate-progress",
-            json!({
-                "type": "progress",
-                "stage": "model-init",
-                "percent": -1,
-                "message": "Checking the selected RIFE model",
-            }),
-        )
-        .ok();
-    tools::install_named(&app, &window, &[model_tool], "interpolate-progress").await?;
-
-    let jobs_file = write_jobs_file(&app, &jobs)?;
-    let output_paths: Vec<PathBuf> = jobs.iter().map(|job| PathBuf::from(&job.output)).collect();
-    let args = vec![
+fn interpolation_args(
+    jobs_file: &JobsFileGuard,
+    factor: u32,
+    target_fps: Option<f64>,
+    model: String,
+    gpu: bool,
+    half: bool,
+    rate_mode: String,
+    quality: u32,
+    bitrate_mbps: f64,
+) -> Vec<String> {
+    let mut args = vec![
         "interpolate".to_string(),
         "--jobs".to_string(),
         jobs_file.0.to_string_lossy().to_string(),
@@ -226,14 +215,68 @@ pub(crate) async fn interpolate_run(
         "--bitrate-mbps".to_string(),
         bitrate_mbps.to_string(),
     ];
-    let mut args = args;
     if let Some(target) = target_fps {
         args.push("--target-fps".to_string());
         args.push(target.to_string());
     }
+    args
+}
+
+#[tauri::command]
+pub(crate) async fn interpolate_run(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    jobs: Vec<InterpolateJob>,
+    factor: u32,
+    target_fps: Option<f64>,
+    model: String,
+    gpu: bool,
+    half: bool,
+    rate_mode: Option<String>,
+    quality: Option<u32>,
+    bitrate_mbps: Option<f64>,
+) -> Result<String, String> {
+    if jobs.is_empty() {
+        return Err("Add at least one clip before starting interpolation.".to_string());
+    }
+    let (model_tool, rate_mode, quality, bitrate_mbps) = interpolation_settings(
+        factor,
+        target_fps,
+        &model,
+        rate_mode,
+        quality,
+        bitrate_mbps,
+    )?;
+
+    window
+        .emit(
+            "interpolate-progress",
+            json!({
+                "type": "progress",
+                "stage": "model-init",
+                "percent": -1,
+                "message": "Checking the selected RIFE model",
+            }),
+        )
+        .ok();
+    tools::install_named(&app, &window, &[model_tool], "interpolate-progress").await?;
+
+    let jobs_file = write_jobs_file(&app, &jobs)?;
+    let output_paths: Vec<PathBuf> = jobs.iter().map(|job| PathBuf::from(&job.output)).collect();
+    let args = interpolation_args(
+        &jobs_file,
+        factor,
+        target_fps,
+        model,
+        gpu,
+        half,
+        rate_mode,
+        quality,
+        bitrate_mbps,
+    );
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _jobs_file = jobs_file;
-        run_streaming_interpolate_cli(window, args, output_paths)
+        run_streaming_interpolate_cli(window, args, output_paths, "interpolate-progress")
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -241,10 +284,204 @@ pub(crate) async fn interpolate_run(
     result
 }
 
+struct TemporaryOutputs(Vec<PathBuf>);
+
+impl Drop for TemporaryOutputs {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn temporary_interpolation_path(source: &std::path::Path) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| format!("Could not resolve the folder for {}.", source.display()))?;
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("Could not resolve the name for {}.", source.display()))?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mp4");
+    Ok(parent.join(format!(
+        ".{stem}.interpolating-{}.{}",
+        std::process::id(),
+        extension
+    )))
+}
+
+fn replace_export(original: &std::path::Path, replacement: &std::path::Path) -> Result<(), String> {
+    let parent = original
+        .parent()
+        .ok_or_else(|| format!("Could not resolve the folder for {}.", original.display()))?;
+    let stem = original
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("clip");
+    let extension = original
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("video");
+    let mut backup_index = 0;
+    let backup = loop {
+        let suffix = if backup_index == 0 {
+            String::new()
+        } else {
+            format!("-{backup_index}")
+        };
+        let candidate = parent.join(format!(
+            ".{stem}.before-interpolation-{}{suffix}.{extension}",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            break candidate;
+        }
+        backup_index += 1;
+    };
+    fs::rename(original, &backup).map_err(|error| {
+        format!(
+            "The exported clip could not be prepared for replacement ({}): {error}",
+            original.display()
+        )
+    })?;
+    if let Err(error) = fs::rename(replacement, original) {
+        let _ = fs::rename(&backup, original);
+        return Err(format!(
+            "The smoothed clip could not replace {}: {error}",
+            original.display()
+        ));
+    }
+    let _ = fs::remove_file(backup);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn interpolate_exported_clips(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    paths: Vec<String>,
+    factor: u32,
+    model: String,
+    gpu: bool,
+    half: bool,
+    rate_mode: Option<String>,
+    quality: Option<u32>,
+    bitrate_mbps: Option<f64>,
+) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("No exported clips were available for smoothing.".to_string());
+    }
+    let (model_tool, rate_mode, quality, bitrate_mbps) = interpolation_settings(
+        factor,
+        None,
+        &model,
+        rate_mode,
+        quality,
+        bitrate_mbps,
+    )?;
+    window
+        .emit(
+            "conversion-progress",
+            json!({
+                "type": "progress",
+                "stage": "model-init",
+                "percent": -1,
+                "message": "Loading motion smoothing model",
+            }),
+        )
+        .ok();
+    tools::install_named(&app, &window, &[model_tool], "conversion-progress").await?;
+
+    let originals: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    for path in &originals {
+        if !path.is_file() {
+            return Err(format!("The exported clip was not found: {}", path.display()));
+        }
+    }
+    let temporary_paths: Vec<PathBuf> = originals
+        .iter()
+        .map(|path| temporary_interpolation_path(path))
+        .collect::<Result<_, _>>()?;
+    let temporary_guard = TemporaryOutputs(temporary_paths.clone());
+    let jobs: Vec<InterpolateJob> = originals
+        .iter()
+        .zip(&temporary_paths)
+        .map(|(input, output)| InterpolateJob {
+            input: input.to_string_lossy().to_string(),
+            output: output.to_string_lossy().to_string(),
+        })
+        .collect();
+    let jobs_file = write_jobs_file(&app, &jobs)?;
+    let args = interpolation_args(
+        &jobs_file,
+        factor,
+        None,
+        model,
+        gpu,
+        half,
+        rate_mode,
+        quality,
+        bitrate_mbps,
+    );
+    let raw = tauri::async_runtime::spawn_blocking(move || {
+        let _jobs_file = jobs_file;
+        let _temporary_guard = temporary_guard;
+        let payload = run_streaming_interpolate_cli(
+            window,
+            args,
+            temporary_paths.clone(),
+            "conversion-progress",
+        )?;
+        let value: Value = serde_json::from_str(&payload)
+            .map_err(|error| format!("Could not read interpolation result: {error}"))?;
+        let outcomes = value
+            .get("outcomes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Frame interpolation returned no clip results.".to_string())?;
+        if outcomes.len() != originals.len() {
+            return Err(format!(
+                "Frame interpolation returned {} results for {} exported clips. The original exports were kept.",
+                outcomes.len(),
+                originals.len()
+            ));
+        }
+        let failures: Vec<String> = outcomes
+            .iter()
+            .filter(|outcome| outcome.get("ok").and_then(Value::as_bool) != Some(true))
+            .map(|outcome| {
+                outcome
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unknown interpolation error")
+                    .to_string()
+            })
+            .collect();
+        if !failures.is_empty() {
+            return Err(format!(
+                "{} exported clip(s) could not be smoothed. The original exports were kept. {}",
+                failures.len(),
+                failures.join(" ")
+            ));
+        }
+        for (original, replacement) in originals.iter().zip(&temporary_paths) {
+            replace_export(original, replacement)?;
+        }
+        Ok(payload)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    set_active_output(None);
+    Ok(raw)
+}
+
 pub(crate) fn run_streaming_interpolate_cli(
     window: tauri::Window,
     args: Vec<String>,
     output_paths: Vec<PathBuf>,
+    progress_event: &'static str,
 ) -> Result<String, String> {
     let root = app_root()?;
     log_info(
@@ -319,7 +556,7 @@ pub(crate) fn run_streaming_interpolate_cli(
                 if finished_clip {
                     set_active_output(None);
                 }
-                let _ = window.emit("interpolate-progress", value);
+                let _ = window.emit(progress_event, value);
             }
             StreamMessage::Final(value) => final_payload = Some(value),
             StreamMessage::Ignore => {}
@@ -415,5 +652,39 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files[0].ends_with("a.mp4"));
         assert!(files[1].ends_with("B.MKV"));
+    }
+
+    #[test]
+    fn in_place_output_keeps_the_original_extension() {
+        let path = PathBuf::from(r"C:\clips\scene.mov");
+        let temporary = temporary_interpolation_path(&path).expect("temporary path");
+        assert_eq!(temporary.extension().and_then(|value| value.to_str()), Some("mov"));
+        assert!(temporary
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .contains("interpolating"));
+    }
+
+    #[test]
+    fn in_place_replacement_keeps_only_the_finished_file() {
+        let directory = tempfile::tempdir().expect("temporary folder");
+        let original = directory.path().join("scene.mp4");
+        let replacement = directory.path().join(".scene.interpolating.mp4");
+        fs::write(&original, b"original").expect("original");
+        fs::write(&replacement, b"smoothed").expect("replacement");
+
+        replace_export(&original, &replacement).expect("replacement succeeds");
+
+        assert_eq!(fs::read(&original).expect("finished file"), b"smoothed");
+        assert!(!replacement.exists());
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("directory listing")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("before-interpolation"))
+                .count(),
+            0
+        );
     }
 }

@@ -462,6 +462,7 @@ pub fn run() {
             interpolate_cmds::interpolate_status,
             interpolate_cmds::interpolate_list_folder,
             interpolate_cmds::interpolate_run,
+            interpolate_cmds::interpolate_exported_clips,
             interpolate_cmds::cancel_interpolate,
             open_path,
             reveal_in_folder,

@@ -661,6 +661,7 @@ fn run_clip_export(
     fs::create_dir_all(&out_dir).map_err(|e| format!("Could not create output directory: {e}"))?;
 
     let mut file_index = 1;
+    let mut exported_paths = Vec::with_capacity(clips.len());
 
     for (i, clip) in clips.iter().enumerate() {
         let input = canonical_input_path(&clip.source)?;
@@ -927,16 +928,18 @@ fn run_clip_export(
                 return Err(primary_error);
             }
         }
+        exported_paths.push(output.to_string_lossy().to_string());
     }
 
-    let done = ConversionDone {
-        r#type: "done".to_string(),
-        input: format!("{} clips", clips.len()),
-        output: output_dir,
-        archived_original: None,
-        preset,
-    };
-    serde_json::to_string(&done).map_err(|error| error.to_string())
+    serde_json::to_string(&json!({
+        "type": "done",
+        "input": format!("{} clips", clips.len()),
+        "output": output_dir,
+        "outputs": exported_paths,
+        "archivedOriginal": null,
+        "preset": preset,
+    }))
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3082,6 +3085,7 @@ pub(crate) async fn stop_clip_processes_for_dependency_setup(window: &tauri::Win
 pub(crate) async fn cancel_clip(window: tauri::Window) {
     log_warn("clip.cancel", "Cancelling active clip process", Value::Null);
     kill_child_pid(&CLIP_CHILD_PID);
+    crate::interpolate_cmds::cancel_interpolate_now();
     // A featherweight source-proxy build can be running independently of the
     // clip child; stop it on cancel too so it isn't left burning GPU/CPU after
     // the user cancelled.

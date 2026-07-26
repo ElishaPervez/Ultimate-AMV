@@ -413,6 +413,79 @@ describe('H.264 10-bit export controls', () => {
       })
     })
   })
+
+  it('smooths every exported clip in one interpolation batch', async () => {
+    mockInvoke('get_config', () =>
+      JSON.stringify({
+        clip_extraction_mode: 'cpu',
+        clip_hover_preview: false,
+        featherweight_previews: false,
+      }),
+    )
+    mockInvoke('video_gpu_status', () =>
+      JSON.stringify({ hasHevcNvenc: false, hasH264Nvenc: false, hasAv1Nvenc: false }),
+    )
+    mockInvoke('discord_set_state', () => null)
+    mockInvoke('discord_clear', () => null)
+    mockInvoke('clip_extract', () =>
+      JSON.stringify({
+        type: 'done',
+        mode: 'cpu',
+        input: 'C:\\episode.mp4',
+        scenes: [
+          { source: 'C:\\episode.mp4', start: 1, end: 3, index: 0, label: 'Scene 1' },
+          { source: 'C:\\episode.mp4', start: 4, end: 6, index: 1, label: 'Scene 2' },
+        ],
+        cuts: [],
+        sceneCount: 2,
+        fps: 24,
+        duration: 6,
+        totalSeconds: 0.1,
+      }),
+    )
+    mockInvoke('clip_preview_generate_batch', () =>
+      JSON.stringify({ type: 'done', items: [] }),
+    )
+    mockInvoke<{ clips: Array<{ index: number }> }>('clip_export', ({ clips }) =>
+      JSON.stringify({
+        type: 'done',
+        output: 'C:\\exports',
+        outputs: [`C:\\exports\\${clips[0].index + 1}.mp4`],
+      }),
+    )
+    mockInvoke('interpolate_exported_clips', () =>
+      JSON.stringify({ type: 'done', succeeded: 2, failed: 0 }),
+    )
+    mockDialogOpen
+      .mockResolvedValueOnce(['C:\\episode.mp4'])
+      .mockResolvedValueOnce('C:\\exports')
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await user.click(await screen.findByRole('button', { name: /select all clips/i }))
+    await user.click(screen.getByRole('checkbox', { name: /Smooth motion/i }))
+    await user.click(screen.getByRole('button', { name: /Export 2 clips/i }))
+
+    await waitFor(() => {
+      const smoothingCalls = mockInvokeFn.mock.calls.filter(
+        ([command]) => command === 'interpolate_exported_clips',
+      )
+      expect(smoothingCalls).toHaveLength(1)
+      expect(smoothingCalls[0]?.[1]).toMatchObject({
+        paths: ['C:\\exports\\1.mp4', 'C:\\exports\\2.mp4'],
+        factor: 2,
+        model: 'rife4.25',
+        gpu: false,
+        half: false,
+      })
+      const exportCalls = mockInvokeFn.mock.calls.filter(([command]) => command === 'clip_export')
+      expect(exportCalls).toHaveLength(2)
+      expect(exportCalls[0]?.[1]).toMatchObject({ preset: 'h264-cpu' })
+    })
+  })
 })
 
 // ─── hover-preview default (commit 97601c3) ──────────────────────────────────

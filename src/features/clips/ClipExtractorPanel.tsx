@@ -379,6 +379,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([]);
   const [selectedClipIds, setSelectedClipIds] = React.useState<Set<string>>(() => new Set());
   const [exportFormat, setExportFormat] = React.useState<ClipExportFormat>("prores-lt");
+  const [smoothExport, setSmoothExport] = React.useState(false);
   const [rateMode, setRateMode] = React.useState<ClipExportRateMode>("quality");
   const [exportBitrate, setExportBitrate] = React.useState<Record<ClipExportFormat, number>>({
     "gpu-intra": 60,
@@ -706,14 +707,28 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       // codec-conversion path still uses.
       if (exportSessionRef.current) {
         const percent = typeof payload.percent === "number" ? payload.percent : 0;
+        const smoothingIndex = typeof payload.clipIndex === "number"
+          ? Math.max(0, payload.clipIndex - 1)
+          : null;
         setExportSession((current) =>
           current
             ? {
                 ...current,
+                activeIndex: smoothingIndex ?? current.activeIndex,
                 activePercent: Math.max(0, Math.min(100, percent)),
                 activeFps: payload.fps ?? current.activeFps,
                 activeSpeed: payload.speed ?? current.activeSpeed,
                 activeMessage: payload.message || current.activeMessage,
+                rows: smoothingIndex == null
+                  ? current.rows
+                  : current.rows.map((row, index) => ({
+                    ...row,
+                    status: index < smoothingIndex || (index === smoothingIndex && percent >= 100)
+                      ? "done"
+                      : index === smoothingIndex
+                        ? "active"
+                        : "pending",
+                  })),
               }
             : current,
         );
@@ -2648,6 +2663,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let cancelled = false;
     let failed = false;
     let firstError: string | null = null;
+    const exportedPaths: string[] = [];
     const supportsRc = formatSupportsRateControl(exportFormat);
     const rateModeArg = supportsRc ? rateMode : null;
     const bitrateMbps = supportsRc && rateMode !== "quality"
@@ -2682,7 +2698,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
         try {
           if (clip.isUnified && clip.segments) {
-            await invoke<string>("clip_export_merged", {
+            const raw = await invoke<string>("clip_export_merged", {
               clips: clip.segments,
               outputDir: outDir,
               preset: exportFormat,
@@ -2690,8 +2706,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               rateMode: rateModeArg,
               bitrateMbps,
             });
+            const payload = parseBridgePayload<{ output?: string }>(raw);
+            if (payload.output) exportedPaths.push(payload.output);
           } else {
-            await invoke<string>("clip_export", {
+            const raw = await invoke<string>("clip_export", {
               clips: [
                 {
                   source: clip.path,
@@ -2707,6 +2725,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             rateMode: rateModeArg,
             bitrateMbps,
           });
+            const payload = parseBridgePayload<{ output?: string; outputs?: string[] }>(raw);
+            if (payload.outputs?.length) {
+              exportedPaths.push(...payload.outputs);
+            } else if (payload.output) {
+              exportedPaths.push(payload.output);
+            }
           }
           setExportSession((current) =>
             current
@@ -2750,6 +2774,63 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               : current,
           );
         }
+      }
+      if (!cancelled && !failed && smoothExport) {
+        if (exportedPaths.length !== selectedClips.length) {
+          throw new Error("The app could not identify every exported clip for motion smoothing.");
+        }
+        setExportSession((current) =>
+          current
+            ? {
+                ...current,
+                activeIndex: 0,
+                activePercent: 0,
+                activeFps: null,
+                activeSpeed: null,
+                activeMessage: "Preparing one motion-smoothing batch",
+                rows: current.rows.map((row) => ({ ...row, status: "pending" })),
+              }
+            : current,
+        );
+        await invoke<string>("interpolate_exported_clips", {
+          paths: exportedPaths,
+          factor: 2,
+          model: "rife4.25",
+          gpu: clipMode === "gpu",
+          half: clipMode === "gpu",
+          rateMode: rateModeArg ?? "quality",
+          quality: qualityValue ?? 18,
+          bitrateMbps: bitrateMbps ?? 20,
+        });
+        setExportSession((current) =>
+          current
+            ? {
+                ...current,
+                activePercent: 100,
+                rows: current.rows.map((row) => ({ ...row, status: "done" })),
+              }
+            : current,
+        );
+      }
+    } catch (e) {
+      const errorText = readBridgeError(e);
+      if (clipCancellingRef.current) {
+        cancelled = true;
+      } else {
+        failed = true;
+        firstError = errorText;
+        setExportSession((current) =>
+          current
+            ? {
+                ...current,
+                rows: current.rows.map((row, index) =>
+                  index === current.activeIndex
+                    ? { ...row, status: "error", errorMessage: errorText }
+                    : row,
+                ),
+              }
+            : current,
+        );
       }
     } finally {
       const finalPhase = cancelled
@@ -3013,7 +3094,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             </div>
             <Dropdown<ClipExportFormat>
               value={exportFormat}
-              onChange={(next) => setExportFormat(next)}
+              onChange={(next) => {
+                setExportFormat(next);
+                if (next !== "h264-nvenc" && next !== "h264-cpu") {
+                  setSmoothExport(false);
+                }
+              }}
               options={dropdownOptions}
               className="clip-export-format-dropdown"
             />
@@ -3043,6 +3129,31 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                 }}
               />
             )}
+            <label className={`clip-smoothing-toggle ${smoothExport ? "is-active" : ""}`}>
+              <span className="clip-smoothing-check">
+                <input
+                  type="checkbox"
+                  checked={smoothExport}
+                  disabled={isExtracting}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setSmoothExport(checked);
+                    if (checked && exportFormat !== "h264-nvenc" && exportFormat !== "h264-cpu") {
+                      setExportFormat(
+                        clipMode === "gpu" && gpuStatus?.hasH264Nvenc
+                          ? "h264-nvenc"
+                          : "h264-cpu",
+                      );
+                    }
+                  }}
+                />
+                <Zap size={13} strokeWidth={2.4} />
+              </span>
+              <span>
+                <strong>Smooth motion · 2× FPS</strong>
+                <small>Uses H.264, then runs one RIFE batch after every clip exports.</small>
+              </span>
+            </label>
           </div>
 
           {!mergeMode && (
