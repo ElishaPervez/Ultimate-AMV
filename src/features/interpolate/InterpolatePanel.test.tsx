@@ -26,6 +26,34 @@ describe("InterpolatePanel", () => {
     expect(screen.getByRole("button", { name: /RIFE 4.6 Lower memory/ })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("uses a target frame rate in the output name and backend request", async () => {
+    mockInvoke("interpolate_status", () => statusPayload());
+    mockInvoke("interpolate_run", () => JSON.stringify({
+      type: "done",
+      outcomes: [],
+      succeeded: 1,
+      failed: 0,
+      elapsedSeconds: 1,
+    }));
+    mockDialogOpen.mockResolvedValueOnce(["C:\\clips\\scene.mp4"]);
+    const user = userEvent.setup();
+    render(<InterpolatePanel active />);
+    await screen.findByText(/RTX Test/);
+    await user.click(screen.getByRole("button", { name: "Target FPS" }));
+    await user.click(screen.getByRole("button", { name: "120" }));
+    await user.click(screen.getByRole("button", { name: "Add clips" }));
+    expect(await screen.findByText("scene_120fps.mp4")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Interpolate 1 clip/ }));
+    await waitFor(() => {
+      expect(mockInvokeFn).toHaveBeenCalledWith("interpolate_run", expect.objectContaining({
+        targetFps: 120,
+        factor: 2,
+        rateMode: "quality",
+        quality: 18,
+      }));
+    });
+  });
+
   it("progress events update both the queue and progress card", async () => {
     mockInvoke("interpolate_status", () => statusPayload());
     mockInvoke("interpolate_run", () => new Promise(() => {}));

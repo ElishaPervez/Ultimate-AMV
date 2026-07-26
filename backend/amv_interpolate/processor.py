@@ -80,10 +80,32 @@ def is_scene_cut(first, second, threshold=SCENE_DIFFERENCE_THRESHOLD):
     return scene_difference(first, second) >= threshold
 
 
-def output_fps(source_fps, factor):
+def output_fps(source_fps, factor=None, target_fps=None):
+    if target_fps is not None:
+        target = float(target_fps)
+        if not math.isfinite(target) or target <= source_fps:
+            raise ValueError(
+                "Target frame rate must be higher than the source frame rate."
+            )
+        return target
     if factor not in (2, 3, 4):
         raise ValueError("Interpolation factor must be 2, 3, or 4")
     return float(source_fps) * factor
+
+
+def pair_timesteps(source_fps, target_fps, pair_index, next_output_index):
+    """Return output positions inside one source-frame interval."""
+    pair_start = pair_index / source_fps
+    pair_end = (pair_index + 1) / source_fps
+    timesteps = []
+    epsilon = 1e-9
+    while next_output_index / target_fps < pair_end - epsilon:
+        output_time = next_output_index / target_fps
+        timestep = (output_time - pair_start) * source_fps
+        if timestep >= -epsilon:
+            timesteps.append(max(0.0, min(1.0, timestep)))
+        next_output_index += 1
+    return timesteps, next_output_index
 
 
 def _parse_fraction(value):
@@ -213,6 +235,9 @@ def _encoder_command(
     fps,
     use_gpu,
     has_audio,
+    rate_mode="quality",
+    quality=18,
+    bitrate_mbps=20.0,
 ):
     fps_text = f"{fps:.8f}".rstrip("0").rstrip(".")
     command = [
@@ -237,25 +262,59 @@ def _encoder_command(
     command.extend(["-map", "0:v:0"])
     if has_audio:
         command.extend(["-map", "1:a:0?", "-c:a", "copy"])
+    quality = max(14, min(28, int(quality)))
+    bitrate = float(bitrate_mbps)
+    if not math.isfinite(bitrate) or bitrate <= 0:
+        raise ValueError("Target bitrate must be greater than 0 Mbps.")
+    bitrate_text = f"{bitrate:g}M"
+    buffer_text = f"{bitrate * 2:g}M"
+    if rate_mode not in {"quality", "vbr", "cbr"}:
+        raise ValueError("Rate control must be quality, vbr, or cbr.")
     if use_gpu:
-        command.extend(
-            [
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p5",
-                "-tune",
-                "hq",
-                "-rc",
-                "vbr",
-                "-cq",
-                "18",
-                "-b:v",
-                "0",
-            ]
-        )
+        command.extend(["-c:v", "h264_nvenc", "-preset", "p4"])
+        if rate_mode == "quality":
+            command.extend(["-rc", "constqp", "-cq", str(quality)])
+        elif rate_mode == "vbr":
+            command.extend(["-rc", "vbr", "-b:v", bitrate_text])
+        else:
+            command.extend(
+                [
+                    "-rc",
+                    "cbr",
+                    "-b:v",
+                    bitrate_text,
+                    "-minrate",
+                    bitrate_text,
+                    "-maxrate",
+                    bitrate_text,
+                    "-bufsize",
+                    buffer_text,
+                    "-cbr_padding",
+                    "1",
+                ]
+            )
+        command.extend(["-spatial-aq", "1", "-temporal-aq", "1"])
     else:
-        command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "18"])
+        command.extend(["-c:v", "libx264", "-preset", "slow"])
+        if rate_mode == "quality":
+            command.extend(["-crf", str(quality)])
+        elif rate_mode == "vbr":
+            command.extend(["-b:v", bitrate_text])
+        else:
+            command.extend(
+                [
+                    "-b:v",
+                    bitrate_text,
+                    "-minrate",
+                    bitrate_text,
+                    "-maxrate",
+                    bitrate_text,
+                    "-bufsize",
+                    buffer_text,
+                    "-x264-params",
+                    "nal-hrd=cbr",
+                ]
+            )
     command.extend(
         [
             "-pix_fmt",
@@ -277,6 +336,11 @@ def interpolate_clip(
     model,
     factor,
     use_gpu,
+    target_fps=None,
+    rate_mode="quality",
+    quality=18,
+    bitrate_mbps=20.0,
+    max_model_dimension=1920,
     progress_callback=None,
     ffmpeg_path=None,
     ffprobe_path=None,
@@ -289,7 +353,17 @@ def interpolate_clip(
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
-    target_fps = output_fps(info.fps, factor)
+    target_fps = output_fps(info.fps, factor=factor, target_fps=target_fps)
+    requested_scale = min(
+        1.0, float(max_model_dimension) / max(info.width, info.height)
+    )
+    inference_scale = (
+        1.0
+        if requested_scale >= 1.0
+        else 0.5
+        if requested_scale >= 0.5
+        else 0.25
+    )
     frame_bytes = info.width * info.height * 3
     decode_tail = deque(maxlen=30)
     encode_tail = deque(maxlen=30)
@@ -310,6 +384,9 @@ def interpolate_clip(
             target_fps,
             use_gpu,
             info.has_audio,
+            rate_mode=rate_mode,
+            quality=quality,
+            bitrate_mbps=bitrate_mbps,
         ),
         stdin=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -339,8 +416,9 @@ def interpolate_clip(
             info.height, info.width, 3
         )
         source_frames = 1
-        encoder.stdin.write(first.tobytes())
-        written_frames = 1
+        next_output_index = 0
+        written_frames = 0
+        pair_index = 0
 
         while True:
             second_bytes = _read_frame(decoder.stdout, frame_bytes)
@@ -356,19 +434,31 @@ def interpolate_clip(
             if cut:
                 scene_holds += 1
                 model.reset_state()
-            for step in range(1, factor):
-                if cut:
-                    intermediate = first
+            timesteps, next_output_index = pair_timesteps(
+                info.fps,
+                target_fps,
+                pair_index,
+                next_output_index,
+            )
+            for timestep in timesteps:
+                if timestep <= 1e-8:
+                    output_frame = first
+                elif cut:
+                    output_frame = first
                 else:
-                    intermediate = crop_frame(
-                        model.interpolate(padded_first, padded_second, step / factor),
+                    output_frame = crop_frame(
+                        model.interpolate(
+                            padded_first,
+                            padded_second,
+                            timestep,
+                            inference_scale=inference_scale,
+                        ),
                         original_shape,
                     )
-                encoder.stdin.write(intermediate.tobytes())
+                encoder.stdin.write(output_frame.tobytes())
                 written_frames += 1
-            encoder.stdin.write(second.tobytes())
-            written_frames += 1
             first = second
+            pair_index += 1
             percent = (
                 min(99.0, source_frames / info.frame_count * 100.0)
                 if info.frame_count
@@ -379,6 +469,12 @@ def interpolate_clip(
                 percent,
                 f"Interpolated {source_frames:,} source frames",
             )
+
+        final_time = (source_frames - 1) / info.fps
+        while next_output_index / target_fps <= final_time + 1e-9:
+            encoder.stdin.write(first.tobytes())
+            written_frames += 1
+            next_output_index += 1
 
         decoder.stdout.close()
         decoder_code = decoder.wait()
@@ -406,6 +502,7 @@ def interpolate_clip(
             "sourceFps": info.fps,
             "outputFps": target_fps,
             "sceneHolds": scene_holds,
+            "inferenceScale": inference_scale,
         }
     except BaseException:
         for process in (decoder, encoder):
@@ -420,6 +517,10 @@ def process_batch(
     model,
     factor,
     use_gpu,
+    target_fps=None,
+    rate_mode="quality",
+    quality=18,
+    bitrate_mbps=20.0,
     progress_callback=None,
     ffmpeg_path=None,
     ffprobe_path=None,
@@ -450,6 +551,10 @@ def process_batch(
                 model,
                 factor,
                 use_gpu,
+                target_fps=target_fps,
+                rate_mode=rate_mode,
+                quality=quality,
+                bitrate_mbps=bitrate_mbps,
                 progress_callback=clip_progress,
                 ffmpeg_path=ffmpeg_path,
                 ffprobe_path=ffprobe_path,

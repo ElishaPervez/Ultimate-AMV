@@ -116,12 +116,17 @@ class RifeModel:
         dtype = torch.float16 if self.half else torch.float32
         return tensor.to(dtype=dtype).div_(255.0)
 
-    def interpolate(self, first, second, timestep):
+    def interpolate(self, first, second, timestep, inference_scale=1.0):
         torch = self.torch
         first_tensor = self._tensor(first)
         second_tensor = self._tensor(second)
         with torch.inference_mode():
-            result = self.network(first_tensor, second_tensor, float(timestep))
+            result = self.network(
+                first_tensor,
+                second_tensor,
+                float(timestep),
+                inference_scale=float(inference_scale),
+            )
         result = result.clamp_(0, 1).mul_(255).byte()
         return result.squeeze(0).permute(1, 2, 0).cpu().numpy()
 

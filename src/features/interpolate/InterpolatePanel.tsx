@@ -24,9 +24,13 @@ import type {
   InterpolateNamingMode,
   InterpolateProgress,
   InterpolateQueueItem,
+  InterpolateRateIntent,
+  InterpolateRateMode,
   InterpolateStatus,
 } from "../../types/interpolate";
 import { InterpolateProgressCard } from "./InterpolateProgressCard";
+import { VideoOutputControl } from "../video/VideoOutputControl";
+import type { VideoControlSpec } from "../../types/conversion";
 
 const VIDEO_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi", "m4v"];
 
@@ -47,12 +51,15 @@ export function buildInterpolationOutput(
   outputFolder: string,
   factor: InterpolateFactor,
   naming: InterpolateNamingMode,
+  rateIntent: InterpolateRateIntent = "factor",
+  targetFps = 60,
 ): string {
   const stem = fileStem(input);
-  const name = naming === "suffix" ? `${stem}_${factor}x.mp4` : `${stem}.mp4`;
+  const suffix = rateIntent === "target" ? `${targetFps}fps` : `${factor}x`;
+  const name = naming === "suffix" ? `${stem}_${suffix}.mp4` : `${stem}.mp4`;
   const output = joinPath(outputFolder, name);
   if (output.toLocaleLowerCase() === input.toLocaleLowerCase()) {
-    return joinPath(outputFolder, `${stem}_${factor}x.mp4`);
+    return joinPath(outputFolder, `${stem}_${suffix}.mp4`);
   }
   return output;
 }
@@ -82,10 +89,15 @@ export function InterpolatePanel({ active }: { active: boolean }) {
   const [status, setStatus] = React.useState<InterpolateStatus | null>(null);
   const [queue, setQueue] = React.useState<InterpolateQueueItem[]>([]);
   const [factor, setFactor] = React.useState<InterpolateFactor>(2);
+  const [rateIntent, setRateIntent] = React.useState<InterpolateRateIntent>("factor");
+  const [targetFps, setTargetFps] = React.useState(60);
   const [model, setModel] = React.useState<InterpolateModelKey>("rife4.25");
   const [outputFolder, setOutputFolder] = React.useState("");
   const [naming, setNaming] = React.useState<InterpolateNamingMode>("suffix");
   const [useGpu, setUseGpu] = React.useState(true);
+  const [rateMode, setRateMode] = React.useState<InterpolateRateMode>("quality");
+  const [quality, setQuality] = React.useState(18);
+  const [bitrateMbps, setBitrateMbps] = React.useState(20);
   const [running, setRunning] = React.useState(false);
   const [cancelling, setCancelling] = React.useState(false);
   const [progress, setProgress] = React.useState<InterpolateProgress | null>(null);
@@ -106,10 +118,21 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     folder = outputFolder,
     selectedFactor = factor,
     selectedNaming = naming,
+    selectedIntent = rateIntent,
+    selectedTarget = targetFps,
   ) => items.map((item) => ({
     ...item,
-    output: folder ? buildInterpolationOutput(item.input, folder, selectedFactor, selectedNaming) : "",
-  })), [factor, naming, outputFolder]);
+    output: folder
+      ? buildInterpolationOutput(
+        item.input,
+        folder,
+        selectedFactor,
+        selectedNaming,
+        selectedIntent,
+        selectedTarget,
+      )
+      : "",
+  })), [factor, naming, outputFolder, rateIntent, targetFps]);
 
   React.useEffect(() => {
     if (!active || statusFetched.current) return;
@@ -179,7 +202,7 @@ export function InterpolatePanel({ active }: { active: boolean }) {
         .filter((path) => !known.has(path.toLocaleLowerCase()))
         .map((input) => ({
           input,
-          output: buildInterpolationOutput(input, folder, factor, naming),
+          output: buildInterpolationOutput(input, folder, factor, naming, rateIntent, targetFps),
           status: "queued" as const,
         }));
       return [...existing, ...added];
@@ -229,6 +252,16 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     setQueue((items) => refreshOutputs(items, outputFolder, factor, next));
   }
 
+  function updateRateIntent(next: InterpolateRateIntent) {
+    setRateIntent(next);
+    setQueue((items) => refreshOutputs(items, outputFolder, factor, naming, next, targetFps));
+  }
+
+  function updateTargetFps(next: number) {
+    setTargetFps(next);
+    setQueue((items) => refreshOutputs(items, outputFolder, factor, naming, rateIntent, next));
+  }
+
   async function runInterpolation() {
     if (running || interpolationBusy || queue.length === 0 || !outputFolder || !status) return;
     interpolationBusy = true;
@@ -246,9 +279,13 @@ export function InterpolatePanel({ active }: { active: boolean }) {
       const raw = await invoke<string>("interpolate_run", {
         jobs,
         factor,
+        targetFps: rateIntent === "target" ? targetFps : null,
         model,
         gpu: useGpu,
         half: useGpu,
+        rateMode,
+        quality,
+        bitrateMbps,
       });
       const done = parseBridgePayload<InterpolateDone>(raw);
       setResult(done);
@@ -303,6 +340,29 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     ? ((Math.max(0, currentIndex - 1) + currentPercent / 100) / queue.length) * 100
     : 0;
   const gpuReady = Boolean(status?.hardware.hasCuda);
+  const outputSpec: VideoControlSpec = rateMode === "quality"
+    ? {
+      label: "Constant quality",
+      valueLabel: useGpu ? "CQ" : "CRF",
+      help: "Lower values preserve more detail and create larger files.",
+      min: 14,
+      max: 28,
+      step: 1,
+      defaultValue: 18,
+      suffix: "",
+    }
+    : {
+      label: rateMode === "cbr" ? "Constant bitrate" : "Target bitrate",
+      valueLabel: "Mbps",
+      help: rateMode === "cbr"
+        ? "The encoder holds this bitrate throughout the clip."
+        : "The encoder averages around this bitrate.",
+      min: 1,
+      max: 200,
+      step: 1,
+      defaultValue: 20,
+      suffix: "",
+    };
 
   return (
     <section className="conversion-panel interpolate-panel">
@@ -377,17 +437,27 @@ export function InterpolatePanel({ active }: { active: boolean }) {
 
         <aside className="interpolate-controls">
           <div className="interpolate-control">
-            <span className="conversion-field-label">Speed factor</span>
+            <span className="conversion-field-label">Frame rate</span>
+            <div className="conversion-segment">
+              <button type="button" className={rateIntent === "factor" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("factor")}>
+                Multiplier
+              </button>
+              <button type="button" className={rateIntent === "target" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("target")}>
+                Target FPS
+              </button>
+            </div>
             <div className="conversion-segment interpolate-factor">
-              {([2, 3, 4] as InterpolateFactor[]).map((value) => (
+              {(rateIntent === "factor" ? [2, 3, 4] : [30, 60, 120]).map((value) => (
                 <button
                   type="button"
-                  className={factor === value ? "is-active" : ""}
+                  className={(rateIntent === "factor" ? factor === value : targetFps === value) ? "is-active" : ""}
                   disabled={running}
-                  onClick={() => updateFactor(value)}
+                  onClick={() => rateIntent === "factor"
+                    ? updateFactor(value as InterpolateFactor)
+                    : updateTargetFps(value)}
                   key={value}
                 >
-                  {value}x
+                  {value}{rateIntent === "factor" ? "x" : ""}
                 </button>
               ))}
             </div>
@@ -443,6 +513,31 @@ export function InterpolatePanel({ active }: { active: boolean }) {
             </div>
           </div>
 
+          <details className="interpolate-encoding">
+            <summary>Output encoding</summary>
+            <div className="interpolate-encoding-body">
+              <div className="conversion-segment interpolate-rate-mode">
+                {(["quality", "vbr", "cbr"] as InterpolateRateMode[]).map((value) => (
+                  <button
+                    type="button"
+                    className={rateMode === value ? "is-active" : ""}
+                    disabled={running}
+                    onClick={() => setRateMode(value)}
+                    key={value}
+                  >
+                    {value === "quality" ? "Quality" : value.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <VideoOutputControl
+                spec={outputSpec}
+                value={rateMode === "quality" ? quality : bitrateMbps}
+                disabled={running}
+                onChange={rateMode === "quality" ? setQuality : setBitrateMbps}
+              />
+            </div>
+          </details>
+
           {!useGpu && (
             <div className="interpolate-warning">
               <AlertTriangle size={16} />
@@ -464,7 +559,8 @@ export function InterpolatePanel({ active }: { active: boolean }) {
               overallPercent={overallPercent}
               completed={completed}
               total={queue.length}
-              factor={factor}
+              cadenceSteps={rateIntent === "factor" ? factor : 5}
+              cadenceLabel={rateIntent === "factor" ? `${factor}x frame cadence` : `${targetFps} fps target cadence`}
               etaSeconds={etaSeconds}
               cancelling={cancelling}
               onCancel={() => void cancelInterpolation()}

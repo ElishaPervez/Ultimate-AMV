@@ -3,19 +3,19 @@ from types import SimpleNamespace
 
 import pytest
 
-np = pytest.importorskip("numpy")
-
 from amv_interpolate import processor
 import interpolate_cli
 
 
 def test_scene_gate_holds_across_visually_distinct_frames():
+    np = pytest.importorskip("numpy")
     first = np.zeros((72, 128, 3), dtype=np.uint8)
     second = np.full((72, 128, 3), 255, dtype=np.uint8)
     assert processor.is_scene_cut(first, second)
 
 
 def test_scene_gate_allows_near_identical_frames():
+    np = pytest.importorskip("numpy")
     first = np.full((72, 128, 3), 100, dtype=np.uint8)
     second = np.full((72, 128, 3), 102, dtype=np.uint8)
     assert not processor.is_scene_cut(first, second)
@@ -23,6 +23,7 @@ def test_scene_gate_allows_near_identical_frames():
 
 @pytest.mark.parametrize("height,width", [(1080, 1920), (567, 1234)])
 def test_pad_and_crop_restore_exact_dimensions(height, width):
+    np = pytest.importorskip("numpy")
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     padded, original = processor.pad_frame(frame)
     assert padded.shape[0] % 64 == 0
@@ -33,6 +34,39 @@ def test_pad_and_crop_restore_exact_dimensions(height, width):
 @pytest.mark.parametrize("factor", [2, 3, 4])
 def test_output_fps_math(factor):
     assert processor.output_fps(23.976, factor) == pytest.approx(23.976 * factor)
+
+
+def test_target_fps_math_and_fractional_timesteps():
+    assert processor.output_fps(24, target_fps=60) == 60
+    first, next_index = processor.pair_timesteps(24, 60, 0, 0)
+    second, _ = processor.pair_timesteps(24, 60, 1, next_index)
+    assert first == pytest.approx([0.0, 0.4, 0.8])
+    assert second == pytest.approx([0.2, 0.6])
+
+
+@pytest.mark.parametrize(
+    "use_gpu,rate_mode,expected",
+    [
+        (True, "cbr", ("h264_nvenc", "-cbr_padding", "-minrate", "-maxrate")),
+        (False, "quality", ("libx264", "-crf")),
+    ],
+)
+def test_encoder_rate_controls_match_selected_mode(use_gpu, rate_mode, expected):
+    command = processor._encoder_command(
+        "ffmpeg",
+        "input.mp4",
+        "output.mp4",
+        1920,
+        1080,
+        60,
+        use_gpu,
+        True,
+        rate_mode=rate_mode,
+        quality=21,
+        bitrate_mbps=20,
+    )
+    for value in expected:
+        assert value in command
 
 
 def test_batch_continues_after_bad_path(monkeypatch, tmp_path):
@@ -95,6 +129,10 @@ def test_cli_constructs_model_once_for_multi_clip_batch(monkeypatch, tmp_path):
             model="rife4.25",
             gpu=False,
             half=True,
+            target_fps=None,
+            rate_mode="quality",
+            quality=18,
+            bitrate_mbps=20.0,
         )
     )
     assert result == 0
@@ -109,6 +147,8 @@ def test_parser_supplies_optional_defaults():
     assert args.model == "rife4.25"
     assert args.gpu is True
     assert args.half is True
+    assert args.target_fps is None
+    assert args.rate_mode == "quality"
 
 
 def test_progress_protocol_is_json_and_carries_queue_context(capsys):

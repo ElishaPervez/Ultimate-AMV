@@ -95,7 +95,7 @@ class Rife425Net(nn.Module):
         self.block4 = _FlowBlock425(28, 32)
         self.encode = _FeatureHead()
 
-    def forward(self, first, second, timestep=0.5):
+    def forward(self, first, second, timestep=0.5, inference_scale=1.0):
         pair = torch.cat((first, second), dim=1)
         if not torch.is_tensor(timestep):
             timestep = pair[:, :1].clone().fill_(float(timestep))
@@ -113,7 +113,7 @@ class Rife425Net(nn.Module):
         mask = None
         block_features = None
         blocks = (self.block0, self.block1, self.block2, self.block3, self.block4)
-        scales = (16, 8, 4, 2, 1)
+        scales = tuple(value / inference_scale for value in (16, 8, 4, 2, 1))
 
         for block, scale in zip(blocks, scales):
             if flow is None:
@@ -190,7 +190,7 @@ class Rife46Net(nn.Module):
         self.block2 = _FlowBlock46(12, 96)
         self.block3 = _FlowBlock46(12, 64)
 
-    def forward(self, first, second, timestep=0.5):
+    def forward(self, first, second, timestep=0.5, inference_scale=1.0):
         pair = torch.cat((first, second), dim=1)
         if not torch.is_tensor(timestep):
             timestep = pair[:, :1].clone().fill_(float(timestep))
@@ -205,7 +205,7 @@ class Rife46Net(nn.Module):
         flow = None
         mask = None
         blocks = (self.block0, self.block1, self.block2, self.block3)
-        scales = (8, 4, 2, 1)
+        scales = tuple(value / inference_scale for value in (8, 4, 2, 1))
 
         for block, scale in zip(blocks, scales):
             if flow is None:

@@ -109,6 +109,10 @@ def interpolate(args):
             model,
             args.factor,
             use_gpu,
+            target_fps=args.target_fps,
+            rate_mode=args.rate_mode,
+            quality=args.quality,
+            bitrate_mbps=args.bitrate_mbps,
             progress_callback=lambda stage, percent, message, clip_index, clip_count, clip_name: progress(
                 stage,
                 percent,
@@ -129,6 +133,7 @@ def interpolate(args):
             details={
                 "model": args.model,
                 "factor": args.factor,
+                "target_fps": args.target_fps,
                 "gpu": use_gpu,
                 "scene_holds": scene_holds,
             },
@@ -175,9 +180,15 @@ def build_parser():
     run_parser = subcommands.add_parser("interpolate")
     run_parser.add_argument("--jobs", required=True)
     run_parser.add_argument("--factor", type=int, choices=(2, 3, 4), default=2)
+    run_parser.add_argument("--target-fps", type=float, default=None)
     run_parser.add_argument("--model", choices=MODEL_KEYS, default="rife4.25")
     run_parser.add_argument("--gpu", type=_bool_value, default=True)
     run_parser.add_argument("--half", type=_bool_value, default=True)
+    run_parser.add_argument(
+        "--rate-mode", choices=("quality", "vbr", "cbr"), default="quality"
+    )
+    run_parser.add_argument("--quality", type=int, default=18)
+    run_parser.add_argument("--bitrate-mbps", type=float, default=20.0)
     return parser
 
 

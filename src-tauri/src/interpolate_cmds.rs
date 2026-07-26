@@ -154,15 +154,37 @@ pub(crate) async fn interpolate_run(
     window: tauri::Window,
     jobs: Vec<InterpolateJob>,
     factor: u32,
+    target_fps: Option<f64>,
     model: String,
     gpu: bool,
     half: bool,
+    rate_mode: Option<String>,
+    quality: Option<u32>,
+    bitrate_mbps: Option<f64>,
 ) -> Result<String, String> {
     if jobs.is_empty() {
         return Err("Add at least one clip before starting interpolation.".to_string());
     }
     if !matches!(factor, 2 | 3 | 4) {
         return Err("Frame interpolation supports 2x, 3x, or 4x speed factors.".to_string());
+    }
+    if let Some(target) = target_fps {
+        let target_int = target.round() as u32;
+        if !target.is_finite()
+            || (target - target_int as f64).abs() > f64::EPSILON
+            || !matches!(target_int, 30 | 60 | 120)
+        {
+            return Err("Target frame rate must be 30, 60, or 120 fps.".to_string());
+        }
+    }
+    let rate_mode = rate_mode.unwrap_or_else(|| "quality".to_string());
+    if !matches!(rate_mode.as_str(), "quality" | "vbr" | "cbr") {
+        return Err("Rate control must be quality, vbr, or cbr.".to_string());
+    }
+    let quality = quality.unwrap_or(18).clamp(14, 28);
+    let bitrate_mbps = bitrate_mbps.unwrap_or(20.0);
+    if !bitrate_mbps.is_finite() || bitrate_mbps <= 0.0 {
+        return Err("Target bitrate must be greater than 0 Mbps.".to_string());
     }
     let model_tool = match model.as_str() {
         "rife4.25" => "rife-4.25",
@@ -197,7 +219,18 @@ pub(crate) async fn interpolate_run(
         gpu.to_string(),
         "--half".to_string(),
         half.to_string(),
+        "--rate-mode".to_string(),
+        rate_mode,
+        "--quality".to_string(),
+        quality.to_string(),
+        "--bitrate-mbps".to_string(),
+        bitrate_mbps.to_string(),
     ];
+    let mut args = args;
+    if let Some(target) = target_fps {
+        args.push("--target-fps".to_string());
+        args.push(target.to_string());
+    }
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _jobs_file = jobs_file;
         run_streaming_interpolate_cli(window, args, output_paths)

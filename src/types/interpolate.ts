@@ -1,6 +1,8 @@
 export type InterpolateModelKey = "rife4.25" | "rife4.6";
 export type InterpolateFactor = 2 | 3 | 4;
 export type InterpolateNamingMode = "suffix" | "source-name";
+export type InterpolateRateIntent = "factor" | "target";
+export type InterpolateRateMode = "quality" | "vbr" | "cbr";
 export type InterpolateQueueStatus = "queued" | "running" | "done" | "failed";
 
 export type InterpolateStatus = {

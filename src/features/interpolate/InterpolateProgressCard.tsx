@@ -1,6 +1,6 @@
 import React from "react";
 import { Loader2, X } from "lucide-react";
-import type { InterpolateFactor, InterpolateProgress } from "../../types/interpolate";
+import type { InterpolateProgress } from "../../types/interpolate";
 
 function formatEta(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds)) return "Measuring queue speed";
@@ -14,7 +14,8 @@ export function InterpolateProgressCard({
   overallPercent,
   completed,
   total,
-  factor,
+  cadenceSteps,
+  cadenceLabel,
   etaSeconds,
   cancelling,
   onCancel,
@@ -23,7 +24,8 @@ export function InterpolateProgressCard({
   overallPercent: number;
   completed: number;
   total: number;
-  factor: InterpolateFactor;
+  cadenceSteps: number;
+  cadenceLabel: string;
   etaSeconds: number | null;
   cancelling: boolean;
   onCancel: () => void;
@@ -40,9 +42,9 @@ export function InterpolateProgressCard({
         </div>
       </div>
 
-      <div className="cadence-rail" aria-label={`${factor}x frame cadence`}>
+      <div className="cadence-rail" aria-label={cadenceLabel}>
         <span className="is-source" />
-        {Array.from({ length: factor - 1 }, (_, index) => (
+        {Array.from({ length: cadenceSteps - 1 }, (_, index) => (
           <span className="is-synthesized" key={index} />
         ))}
         <span className="is-source" />
