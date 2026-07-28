@@ -1,8 +1,11 @@
 """Duplicate-frame removal: decode a clip, drop the copies, re-encode.
 
 Frames are removed and nothing is inserted, so the output is shorter and
-faster than the source. The clip's frame rate is left alone -- fewer frames at
-the same rate is exactly what produces that.
+faster than the source. By default the clip's frame rate is left alone --
+fewer frames at the same rate is exactly what produces that. The export can
+also re-time the survivors to a chosen rate: no new frames appear, so a rate
+above the source plays the same pictures quicker and shortens the clip
+further, and a rate below it slows and stretches them.
 
 The preview and the export run through `remove_dead_frames` together, with only
 the render size and the encoder settings differing. That is deliberate: the
@@ -49,6 +52,18 @@ def preview_size(width, height, longest_edge=PREVIEW_LONGEST_EDGE):
         return _even(width), _even(height)
     scale = float(longest_edge) / max(width, height)
     return _even(width * scale), _even(height * scale)
+
+
+def export_fps(requested, source_fps):
+    """The rate an export plays at: the user's choice, or the clip's own.
+
+    Zero and None both mean "keep the source rate" -- that is the wire format
+    the CLI uses -- and anything non-positive falls back the same way rather
+    than handing FFmpeg a rate it would refuse.
+    """
+    if requested and float(requested) > 0:
+        return float(requested)
+    return source_fps
 
 
 def _fps_text(fps):
@@ -131,6 +146,7 @@ def remove_dead_frames(
     bitrate_mbps=20.0,
     output_format="h264-mp4",
     keep_audio=False,
+    fps=None,
     scores=None,
     progress_callback=None,
     ffmpeg_path=None,
@@ -175,6 +191,11 @@ def remove_dead_frames(
     decode_tail = deque(maxlen=30)
     encode_tail = deque(maxlen=30)
 
+    # The rate the surviving frames play at. The preview always uses the
+    # source rate: it attests to which frames the dial drops, and the export
+    # settings deliberately never invalidate it.
+    output_fps = info.fps if preview else export_fps(fps, info.fps)
+
     if preview:
         encoder_command = _preview_encoder_command(
             ffmpeg, output_path, width, height, info.fps
@@ -188,9 +209,9 @@ def remove_dead_frames(
             output_path,
             width,
             height,
-            # The source frame rate, unchanged. Fewer frames at the same rate
-            # is what shortens the clip.
-            info.fps,
+            # The source rate by default -- fewer frames at the same rate is
+            # what shortens the clip. A chosen rate re-times the survivors.
+            output_fps,
             use_gpu,
             has_audio,
             rate_mode=rate_mode,
@@ -299,11 +320,11 @@ def remove_dead_frames(
             "sourceFrames": source_frames,
             "keptFrames": kept_frames,
             "removedFrames": source_frames - kept_frames,
-            "fps": info.fps,
+            "fps": output_fps,
             "width": width,
             "height": height,
             "sourceDuration": info.duration,
-            "outputDuration": round(kept_frames / info.fps, 3) if info.fps else 0.0,
+            "outputDuration": round(kept_frames / output_fps, 3) if output_fps else 0.0,
             "hasAudio": has_audio,
         }
     except BaseException:
@@ -322,6 +343,7 @@ def process_batch(
     bitrate_mbps=20.0,
     output_format="h264-mp4",
     keep_audio=False,
+    fps=None,
     progress_callback=None,
     ffmpeg_path=None,
     ffprobe_path=None,
@@ -361,6 +383,7 @@ def process_batch(
                 bitrate_mbps=bitrate_mbps,
                 output_format=output_format,
                 keep_audio=keep_audio,
+                fps=fps,
                 progress_callback=clip_progress,
                 ffmpeg_path=ffmpeg_path,
                 ffprobe_path=ffprobe_path,

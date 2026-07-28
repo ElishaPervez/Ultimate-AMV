@@ -273,6 +273,18 @@ fn export_settings(
     Ok((sensitivity, rate_mode, quality, bitrate_mbps))
 }
 
+/// The optional export frame rate. `None` keeps each clip's own rate; a chosen
+/// rate re-times the surviving frames, so it has to be a number FFmpeg will
+/// actually accept — the ceiling only exists to catch a garbage value before a
+/// whole batch is spent encoding it.
+fn validate_export_fps(fps: Option<f64>) -> Result<Option<f64>, String> {
+    match fps {
+        None => Ok(None),
+        Some(value) if value.is_finite() && value > 0.0 && value <= 1000.0 => Ok(Some(value)),
+        Some(_) => Err("Export frame rate must be between 0 and 1000 fps.".to_string()),
+    }
+}
+
 /// Previews live under app_data_dir: the panel plays them through
 /// convertFileSrc and the asset protocol scope only covers $APPDATA /
 /// $RESOURCE / $HOME.
@@ -364,6 +376,7 @@ pub(crate) async fn deadframe_export(
     quality: Option<u32>,
     bitrate_mbps: Option<f64>,
     keep_audio: Option<bool>,
+    fps: Option<f64>,
     gpu: Option<bool>,
 ) -> Result<String, String> {
     if inputs.is_empty() {
@@ -371,6 +384,7 @@ pub(crate) async fn deadframe_export(
     }
     let (sensitivity, rate_mode, quality, bitrate_mbps) =
         export_settings(sensitivity, rate_mode, quality, bitrate_mbps)?;
+    let fps = validate_export_fps(fps)?;
     let output_format = output_format.unwrap_or_else(|| "h264-mp4".to_string());
     let suffix = suffix.unwrap_or_else(|| DEFAULT_SUFFIX.to_string());
     let sources: Vec<PathBuf> = inputs.iter().map(PathBuf::from).collect();
@@ -388,7 +402,7 @@ pub(crate) async fn deadframe_export(
     // GPU stays opt-in: h264 becomes h264_nvenc only when the panel says the
     // machine has an NVIDIA card, and libx264 otherwise.
     let gpu = gpu.unwrap_or(false);
-    let args = vec![
+    let mut args = vec![
         "export".to_string(),
         "--jobs".to_string(),
         jobs_file.0.to_string_lossy().to_string(),
@@ -407,6 +421,11 @@ pub(crate) async fn deadframe_export(
         "--gpu".to_string(),
         gpu.to_string(),
     ];
+    // Absent means "keep each clip's own rate", and the sidecar spells that 0.
+    if let Some(fps) = fps {
+        args.push("--fps".to_string());
+        args.push(fps.to_string());
+    }
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _jobs_file = jobs_file;
         run_streaming_deadframe_cli(window, args, output_paths, "deadframe-export-progress")
@@ -691,6 +710,26 @@ mod tests {
             export_settings(-5.0, None, Some(1), None).expect("settings");
         assert_eq!(sensitivity, 0.0);
         assert_eq!(quality, 14);
+    }
+
+    #[test]
+    fn an_absent_frame_rate_means_the_source_rate() {
+        assert_eq!(validate_export_fps(None), Ok(None));
+    }
+
+    #[test]
+    fn a_chosen_frame_rate_survives_validation_intact() {
+        assert_eq!(validate_export_fps(Some(23.976)), Ok(Some(23.976)));
+        assert_eq!(validate_export_fps(Some(60.0)), Ok(Some(60.0)));
+    }
+
+    #[test]
+    fn impossible_frame_rates_are_rejected_before_any_encode_starts() {
+        assert!(validate_export_fps(Some(0.0)).is_err());
+        assert!(validate_export_fps(Some(-24.0)).is_err());
+        assert!(validate_export_fps(Some(f64::NAN)).is_err());
+        assert!(validate_export_fps(Some(f64::INFINITY)).is_err());
+        assert!(validate_export_fps(Some(1001.0)).is_err());
     }
 
     #[test]

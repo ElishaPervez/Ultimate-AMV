@@ -118,6 +118,21 @@ function exportButton(): HTMLElement {
   return screen.getByRole("button", { name: "Export queue" });
 }
 
+// The four format cards are gone; the container is picked from a dropdown, and
+// each format's one-line hint now lives inside the menu.
+function formatTrigger(): HTMLElement {
+  return screen.getByRole("button", { name: /^(H\.264|HEVC|ProRes) · /u });
+}
+
+async function chooseFormat(user: ReturnType<typeof userEvent.setup>, label: RegExp) {
+  await user.click(formatTrigger());
+  await user.click(await screen.findByRole("option", { name: label }));
+}
+
+function ribbonTicks(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>(".deadframe-ribbon-tick"));
+}
+
 async function previewSelectedClip(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "Preview" }));
   await waitFor(() => expect(exportButton()).toBeEnabled());
@@ -182,7 +197,7 @@ describe("DeadFramePanel export gate", () => {
     render(<DeadFramePanel active />);
     await addClips(user, [CLIP]);
     await previewSelectedClip(user);
-    await user.click(screen.getByRole("button", { name: /H\.264 · MKV/ }));
+    await chooseFormat(user, /H\.264 · MKV/);
     expect(exportButton()).toBeEnabled();
     expect(
       screen.getByText("preview matches the dial - ready to export 1 clip"),
@@ -197,14 +212,43 @@ describe("DeadFramePanel detection dial", () => {
     render(<DeadFramePanel active />);
     await addClips(user, [CLIP]);
     expect(analyzeCallCount()).toBe(1);
-    expect(screen.getByText("6 frames → 4 kept · 2 removed")).toBeInTheDocument();
+    expect(screen.getByText("4 kept")).toBeInTheDocument();
+    expect(screen.getByText("2 removed")).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("slider", { name: "Sensitivity" }), {
       target: { value: "60" },
     });
-    expect(await screen.findByText("6 frames → 3 kept · 3 removed")).toBeInTheDocument();
+    expect(await screen.findByText("3 kept")).toBeInTheDocument();
+    expect(screen.getByText("3 removed")).toBeInTheDocument();
     expect(screen.getByText("6 → 3")).toBeInTheDocument();
     expect(analyzeCallCount()).toBe(1);
+  });
+
+  it("draws one ribbon tick per frame and drops exactly the ones the count lost", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+
+    const dropped = () => ribbonTicks().filter((tick) => tick.dataset.drop === "1").length;
+    expect(ribbonTicks()).toHaveLength(SCORES.length);
+    expect(dropped()).toBe(SCORES.length - keptFrameCount(SCORES, 18));
+
+    fireEvent.change(screen.getByRole("slider", { name: "Sensitivity" }), {
+      target: { value: "60" },
+    });
+    await screen.findByText("3 kept");
+    expect(dropped()).toBe(SCORES.length - keptFrameCount(SCORES, 60));
+  });
+
+  it("shows an empty ribbon with no numbers before any clip is selected", async () => {
+    registerDefaults();
+    render(<DeadFramePanel active />);
+    await screen.findByText("no preview yet");
+    expect(ribbonTicks()).toHaveLength(0);
+    expect(document.querySelector(".deadframe-ribbon-baseline")).not.toBeNull();
+    expect(screen.queryByText(/\d+ kept/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ removed/)).not.toBeInTheDocument();
   });
 
   it("counts a score sitting exactly on the threshold as kept", () => {
@@ -223,13 +267,13 @@ describe("DeadFramePanel output controls", () => {
     expect(screen.getByRole("button", { name: "Quality" })).toBeInTheDocument();
     expect(screen.getByRole("slider", { name: "Constant quality" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /ProRes · MOV/ }));
+    await chooseFormat(user, /ProRes · MOV/);
     expect(screen.queryByRole("button", { name: "Quality" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "CBR" })).not.toBeInTheDocument();
     expect(screen.queryByRole("slider", { name: "Constant quality" })).not.toBeInTheDocument();
     expect(screen.getByText(/nothing to tune/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /H\.264 · MP4/ }));
+    await chooseFormat(user, /H\.264 · MP4/);
     expect(screen.getByRole("button", { name: "Quality" })).toBeInTheDocument();
     expect(screen.getByRole("slider", { name: "Constant quality" })).toBeInTheDocument();
   });
@@ -253,7 +297,7 @@ describe("DeadFramePanel output controls", () => {
     await addClips(user, [CLIP]);
     await previewSelectedClip(user);
 
-    await user.click(screen.getByRole("button", { name: /H\.264 · MKV/ }));
+    await chooseFormat(user, /H\.264 · MKV/);
     await user.click(screen.getByRole("button", { name: "CBR" }));
     fireEvent.change(screen.getByRole("slider", { name: "Constant bitrate" }), {
       target: { value: "40" },
@@ -272,13 +316,53 @@ describe("DeadFramePanel output controls", () => {
         quality: 18,
         bitrateMbps: 40,
         keepAudio: true,
+        fps: null,
         gpu: true,
       });
+    });
+  });
+
+  it("sends no frame rate by default and the chosen one after the dropdown is used", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await previewSelectedClip(user);
+
+    // Picking a rate is an encoder setting, so the gate stays open like it
+    // does for the format and rate-mode controls.
+    await user.click(screen.getByRole("button", { name: "Source fps" }));
+    await user.click(await screen.findByRole("option", { name: "60 fps" }));
+    expect(exportButton()).toBeEnabled();
+
+    await user.click(exportButton());
+    await waitFor(() => {
+      expect(mockInvokeFn).toHaveBeenCalledWith(
+        "deadframe_export",
+        expect.objectContaining({ fps: 60 }),
+      );
     });
   });
 });
 
 describe("DeadFramePanel preview", () => {
+  it("keeps Preview and Export reachable, and gated as before, after the rebuild", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    // Preview now sits in the sensitivity card, Export alone in the bottom bar.
+    // Both stay shut until there is a measured clip / a matching preview.
+    expect(screen.getByRole("button", { name: "Preview" })).toBeDisabled();
+    expect(exportButton()).toBeDisabled();
+
+    await addClips(user, [CLIP]);
+    expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+    expect(exportButton()).toBeDisabled();
+
+    await previewSelectedClip(user);
+    expect(exportButton()).toBeEnabled();
+  });
+
   it("asks the backend for the selected clip at the dial the user can see", async () => {
     registerDefaults();
     const user = userEvent.setup();

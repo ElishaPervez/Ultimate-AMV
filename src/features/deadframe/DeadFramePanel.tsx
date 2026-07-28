@@ -25,6 +25,7 @@ import type { InterpolateStatus } from "../../types/interpolate";
 import type {
   DeadFrameAnalysis,
   DeadFrameDone,
+  DeadFrameExportFps,
   DeadFrameOutputFormat,
   DeadFramePreview,
   DeadFramePreviewDone,
@@ -33,14 +34,32 @@ import type {
   DeadFrameRateMode,
 } from "../../types/deadframe";
 import { DeadFrameVideo } from "./DeadFrameVideo";
+import { FrameRibbon } from "./FrameRibbon";
 import { VideoOutputControl } from "../video/VideoOutputControl";
 import { OUTPUT_FORMATS } from "../video/outputFormats";
+import { Dropdown } from "../../components/Dropdown";
+import type { DropdownOption } from "../../components/Dropdown";
 import type { VideoControlSpec } from "../../types/conversion";
 
 export { acceptsDroppedPath, isSupportedVideoPath };
 
 export const DEFAULT_SENSITIVITY = 18;
 export const DEFAULT_SUFFIX = "_nodead";
+
+// Removing frames never creates new ones, so a chosen rate is a re-timing of
+// the survivors: above the source it plays faster and shorter, below it slower
+// and longer. Smoothing to a higher rate is Frame Interpolation's job.
+const EXPORT_FPS_OPTIONS: DropdownOption<DeadFrameExportFps>[] = [
+  {
+    value: "source",
+    label: "Source fps",
+    description: "Each clip keeps its own rate; only the removed frames shorten it.",
+  },
+  ...[23.976, 24, 30, 48, 60, 120].map((value) => ({
+    value,
+    label: `${value} fps`,
+  })),
+];
 
 // Backend events keep arriving while a run is in flight; this flag is what
 // stops a stale one from repainting a panel that is no longer working. It is
@@ -59,17 +78,23 @@ export function removalThreshold(sensitivity: number): number {
 }
 
 /**
+ * One entry per frame: true where the frame survives at this dial position.
+ *
  * Frame 0 has nothing before it to compare against, so it is never removable.
  * A frame sitting exactly on the threshold is kept — the comparison is strict,
- * matching `amv_deadframe/analyzer.py`, so the live count and the export agree.
+ * matching `removal_set()` in `amv_deadframe/analyzer.py` (which drops on
+ * `index > 0 and score < threshold`), so the live count and the export agree.
+ *
+ * The ribbon and the kept/removed numbers are both drawn from this one array,
+ * which is the only reason the picture cannot drift away from the count.
  */
-export function keptFrameCount(scores: number[], sensitivity: number): number {
+export function keptFrameFlags(scores: number[], sensitivity: number): boolean[] {
   const threshold = removalThreshold(sensitivity);
-  let kept = 0;
-  for (let index = 0; index < scores.length; index += 1) {
-    if (index === 0 || scores[index] >= threshold) kept += 1;
-  }
-  return kept;
+  return scores.map((score, index) => index === 0 || score >= threshold);
+}
+
+export function keptFrameCount(scores: number[], sensitivity: number): number {
+  return keptFrameFlags(scores, sensitivity).filter(Boolean).length;
 }
 
 export function DeadFramePanel({ active }: { active: boolean }) {
@@ -82,6 +107,7 @@ export function DeadFramePanel({ active }: { active: boolean }) {
   const [quality, setQuality] = React.useState(18);
   const [bitrateMbps, setBitrateMbps] = React.useState(20);
   const [keepAudio, setKeepAudio] = React.useState(false);
+  const [exportFps, setExportFps] = React.useState<DeadFrameExportFps>("source");
   const [suffix, setSuffix] = React.useState(DEFAULT_SUFFIX);
   const [preview, setPreview] = React.useState<DeadFramePreview | null>(null);
   const [previewing, setPreviewing] = React.useState(false);
@@ -354,6 +380,7 @@ export function DeadFramePanel({ active }: { active: boolean }) {
         quality,
         bitrateMbps,
         keepAudio,
+        fps: exportFps === "source" ? null : exportFps,
         gpu: useGpu,
       });
       const done = parseBridgePayload<DeadFrameDone>(raw);
@@ -406,8 +433,13 @@ export function DeadFramePanel({ active }: { active: boolean }) {
   }
 
   const selectedItem = queue.find((item) => item.input === selectedInput) || null;
-  const selectedKept = selectedItem?.scores ? keptFrameCount(selectedItem.scores, sensitivity) : 0;
-  const selectedRemoved = selectedItem?.scores ? selectedItem.scores.length - selectedKept : 0;
+  // The ribbon and the two numbers under it both come off this array, so they
+  // are the same measurement rendered twice rather than two calculations.
+  const selectedFlags = selectedItem?.scores
+    ? keptFrameFlags(selectedItem.scores, sensitivity)
+    : null;
+  const selectedKept = selectedFlags ? selectedFlags.filter(Boolean).length : 0;
+  const selectedRemoved = selectedFlags ? selectedFlags.length - selectedKept : 0;
   // A clip whose measurement failed is skipped by the export; it has no scores,
   // so there is nothing to remove from it.
   const exportable = queue.filter((item) => Array.isArray(item.scores));
@@ -423,6 +455,13 @@ export function DeadFramePanel({ active }: { active: boolean }) {
 
   const useGpu = Boolean(status?.hardware.hasCuda);
   const supportsRateControl = OUTPUT_FORMATS.find((entry) => entry.key === outputFormat)?.rateControl ?? true;
+  // The one-line hint each format used to print on screen moves inside the
+  // menu, where it is read once while choosing instead of sitting there.
+  const formatOptions: DropdownOption<DeadFrameOutputFormat>[] = OUTPUT_FORMATS.map((entry) => ({
+    value: entry.key,
+    label: entry.label,
+    description: entry.hint,
+  }));
   const outputSpec: VideoControlSpec = rateMode === "quality"
     ? {
       label: "Constant quality",
@@ -461,14 +500,7 @@ export function DeadFramePanel({ active }: { active: boolean }) {
         <small>MP4 · MKV · MOV · WEBM · AVI · M4V</small>
       </div>
       <header className="conversion-hero deadframe-hero">
-        <div>
-          <span className="conversion-kicker">Duplicate frames</span>
-          <h2>Drop the held frames, keep the drawings.</h2>
-          <p>
-            Anime holds one drawing for two or three frames. This finds the copies and deletes them,
-            so the clip comes out shorter and faster than it went in.
-          </p>
-        </div>
+        <h2>Dead frame remover</h2>
         <div className={`conversion-compat ${useGpu ? "is-ready" : "is-locked"}`}>
           {useGpu ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
           <span>
@@ -501,7 +533,7 @@ export function DeadFramePanel({ active }: { active: boolean }) {
               <button type="button" className="interpolate-empty" onClick={() => void pickFiles()}>
                 <Scissors size={24} />
                 <strong>Build a de-duplication queue</strong>
-                <span>Drop clips or a folder anywhere on this page, or click to browse. MP4, MKV, MOV, WebM, AVI, and M4V are accepted.</span>
+                <span>Drop clips or a folder here, or click to browse.</span>
               </button>
             ) : (
               <div className="interpolate-queue-list">
@@ -581,60 +613,53 @@ export function DeadFramePanel({ active }: { active: boolean }) {
             </figure>
           </div>
 
-          <div className="deadframe-controls">
-            <section className="deadframe-dial" aria-label="Detection">
-              <div className="deadframe-dial-head">
-                <div>
-                  <span className="conversion-field-label">Sensitivity</span>
-                  <span className="deadframe-dial-help">
-                    Higher catches more copies. Too high and a slow pan starts losing frames it needed.
-                  </span>
-                </div>
-                <strong>{sensitivity}</strong>
-              </div>
-              <input
-                className="video-output-slider"
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={sensitivity}
-                disabled={busy}
-                aria-label="Sensitivity"
-                style={{ "--fill": `${sensitivity}%` } as React.CSSProperties}
-                onChange={(event) => updateSensitivity(Number(event.currentTarget.value))}
-              />
-              <p className="deadframe-dial-count">
-                {selectedItem?.scores
-                  ? `${selectedItem.scores.length} frames → ${selectedKept} kept · ${selectedRemoved} removed`
-                  : "Select a measured clip to see its count."}
-              </p>
-              {selectedItem?.scores && selectedRemoved === 0 && (
-                <p className="deadframe-dial-note">
-                  Nothing is being removed at this setting. A grainy source can look like motion on every frame.
-                </p>
+          <section className="deadframe-dial" aria-label="Detection">
+            <div className="deadframe-dial-head">
+              <span className="conversion-field-label">Sensitivity</span>
+              <strong>{sensitivity}</strong>
+            </div>
+            <input
+              className="video-output-slider"
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={sensitivity}
+              disabled={busy}
+              aria-label="Sensitivity"
+              style={{ "--fill": `${sensitivity}%` } as React.CSSProperties}
+              onChange={(event) => updateSensitivity(Number(event.currentTarget.value))}
+            />
+            <FrameRibbon
+              flags={selectedFlags}
+              action={(
+                <button
+                  type="button"
+                  className="conversion-pick-btn deadframe-preview-btn"
+                  disabled={!selectedItem?.scores || busy}
+                  onClick={() => void runPreview()}
+                >
+                  <Play size={14} />
+                  Preview
+                </button>
               )}
-            </section>
+            />
+            {selectedFlags && selectedRemoved === 0 && (
+              <p className="deadframe-dial-note">Nothing is being removed at this setting.</p>
+            )}
+          </section>
 
-            <section className="interpolate-encoding deadframe-encoding" aria-label="Output encoding">
-              <span className="conversion-field-label">Output encoding</span>
-              <div className="interpolate-formats">
-                {OUTPUT_FORMATS.map((entry) => (
-                  <button
-                    type="button"
-                    className={outputFormat === entry.key ? "is-active" : ""}
-                    disabled={busy}
-                    aria-pressed={outputFormat === entry.key}
-                    onClick={() => setOutputFormat(entry.key)}
-                    key={entry.key}
-                  >
-                    <strong>{entry.label}</strong>
-                    <span>{entry.hint}</span>
-                  </button>
-                ))}
-              </div>
+          <section className="interpolate-encoding deadframe-encoding" aria-label="Output encoding">
+            <div className="deadframe-encoding-row">
+              <Dropdown<DeadFrameOutputFormat>
+                className="deadframe-format-dropdown"
+                options={formatOptions}
+                value={outputFormat}
+                disabled={busy}
+                onChange={setOutputFormat}
+              />
               {supportsRateControl ? (
-                <div className="interpolate-encoding-body">
+                <>
                   <div className="conversion-segment interpolate-rate-mode">
                     {(["quality", "vbr", "cbr"] as DeadFrameRateMode[]).map((value) => (
                       <button
@@ -654,18 +679,36 @@ export function DeadFramePanel({ active }: { active: boolean }) {
                     disabled={busy}
                     onChange={rateMode === "quality" ? setQuality : setBitrateMbps}
                   />
-                </div>
+                </>
               ) : (
                 <p className="interpolate-encoding-note">
-                  ProRes keeps almost everything the source had, so there is nothing to tune.
-                  Expect files several times larger than the original.
+                  ProRes is near-lossless — nothing to tune.
                 </p>
               )}
-            </section>
-
-            <section className="deadframe-output" aria-label="Output files">
-              <div className="deadframe-output-row">
-                <span className="conversion-field-label">Audio</span>
+            </div>
+            <div className="deadframe-encoding-row is-files">
+              <div className="deadframe-field">
+                <span
+                  className="conversion-field-label"
+                  title="The rate the surviving frames play at. No new frames are created, so a rate above the source plays the clip faster and shorter, and a rate below it slower and longer. For smoothing, use Frame Interpolation instead."
+                >
+                  Frame rate
+                </span>
+                <Dropdown<DeadFrameExportFps>
+                  className="deadframe-fps-dropdown"
+                  options={EXPORT_FPS_OPTIONS}
+                  value={exportFps}
+                  disabled={busy}
+                  onChange={setExportFps}
+                />
+              </div>
+              <div className="deadframe-field">
+                <span
+                  className="conversion-field-label"
+                  title="Every file lands beside its own source. Audio kept from a shorter video no longer lines up with the picture, which is why dropping it is the default."
+                >
+                  Audio
+                </span>
                 <div className="conversion-segment">
                   <button type="button" className={keepAudio ? "" : "is-active"} disabled={busy} onClick={() => setKeepAudio(false)}>
                     Drop
@@ -675,8 +718,8 @@ export function DeadFramePanel({ active }: { active: boolean }) {
                   </button>
                 </div>
               </div>
-              <div className="deadframe-output-row">
-                <span className="conversion-field-label">File suffix</span>
+              <div className="deadframe-field">
+                <span className="conversion-field-label">Suffix</span>
                 <input
                   className="deadframe-suffix"
                   type="text"
@@ -686,12 +729,8 @@ export function DeadFramePanel({ active }: { active: boolean }) {
                   onChange={(event) => setSuffix(event.currentTarget.value)}
                 />
               </div>
-              <p className="deadframe-output-note">
-                Every file lands beside its own source. Audio kept from a shorter video no longer
-                lines up with the picture, which is why dropping it is the default.
-              </p>
-            </section>
-          </div>
+            </div>
+          </section>
 
           {error && <div className="interpolate-result is-error">{error}</div>}
           {result && !busy && (
@@ -734,15 +773,6 @@ export function DeadFramePanel({ active }: { active: boolean }) {
               {gateMessage}
             </span>
             <div className="deadframe-actions">
-              <button
-                type="button"
-                className="conversion-pick-btn deadframe-preview-btn"
-                disabled={!selectedItem?.scores || busy}
-                onClick={() => void runPreview()}
-              >
-                <Play size={15} />
-                Preview
-              </button>
               <button
                 type="button"
                 className="conversion-run-btn deadframe-export"

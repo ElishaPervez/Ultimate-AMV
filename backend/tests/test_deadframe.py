@@ -1,5 +1,6 @@
 import pytest
 
+import deadframe_cli
 from amv_deadframe import analyzer, processor
 
 
@@ -90,6 +91,48 @@ def test_the_preview_encoder_is_fixed_and_drops_audio():
     # to survive intact or the preview would drift against the export.
     assert "-an" in command
     assert "23.97602398" in command
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
+    [
+        # None and 0 are both the wire form of "keep the source rate", and a
+        # negative value falls back the same way instead of reaching FFmpeg.
+        (None, 23.976),
+        (0, 23.976),
+        (-5, 23.976),
+        (60, 60.0),
+        (23.976, 23.976),
+    ],
+)
+def test_the_export_rate_is_the_users_choice_or_the_sources_own(requested, expected):
+    assert processor.export_fps(requested, 23.976) == pytest.approx(expected)
+
+
+def test_the_export_parser_reads_a_frame_rate_and_defaults_to_the_source():
+    parser = deadframe_cli.build_parser()
+    chosen = parser.parse_args(["export", "--jobs", "queue.json", "--fps", "60"])
+    assert chosen.fps == 60.0
+    default = parser.parse_args(["export", "--jobs", "queue.json"])
+    assert default.fps == 0.0
+
+
+def test_the_batch_hands_every_clip_the_chosen_frame_rate(tmp_path, monkeypatch):
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"")
+    received = {}
+
+    def fake_remove(input_path, output_path, sensitivity, **kwargs):
+        received.update(kwargs)
+        return {"input": str(input_path), "output": str(output_path)}
+
+    monkeypatch.setattr(processor, "remove_dead_frames", fake_remove)
+    processor.process_batch(
+        [{"input": str(clip), "output": str(tmp_path / "out.mp4")}],
+        analyzer.DEFAULT_SENSITIVITY,
+        fps=60,
+    )
+    assert received["fps"] == 60
 
 
 def test_a_failing_clip_does_not_stop_the_rest_of_the_queue(tmp_path, monkeypatch):

@@ -147,6 +147,7 @@ def export(args):
             bitrate_mbps=args.bitrate_mbps,
             output_format=args.output_format,
             keep_audio=bool(args.keep_audio),
+            fps=args.fps or None,
             progress_callback=lambda stage, percent, message, clip_index, clip_count, clip_name: progress(
                 stage,
                 percent,
@@ -168,6 +169,7 @@ def export(args):
                 "sensitivity": args.sensitivity,
                 "output_format": args.output_format,
                 "keep_audio": bool(args.keep_audio),
+                "fps": args.fps,
                 "gpu": bool(args.gpu),
                 "removed_frames": removed_frames,
             },
@@ -235,6 +237,9 @@ def build_parser():
         "--output-format", choices=OUTPUT_FORMAT_KEYS, default="h264-mp4"
     )
     export_parser.add_argument("--keep-audio", type=_bool_value, default=False)
+    # 0 means "keep each clip's own rate". A positive value re-times the
+    # surviving frames, which changes the clip's speed and length.
+    export_parser.add_argument("--fps", type=float, default=0.0)
     # The encoder family follows the hardware, never a user choice: h264 becomes
     # h264_nvenc on an NVIDIA card and libx264 otherwise. CPU is the default so
     # a machine without one is never handed an encoder it cannot run.

@@ -1,10 +1,15 @@
 /* ============================================================
    DEAD FRAME REMOVER
    ============================================================
-   Sibling of interpolate.css. The queue pane, format picker and
+   Sibling of interpolate.css. The queue pane, encoding card and
    result banners are shared with Frame Interpolation (the
    `.interpolate-*` classes the panel reuses verbatim); everything
    prefixed `.deadframe-*` is this panel's own geometry.
+
+   The panel FITS rather than scrolls: the whole thing is sized to
+   the window it is given, and the only region allowed a scrollbar
+   is the clip list. Everything else either has a fixed height or
+   shrinks, and the two players soak up whatever height is left.
 
    The panel is its own inline-size container, so every breakpoint
    below reacts to the width the panel ACTUALLY has. The sidebar
@@ -13,23 +18,36 @@
    ============================================================ */
 
 .deadframe-panel {
-  gap: 20px;
+  gap: 14px;
+  padding: 18px clamp(20px, 3.2vw, 46px) 18px;
+  overflow: hidden;
   container-type: inline-size;
   container-name: deadframe;
 }
 
+/* ---- Header ------------------------------------------------ */
+/* One line: the panel name and the encoder chip. */
+
 .deadframe-hero {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 11px;
 }
 
 .deadframe-hero h2 {
-  font-size: clamp(30px, 3.9vw, 52px);
-  letter-spacing: -0.035em;
+  margin: 0;
+  max-width: none;
+  font-size: 19px;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
 }
 
-.deadframe-hero p {
-  max-width: 720px;
+.deadframe-hero .conversion-compat {
+  min-height: 0;
+  flex: 0 0 auto;
+  font-size: 11.5px;
 }
 
 /* ---- Layout ------------------------------------------------ */
@@ -37,16 +55,58 @@
 .deadframe-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.72fr);
-  gap: 20px;
-  align-items: start;
+  grid-template-columns: minmax(280px, 0.72fr) minmax(0, 1.78fr);
+  gap: 16px;
+  align-items: stretch;
 }
+
+/* The queue column runs the full height of the panel; its list is the
+   one scrollable region in here. */
+
+.deadframe-layout .interpolate-queue-column {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+}
+
+.deadframe-layout .interpolate-queue-pane {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.deadframe-layout .interpolate-queue-toolbar {
+  min-height: 0;
+  padding: 11px 13px;
+}
+
+.deadframe-layout .interpolate-queue-list {
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+.deadframe-layout .interpolate-empty {
+  min-height: 0;
+  margin: 13px;
+  width: calc(100% - 26px);
+}
+
+/* Players take the slack; the dial card, the output card, the banners
+   and the bottom bar each take exactly what they need. The first row is
+   named explicitly and the rest fall into implicit auto rows, so the
+   error/result/progress blocks can come and go without the players
+   losing their claim on the leftover height. */
 
 .deadframe-main {
   min-width: 0;
+  min-height: 0;
   display: grid;
-  gap: 14px;
-  align-content: start;
+  grid-template-rows: minmax(0, 1fr);
+  grid-auto-rows: auto;
+  gap: 11px;
 }
 
 /* ---- Queue rows -------------------------------------------- */
@@ -78,10 +138,16 @@
 /* ---- Players ----------------------------------------------- */
 /* Two independent players. They are deliberately NOT synchronised:
    the de-duplicated clip is genuinely shorter, so there is no shared
-   timeline to scrub. */
+   timeline to scrub.
+
+   No aspect ratio and no viewport-based cap: the stage simply fills
+   the height the row was given and the picture is letterboxed inside
+   it. A short window therefore produces smaller players, never a
+   scrollbar. */
 
 .deadframe-players {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
@@ -89,24 +155,28 @@
 
 .deadframe-player {
   min-width: 0;
+  min-height: 0;
   margin: 0;
   display: grid;
-  gap: 8px;
-  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
 }
 
 .deadframe-player figcaption {
   min-width: 0;
-  display: grid;
-  gap: 2px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .deadframe-player figcaption strong {
+  flex: 0 0 auto;
   color: #e4edf3;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .deadframe-player figcaption span {
+  min-width: 0;
   overflow: hidden;
   color: #90a4b0;
   font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
@@ -118,8 +188,8 @@
 .deadframe-video-stage,
 .deadframe-player-empty {
   width: 100%;
-  aspect-ratio: 16 / 9;
-  max-height: min(34vh, 300px);
+  height: 100%;
+  min-height: 96px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   background: rgba(3, 6, 9, 0.72);
@@ -162,6 +232,7 @@
 .deadframe-player-empty {
   display: grid;
   place-items: center;
+  align-content: center;
   gap: 9px;
   padding: 12px;
   color: #8ea0ac;
@@ -201,20 +272,11 @@
   font-size: 11px;
 }
 
-/* ---- Control grid ------------------------------------------ */
-/* Left stack = the dial and the file rules; right column = the
-   encoding card, which is the tallest of the three. */
-
-.deadframe-controls {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-}
+/* ---- Cards ------------------------------------------------- */
+/* Same translucent card treatment as the interpolation panel's panes —
+   the wallpaper still shows through, no opaque slabs. */
 
 .deadframe-dial,
-.deadframe-output,
 .deadframe-encoding {
   min-width: 0;
   border: 1px solid rgba(255, 255, 255, 0.075);
@@ -223,95 +285,182 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
-.deadframe-dial {
-  grid-column: 1;
-  grid-row: 1;
-  display: grid;
-  gap: 9px;
-  padding: 14px 16px 15px;
-  align-content: start;
-}
-
-.deadframe-encoding {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-}
-
-.deadframe-output {
-  grid-column: 1;
-  grid-row: 2;
-  display: grid;
-  gap: 10px;
-  padding: 14px 16px 15px;
-  align-content: start;
-}
-
 /* ---- Sensitivity dial -------------------------------------- */
 
-.deadframe-dial-head {
+.deadframe-dial {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  gap: 8px;
+  padding: 11px 13px 12px;
+  align-content: start;
+}
+
+.deadframe-dial-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
-.deadframe-dial-head > div {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
 .deadframe-dial-head > strong {
-  min-width: 42px;
-  padding: 4px 8px;
+  min-width: 40px;
+  padding: 2px 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 7px;
   background: rgba(2, 6, 9, 0.52);
   color: #f4fbff;
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 880;
   font-variant-numeric: tabular-nums;
   text-align: center;
-}
-
-.deadframe-dial-help {
-  color: #a0b2be;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.deadframe-dial-count {
-  margin: 0;
-  color: #cfdce4;
-  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
 }
 
 .deadframe-dial-note {
   margin: 0;
   color: #f0cf94;
   font-size: 10.5px;
-  line-height: 1.45;
+  line-height: 1.4;
 }
 
-/* ---- Output rules ------------------------------------------ */
+/* ---- Frame ribbon ------------------------------------------ */
+/* The exposure sheet: one tick per frame (or per bucket of frames on a
+   long clip). A kept frame is a solid full-height tick in the accent, a
+   dropped one is short and dim, so raising the dial visibly drops rows
+   out of the strip. */
 
-.deadframe-output-row {
+.deadframe-ribbon {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(120px, 168px);
-  align-items: center;
-  gap: 12px;
+  gap: 5px;
 }
 
-.deadframe-output-row .conversion-segment button {
-  min-height: 30px;
+.deadframe-ribbon-strip {
+  height: 30px;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  padding: 3px 4px;
+  border-radius: 7px;
+  background: rgba(2, 6, 9, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.deadframe-ribbon-tick {
+  flex: 1 1 0;
+  min-width: 0;
+  height: calc(100% - var(--drop, 0) * 66%);
+  border-radius: 1px;
+  background: rgb(var(--theme-accent-rgb));
+  opacity: calc(1 - var(--drop, 0) * 0.74);
+  transition: height 140ms ease, opacity 140ms ease;
+}
+
+/* No clip selected, or its scores have not landed yet: a flat dim line
+   rather than a placeholder sentence. */
+.deadframe-ribbon-baseline {
+  width: 100%;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.deadframe-ribbon-counts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  color: #9db0bc;
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.deadframe-ribbon-kept {
+  color: #d5e8f3;
+}
+
+.deadframe-preview-btn {
+  grid-column: auto;
+  min-height: 28px;
+  padding: 0 12px;
   font-size: 11.5px;
+}
+
+/* ---- Output card ------------------------------------------- */
+/* One compact row per concern: the container and how hard it is
+   squeezed, then what happens to the audio and the filename. */
+
+.deadframe-encoding {
+  display: grid;
+  gap: 9px;
+  padding: 11px 13px 12px;
+}
+
+.deadframe-encoding-row {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.deadframe-format-dropdown {
+  flex: 0 0 auto;
+  width: 172px;
+  min-width: 0;
+}
+
+.deadframe-fps-dropdown {
+  flex: 0 0 auto;
+  width: 128px;
+  min-width: 0;
+}
+
+/* The card sits near the bottom of a panel that does not scroll, so the
+   menu opens upward into the space above it instead of being clipped. */
+.deadframe-encoding .custom-dropdown-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.deadframe-encoding-row .conversion-segment {
+  flex: 0 0 auto;
+  width: 178px;
+}
+
+.deadframe-encoding-row .conversion-segment button {
+  min-height: 28px;
+  font-size: 11.5px;
+}
+
+.deadframe-encoding-row .video-output-control {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 8px 11px 9px;
+  gap: 7px;
+}
+
+.deadframe-encoding .interpolate-encoding-note {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.deadframe-field {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.deadframe-field .conversion-segment {
+  width: 148px;
 }
 
 .deadframe-suffix {
   min-width: 0;
-  min-height: 32px;
+  width: 148px;
+  min-height: 28px;
   padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 7px;
@@ -326,16 +475,13 @@
   border-color: rgb(var(--theme-accent-rgb) / 0.5);
 }
 
+.deadframe-suffix:focus-visible {
+  box-shadow: 0 0 0 2px rgb(var(--theme-accent-rgb) / 0.25);
+}
+
 .deadframe-suffix:disabled {
   cursor: not-allowed;
   opacity: 0.6;
-}
-
-.deadframe-output-note {
-  margin: 0;
-  color: #a0b2be;
-  font-size: 10.5px;
-  line-height: 1.5;
 }
 
 /* ---- Progress ---------------------------------------------- */
@@ -387,7 +533,8 @@
 
 /* ---- Bottom bar -------------------------------------------- */
 /* The gate line is the whole safety story of this panel, so it sits
-   next to the buttons rather than above the fold. */
+   next to the Export button rather than above the fold. Preview now
+   lives in the sensitivity card, beside the numbers it changes. */
 
 .deadframe-bottom-bar {
   display: flex;
@@ -395,7 +542,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 2px;
 }
 
 .deadframe-gate {
@@ -403,7 +549,7 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 11px;
+  padding: 5px 11px;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 999px;
   color: #9cafba;
@@ -434,25 +580,30 @@
   gap: 9px;
 }
 
-.deadframe-preview-btn {
-  grid-column: auto;
-  min-height: 40px;
-  padding: 0 16px;
-}
-
 .deadframe-export {
-  min-height: 40px;
+  min-height: 36px;
   padding: 0 18px;
 }
 
 /* ---- Narrow panel ------------------------------------------ */
-/* Below ~1080px of PANEL width the queue and the stage stop fitting
-   side by side; the two players go one above the other before the
-   frames get too small to judge a duplicate by eye. */
+/* Below ~1080px of PANEL width the queue and the players stop fitting
+   side by side, so the column stacks. Once stacked there is no honest
+   way to fit everything in one screen height, so this is the one shape
+   where the panel is allowed to scroll again — the players go back to a
+   fixed 16:9 box and the queue list gets a cap of its own. */
 
 @container deadframe (max-width: 1080px) {
+  .deadframe-panel {
+    overflow: auto;
+  }
+
   .deadframe-layout {
     grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .deadframe-layout .interpolate-queue-column {
+    grid-template-rows: auto;
   }
 
   .deadframe-layout .interpolate-queue-pane {
@@ -460,28 +611,50 @@
   }
 
   .deadframe-layout .interpolate-empty {
-    min-height: 190px;
+    min-height: 170px;
   }
 
   .deadframe-layout .interpolate-queue-list {
-    max-height: min(34vh, 320px);
+    max-height: min(30vh, 300px);
+  }
+
+  .deadframe-main {
+    grid-template-rows: auto;
+  }
+
+  .deadframe-player {
+    grid-template-rows: auto auto;
+  }
+
+  .deadframe-video-stage,
+  .deadframe-player-empty {
+    height: auto;
+    aspect-ratio: 16 / 9;
+    max-height: 40vh;
   }
 }
 
+/* The encoding row cannot hold a dropdown, a three-way segment and a
+   slider side by side much below this, so each concern takes its own
+   line and stretches. */
+
 @container deadframe (max-width: 860px) {
-  .deadframe-controls {
-    grid-template-columns: minmax(0, 1fr);
+  .deadframe-format-dropdown,
+  .deadframe-encoding-row .conversion-segment,
+  .deadframe-encoding-row .video-output-control {
+    flex: 1 1 100%;
+    width: auto;
   }
 
-  .deadframe-dial,
-  .deadframe-encoding,
-  .deadframe-output {
-    grid-column: auto;
-    grid-row: auto;
+  .deadframe-field {
+    flex: 1 1 220px;
   }
 
-  .deadframe-encoding .interpolate-encoding-body {
-    grid-template-columns: minmax(0, 1fr);
+  .deadframe-field .conversion-segment,
+  .deadframe-fps-dropdown,
+  .deadframe-suffix {
+    flex: 1 1 auto;
+    width: auto;
   }
 }
 
@@ -490,13 +663,28 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .deadframe-ribbon-counts {
+    grid-template-columns: auto auto;
+    row-gap: 7px;
+  }
+
+  .deadframe-ribbon-counts .deadframe-preview-btn {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
   .deadframe-bottom-bar {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .deadframe-actions .conversion-pick-btn,
   .deadframe-actions .conversion-run-btn {
     flex: 1 1 140px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deadframe-ribbon-tick {
+    transition: none;
   }
 }

@@ -11,6 +11,12 @@ export type DeadFrameOutputFormat = InterpolateOutputFormat;
 export type DeadFrameRateMode = InterpolateRateMode;
 export type DeadFrameProgress = InterpolateProgress;
 
+// "source" keeps each clip's own frame rate, so only the removed frames
+// shorten it. A number re-times the surviving frames instead: no new frames
+// are created, so a rate above the source plays the clip faster and shorter,
+// and a rate below it slower and longer.
+export type DeadFrameExportFps = "source" | number;
+
 // "measuring" is the pass that scores every frame as the clip joins the queue;
 // "ready" means the scores are cached and the live count is trustworthy.
 export type DeadFrameQueueStatus =
