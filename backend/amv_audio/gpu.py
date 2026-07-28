@@ -1,6 +1,6 @@
 import subprocess
-import sys
 
+from .installer import install_cmd, torch_constraints_file, uninstall_cmd
 from .runtime_versions import (
     NELUX_PACKAGE,
     NUMBA_PACKAGE,
@@ -46,45 +46,38 @@ def check_nvidia_gpu():
     return None
 
 
+TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
+
+
 def get_torch_install_cmd(gpu):
-    # --force-reinstall + --upgrade lets pip swap a +cpu wheel for a +cu128
-    # wheel (or vice versa) in one shot. Pip downloads the replacement
-    # before removing the existing install, so a network failure mid-repair
-    # leaves the prior working install in place instead of an empty hole
-    # the Settings panel reports as "missing".
-    base = [
-        sys.executable, "-I", "-m", "pip", "install",
-        "--upgrade", "--force-reinstall",
-        *TORCH_PACKAGES,
-        "--index-url",
-    ]
-    if gpu:
-        return base + ["https://download.pytorch.org/whl/cu128"]
-    return base + ["https://download.pytorch.org/whl/cpu"]
+    # Reinstall + upgrade swaps a +cpu build for a +cu128 build (or the other
+    # way) in one shot. The replacement is downloaded before the existing
+    # install is touched, so a network failure mid-repair leaves the prior
+    # working install in place instead of an empty hole the Settings panel
+    # reports as "missing".
+    return install_cmd(
+        TORCH_PACKAGES,
+        index_url=TORCH_CUDA_INDEX if gpu else TORCH_CPU_INDEX,
+        upgrade=True,
+        reinstall=True,
+    )
 
 
 def _get_uninstall_cmd(packages):
-    if not packages:
-        return None
-    return [sys.executable, "-I", "-m", "pip", "uninstall", "-y", *packages]
+    return uninstall_cmd(packages)
 
 
 def get_numeric_runtime_repair_cmd():
     # A silent app update can overwrite NumPy's module files while leaving an
-    # older dist-info directory behind. --force-reinstall is required because
-    # a normal pip install trusts that stale metadata and reports the broken
+    # older version record behind. Forcing the reinstall is required because a
+    # normal install trusts that stale record and reports the broken
     # environment as already satisfied.
-    return [
-        sys.executable,
-        "-I",
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "--force-reinstall",
-        NUMPY_PACKAGE,
-        NUMBA_PACKAGE,
-    ]
+    return install_cmd(
+        [NUMPY_PACKAGE, NUMBA_PACKAGE],
+        upgrade=True,
+        reinstall=True,
+    )
 
 
 def get_gpu_switch_cmds(
@@ -108,13 +101,35 @@ def get_gpu_switch_cmds(
     if reinstall_torch:
         cmds.append(get_torch_install_cmd(True))
     if install_audio_separator:
-        # GPU mode: install audio-separator[gpu], nelux, and transnetv2-pytorch
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator[gpu]", NELUX_PACKAGE, "transnetv2-pytorch", *AUDIO_RUNTIME_PACKAGES])
+        # GPU mode: install audio-separator[gpu], nelux, and transnetv2-pytorch.
+        #
+        # The constraints file is load-bearing. This step installs from the
+        # public package index with --upgrade, and several of these packages
+        # depend on PyTorch. Without the constraint the upgrade drags PyTorch
+        # forward to whatever is newest there: a build with no CUDA in it, and
+        # a version the GPU clip engine refuses to load against because its
+        # native files are compiled for one specific PyTorch release. The
+        # symptom is setup finishing "successfully" and the Settings panel
+        # immediately asking for CUDA PyTorch again, with GPU clip detection
+        # dead until it is reinstalled.
+        cmds.append(
+            install_cmd(
+                [
+                    "typing_extensions",
+                    "audio-separator[gpu]",
+                    NELUX_PACKAGE,
+                    "transnetv2-pytorch",
+                    *AUDIO_RUNTIME_PACKAGES,
+                ],
+                upgrade=True,
+                constraints=torch_constraints_file(),
+            )
+        )
     if force_reinstall_nelux:
-        # Wheel metadata says nelux is installed but the C extension cannot
-        # actually load (e.g. a file was quarantined by AV). A plain `pip
-        # install nelux` would short-circuit as already-satisfied.
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--force-reinstall", "--no-deps", NELUX_PACKAGE])
+        # The version record says nelux is installed but its native files
+        # cannot actually load (e.g. one was quarantined by antivirus). A
+        # plain install would short-circuit as already-satisfied.
+        cmds.append(install_cmd([NELUX_PACKAGE], reinstall=True, no_deps=True))
     if repair_numeric_runtime:
         # Run this last so another setup dependency cannot replace the tested
         # NumPy/Numba pair afterward.
@@ -140,10 +155,24 @@ def get_cpu_switch_cmds(
     if reinstall_torch:
         cmds.append(get_torch_install_cmd(False))
     if install_onnxruntime:
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "onnxruntime"])
+        cmds.append(install_cmd(["onnxruntime"], upgrade=True))
     if install_audio_separator:
-        # CPU mode: install audio-separator and scenedetect
-        cmds.append([sys.executable, "-I", "-m", "pip", "install", "--upgrade", "typing_extensions", "audio-separator", "scenedetect>=0.6.7,<0.8", *AUDIO_RUNTIME_PACKAGES])
+        # CPU mode: install audio-separator and scenedetect. Constrained for
+        # the same reason as the GPU path — see get_gpu_switch_cmds. CPU mode
+        # has no CUDA to lose, but the pinned PyTorch version still has to
+        # survive so both modes stay on one tested pair.
+        cmds.append(
+            install_cmd(
+                [
+                    "typing_extensions",
+                    "audio-separator",
+                    "scenedetect>=0.6.7,<0.8",
+                    *AUDIO_RUNTIME_PACKAGES,
+                ],
+                upgrade=True,
+                constraints=torch_constraints_file(),
+            )
+        )
     if repair_numeric_runtime:
         cmds.append(get_numeric_runtime_repair_cmd())
     return cmds
