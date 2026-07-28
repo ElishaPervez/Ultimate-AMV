@@ -117,6 +117,13 @@ backend/logs/
 tools/
 python/
 
+# Local installer-build scratch (test installers, embedded-python zips,
+# one-off build scripts). Never shipped, never shared.
+.local-build/
+
+# Donor tool copy kept for reference only.
+temporary codebase for reference/
+
 # Graphify output artifacts.
 graphify-out/
 **/graphify-out/
