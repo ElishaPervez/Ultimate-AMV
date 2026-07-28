@@ -115,7 +115,7 @@
   white-space: nowrap;
 }
 
-.deadframe-player video,
+.deadframe-video-stage,
 .deadframe-player-empty {
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -125,19 +125,80 @@
   background: rgba(3, 6, 9, 0.72);
 }
 
-.deadframe-player video {
+/* The app draws its own transport bar over the picture (same set the scene
+   viewer uses), so the stage is the positioning context for it. */
+.deadframe-video-stage {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+.deadframe-video-stage video {
   display: block;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
+  background: #000;
+  cursor: pointer;
+}
+
+.deadframe-video-controls {
+  gap: 8px;
+  padding: 20px 10px 8px;
+  font-size: 11px;
+}
+
+.deadframe-video-controls .scene-viewer-button {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+}
+
+.deadframe-video-controls .scene-viewer-time {
+  min-width: 66px;
+  font-size: 10.5px;
 }
 
 .deadframe-player-empty {
   display: grid;
   place-items: center;
+  gap: 9px;
   padding: 12px;
   color: #8ea0ac;
   font-size: 11.5px;
   line-height: 1.5;
   text-align: center;
+}
+
+/* "Preparing preview…" and the can't-show-this-format notice. Both are quiet
+   and live inside the player box only — the dial, the queue and the
+   Preview/Export buttons keep working while a playable copy is being made. */
+.deadframe-player-preparing {
+  align-content: center;
+  grid-auto-flow: column;
+  place-items: center;
+  gap: 8px;
+  color: #a8bcc8;
+}
+
+.deadframe-player-fallback {
+  align-content: center;
+  padding: 14px 16px;
+  color: #cbd8e0;
+}
+
+.deadframe-player-fallback svg {
+  color: #f0cf94;
+}
+
+.deadframe-player-fallback span {
+  max-width: 42ch;
+}
+
+.deadframe-player-fallback .conversion-pick-btn {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 11px;
 }
 
 /* ---- Control grid ------------------------------------------ */

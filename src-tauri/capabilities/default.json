@@ -20,6 +20,7 @@
     "core:webview:allow-webview-close",
     "dialog:default",
     "opener:default",
+    "opener:allow-open-path",
     "updater:default"
   ]
 }

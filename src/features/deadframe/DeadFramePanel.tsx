@@ -1,5 +1,5 @@
 import React from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -32,6 +32,7 @@ import type {
   DeadFrameQueueItem,
   DeadFrameRateMode,
 } from "../../types/deadframe";
+import { DeadFrameVideo } from "./DeadFrameVideo";
 import { VideoOutputControl } from "../video/VideoOutputControl";
 import { OUTPUT_FORMATS } from "../video/outputFormats";
 import type { VideoControlSpec } from "../../types/conversion";
@@ -557,11 +558,11 @@ export function DeadFramePanel({ active }: { active: boolean }) {
                 <strong>Source</strong>
                 <span>{selectedItem ? fileName(selectedItem.input) : "Nothing selected"}</span>
               </figcaption>
-              {selectedItem ? (
-                <video key={selectedItem.input} src={convertFileSrc(selectedItem.input)} controls preload="metadata" />
-              ) : (
-                <div className="deadframe-player-empty">Add a clip to see it here.</div>
-              )}
+              <DeadFrameVideo
+                path={selectedItem?.input || null}
+                label="the source clip"
+                emptyMessage="Add a clip to see it here."
+              />
             </figure>
             <figure className="deadframe-player">
               <figcaption>
@@ -572,11 +573,11 @@ export function DeadFramePanel({ active }: { active: boolean }) {
                     : "Nothing rendered yet"}
                 </span>
               </figcaption>
-              {preview ? (
-                <video key={preview.output} src={convertFileSrc(preview.output)} controls preload="metadata" />
-              ) : (
-                <div className="deadframe-player-empty">Press Preview to render the selected clip.</div>
-              )}
+              <DeadFrameVideo
+                path={preview?.output || null}
+                label="the de-duplicated clip"
+                emptyMessage="Press Preview to render the selected clip."
+              />
             </figure>
           </div>
 

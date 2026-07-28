@@ -1,7 +1,7 @@
 import React from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockInvoke, mockInvokeFn } from "../../../tests/setup/tauri";
 import { mockDialogOpen } from "../../../tests/setup/dialog";
 import {
@@ -10,9 +10,26 @@ import {
   isSupportedVideoPath,
   keptFrameCount,
 } from "./DeadFramePanel";
+import { resetPlayableSourceCache } from "./playableSource";
+
+const mockOpenPath = vi.fn(async (_path: string) => undefined);
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openPath: (path: string) => mockOpenPath(path),
+  openUrl: vi.fn(),
+}));
 
 const CLIP = String.raw`C:\clips\scene.mp4`;
 const OTHER_CLIP = String.raw`C:\clips\other.mp4`;
+const PREVIEW_OUTPUT = String.raw`C:\appdata\deadframe_previews\preview-1.mp4`;
+const PROXY = String.raw`C:\appdata\proxies\scene-proxy.mp4`;
+
+// The playable-file answers are cached at module scope so re-selecting a clip
+// costs nothing; that cache has to be emptied between tests or one test's
+// answer decides the next test's player.
+beforeEach(() => {
+  resetPlayableSourceCache();
+  mockOpenPath.mockClear();
+});
 
 // Frame 0 is never removable. Index 1 and 3 are held duplicates, index 4 is one
 // frame of drift from a slow pan: it survives the default dial and is only
@@ -44,7 +61,7 @@ function analysisPayload(args: unknown) {
 function previewPayload() {
   return JSON.stringify({
     type: "done",
-    output: String.raw`C:\appdata\deadframe_previews\preview-1.mp4`,
+    output: PREVIEW_OUTPUT,
     sourceFrames: SCORES.length,
     keptFrames: 4,
     elapsedSeconds: 1,
@@ -68,6 +85,22 @@ function registerDefaults() {
   mockInvoke("deadframe_analyze", (args) => analysisPayload(args));
   mockInvoke("deadframe_preview", () => previewPayload());
   mockInvoke("deadframe_export", () => exportPayload());
+  // Both players ask whether the embedded browser can decode the file before
+  // pointing at it. The default answer is "yes, play it as-is".
+  mockInvoke("clip_playback_plan", () => directPlan());
+  mockInvoke("build_source_proxy", () => PROXY);
+}
+
+function directPlan() {
+  return { mode: "direct", reasons: [] };
+}
+
+function proxyPlan() {
+  return { mode: "proxy", reasons: ["video codec prores not WebView2-friendly"] };
+}
+
+function sourceVideo(): HTMLVideoElement {
+  return screen.getByLabelText("the source clip") as HTMLVideoElement;
 }
 
 async function addClips(user: ReturnType<typeof userEvent.setup>, paths: string[]) {
@@ -305,6 +338,97 @@ describe("DeadFramePanel preview", () => {
     expect(await screen.findByText("Could not read this file.")).toBeInTheDocument();
     expect(exportButton()).toBeDisabled();
     expect(screen.getByText("no preview yet")).toBeInTheDocument();
+  });
+});
+
+describe("DeadFramePanel player sources", () => {
+  it("plays the original file when the app can decode it", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await waitFor(() => expect(sourceVideo()).toHaveAttribute("src", CLIP));
+    expect(mockInvokeFn).toHaveBeenCalledWith("clip_playback_plan", { sourcePath: CLIP });
+    expect(
+      mockInvokeFn.mock.calls.some(([command]) => command === "build_source_proxy"),
+    ).toBe(false);
+  });
+
+  it("plays the stand-in copy, never the original, for a file it cannot decode", async () => {
+    registerDefaults();
+    mockInvoke("clip_playback_plan", () => proxyPlan());
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await waitFor(() => expect(sourceVideo()).toHaveAttribute("src", PROXY));
+    expect(mockInvokeFn).toHaveBeenCalledWith("build_source_proxy", {
+      sourcePath: CLIP,
+      force: false,
+    });
+  });
+
+  it("only builds one stand-in copy no matter how often the clip is re-selected", async () => {
+    registerDefaults();
+    mockInvoke("clip_playback_plan", () => proxyPlan());
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP, OTHER_CLIP]);
+    await waitFor(() => expect(sourceVideo()).toHaveAttribute("src", PROXY));
+    await user.click(screen.getByRole("button", { name: /^other\.mp4/ }));
+    await user.click(screen.getByRole("button", { name: /^scene\.mp4/ }));
+    await waitFor(() => expect(sourceVideo()).toHaveAttribute("src", PROXY));
+    const builds = mockInvokeFn.mock.calls.filter(
+      ([command, args]) =>
+        command === "build_source_proxy" && (args as { sourcePath: string }).sourcePath === CLIP,
+    );
+    expect(builds).toHaveLength(1);
+  });
+
+  it("explains itself instead of going black when the stand-in copy cannot be made", async () => {
+    registerDefaults();
+    mockInvoke("clip_playback_plan", () => proxyPlan());
+    mockInvoke("build_source_proxy", () => {
+      throw new Error("ffmpeg exited with code 1");
+    });
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    expect(
+      await screen.findByText(/format the app can't show on screen/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("the source clip")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Open in your video player/ }));
+    expect(mockOpenPath).toHaveBeenCalledWith(CLIP);
+  });
+
+  it("keeps the dial and the Preview button usable while a copy is being made", async () => {
+    registerDefaults();
+    mockInvoke("clip_playback_plan", () => proxyPlan());
+    mockInvoke("build_source_proxy", () => new Promise<string>(() => undefined));
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    expect(await screen.findByText("Preparing preview…")).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Sensitivity" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
+  it("checks the rendered result too, so a preview never lands in a black box", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await previewSelectedClip(user);
+    await waitFor(() =>
+      expect(screen.getByLabelText("the de-duplicated clip")).toHaveAttribute(
+        "src",
+        PREVIEW_OUTPUT,
+      ),
+    );
+    expect(mockInvokeFn).toHaveBeenCalledWith("clip_playback_plan", {
+      sourcePath: PREVIEW_OUTPUT,
+    });
   });
 });
 
