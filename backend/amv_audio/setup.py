@@ -18,9 +18,9 @@ from .dependencies import (
     _prune_unused_package_dirs,
     invalidate_numeric_runtime_probe,
 )
-from .hardware import refresh_hardware
 from .logs import add_log, append_terminal_log
 from .runtime_versions import TORCH_VERSION
+from .status import build_status
 
 _LAST_NELUX_IMPORT_ERROR = None
 
@@ -308,8 +308,68 @@ def apply_success_mode(mode):
     config = load_config()
     config["setup_type"] = mode
     config["force_cpu"] = mode == "cpu"
+    config["clip_extraction_mode"] = mode
     save_config(config)
-    refresh_hardware()
+
+
+def _prune_package_cache():
+    """Keep cache cleanup nonfatal even if an installer implementation changes."""
+    try:
+        return installer.prune_cache()
+    except Exception as error:
+        add_log(
+            "audio.setup.cache_cleanup.error",
+            "Package cache cleanup failed",
+            level="warning",
+            details={"error": str(error)},
+        )
+        return False
+
+
+def _finish_setup(mode, progress_callback, total):
+    """Verify the new engine, load its status, and clean cache concurrently."""
+    progress_callback(
+        total,
+        total,
+        "running",
+        "Verifying GPU/CPU engine and cleaning package cache...",
+        "verify",
+    )
+    try:
+        completed = _run_side_by_side(
+            {
+                "plan": lambda: collect_setup_plan(mode),
+                "status": lambda: build_status(mode=mode, refresh=True),
+                "cache": _prune_package_cache,
+            }
+        )
+    except Exception as error:
+        progress_callback(total, total, "error", str(error), "verify")
+        raise
+
+    final_plan = completed["plan"]
+    if final_plan["issues"]:
+        # The mode is still saved: the user asked for it, most of it worked,
+        # and the Settings panel offers the repair. Logging it means a switch
+        # that leaves something broken is findable afterwards instead of only
+        # visible in the moment.
+        add_log(
+            "audio.setup.incomplete",
+            "Setup finished with unresolved issues",
+            level="warning",
+            details={"mode": mode, "issues": final_plan["issues"]},
+        )
+
+    # All mode fields move together and only after both verification jobs
+    # succeed. The status job used the intended mode directly, so saving does
+    # not require another hardware refresh.
+    apply_success_mode(mode)
+    return {
+        "ok": True,
+        "mode": mode,
+        "plan": final_plan,
+        "status": completed["status"],
+    }
 
 
 def _fix_pth_file():
@@ -374,8 +434,7 @@ def install_setup(mode, progress_callback):
     if not installs:
         _prune_stale_numeric_metadata()
         _prune_unused_package_dirs()
-        apply_success_mode(mode)
-        return {"ok": True, "mode": mode, "plan": plan}
+        return _finish_setup(mode, progress_callback, 0)
 
     add_log(
         "audio.setup.installer",
@@ -400,24 +459,7 @@ def install_setup(mode, progress_callback):
     _restore_numeric_runtime(mode, total, progress_callback)
     _prune_stale_numeric_metadata()
     _prune_unused_package_dirs()
-    # Drop cache entries nothing points at any more. Silent by design: it only
-    # removes what is unreferenced, so there is nothing for a user to decide.
-    installer.prune_cache()
-
-    final_plan = collect_setup_plan(mode)
-    if final_plan["issues"]:
-        # The mode is still saved: the user asked for it, most of it worked,
-        # and the Settings panel offers the repair. Logging it means a switch
-        # that leaves something broken is findable afterwards instead of only
-        # visible in the moment.
-        add_log(
-            "audio.setup.incomplete",
-            "Setup finished with unresolved issues",
-            level="warning",
-            details={"mode": mode, "issues": final_plan["issues"]},
-        )
-    apply_success_mode(mode)
-    return {"ok": True, "mode": mode, "plan": final_plan}
+    return _finish_setup(mode, progress_callback, total)
 
 
 def _run_step(cmd, index, total, mode, progress_callback):

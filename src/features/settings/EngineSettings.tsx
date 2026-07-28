@@ -144,7 +144,9 @@ export function EngineSettings({
           <div className="settings-setup-status">
             <Loader2 size={16} className="audio-spin" />
             <span>
-              Installing {setupRunning === "gpu" ? "GPU" : "CPU"} engine{setupProgress ? ` : step ${setupProgress.step}/${setupProgress.total}` : ""}
+              {setupProgress?.phase === "verify"
+                ? "Verifying GPU/CPU engine..."
+                : `Installing ${setupRunning === "gpu" ? "GPU" : "CPU"} engine${setupProgress && setupProgress.total > 0 ? ` : step ${setupProgress.step}/${setupProgress.total}` : ""}`}
             </span>
           </div>
         )}

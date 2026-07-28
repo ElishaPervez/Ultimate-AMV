@@ -26,6 +26,7 @@ def _reset_hw_cache():
     import amv_audio.hardware as hw
     hw._CACHE.update({
         "checked": False,
+        "force_cpu": None,
         "torch_available": False,
         "torch_version": None,
         "ort_available": False,
@@ -210,6 +211,30 @@ def test_refresh_hardware_clears_checked_flag():
 
     # refresh_hardware first sets checked=False, then calls _ensure_init
     assert call_count["n"] == 1
+
+
+def test_explicit_mode_override_does_not_read_stale_config(mocker):
+    import amv_audio.hardware as hw
+
+    _reset_hw_cache()
+    fake_torch = MagicMock()
+    fake_torch.__version__ = "2.11.0+cu128"
+    fake_torch.cuda.is_available.return_value = False
+    fake_ort = MagicMock()
+    fake_ort.get_available_providers.return_value = ["CPUExecutionProvider"]
+    load = mocker.patch(
+        "amv_audio.hardware.load_config",
+        side_effect=AssertionError("setup status must not read the previous mode"),
+    )
+    mocker.patch("amv_audio.gpu.check_nvidia_gpu", return_value=None)
+    mocker.patch("amv_audio.hardware.version", return_value="1.23.0")
+
+    with patch.dict("sys.modules", {"torch": fake_torch, "onnxruntime": fake_ort}):
+        result = hw.refresh_hardware(force_cpu=True)
+
+    load.assert_not_called()
+    assert result["device"] == "CPU (Forced)"
+    assert hw._CACHE["force_cpu"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -27,11 +27,10 @@ if _tools_dir not in os.environ.get("PATH", ""):
 
 from amv_audio.config import load_config, save_config
 from amv_audio.dependencies import ensure_feature_dependencies, repair_missing_module
-from amv_audio.hardware import get_dependency_info, get_hw_info
 from amv_audio.logs import add_log, get_terminal_logs
-from amv_audio.models import get_active_model, get_model_display_name
 from amv_audio.separator import run_separation
 from amv_audio.setup import collect_setup_plan, install_setup
+from amv_audio.status import build_status
 
 THEME_PRESETS = {
     "cyan": ("#48d7ff", "#63e6a2"),
@@ -47,18 +46,7 @@ def emit(payload):
 
 
 def status():
-    hw = get_hw_info()
-    model = get_active_model(hw)
-    deps = get_dependency_info()
-    emit(
-        {
-            "type": "status",
-            "hardware": hw,
-            "dependencies": deps,
-            "model": model,
-            "model_name": get_model_display_name(model),
-        }
-    )
+    emit(build_status())
 
 
 def logs():
@@ -296,8 +284,17 @@ def separate(input_file):
 
 
 def setup(mode):
-    def on_progress(step, total, state, message):
-        emit({"type": "setup-progress", "step": step, "total": total, "state": state, "message": message})
+    def on_progress(step, total, state, message, phase="install"):
+        emit(
+            {
+                "type": "setup-progress",
+                "step": step,
+                "total": total,
+                "state": state,
+                "message": message,
+                "phase": phase,
+            }
+        )
 
     try:
         add_log("audio.setup.start", f"Started {mode.upper()} audio setup", details={"mode": mode})

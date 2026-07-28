@@ -7,7 +7,7 @@ import { formatBytes } from "../../lib/format";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import type { AppConfig } from "../../types/app";
-import type { AudioSetupProgress, AudioStatus } from "../../types/audio";
+import type { AudioSetupProgress, AudioSetupResult, AudioStatus } from "../../types/audio";
 import { UpdateCard } from "./UpdateCard";
 import { EngineSettings } from "./EngineSettings";
 import { FeatureSettings } from "./FeatureSettings";
@@ -162,12 +162,24 @@ export function SettingsPanel({ themeColors }: SettingsPanelProps) {
     setSetupNotice(null);
     setError(null);
     try {
-      await invoke<string>("audio_setup", { mode });
-      await invoke<string>("set_config", { key: "clip_extraction_mode", value: mode });
+      const raw = await invoke<string>("audio_setup", { mode });
+      const result = parseBridgePayload<AudioSetupResult>(raw);
+      setStatus(result.status);
+      if (backendConfig) {
+        setBackendConfig((current) => current ? {
+          ...current,
+          setup_type: result.mode,
+          force_cpu: result.mode === "cpu",
+          clip_extraction_mode: result.mode,
+        } : current);
+      } else {
+        // Setup normally starts after config has loaded. If that initial read
+        // failed or is still pending, fetch only the lightweight config now;
+        // the returned setup status is already the verified dependency state.
+        await refreshConfig();
+      }
       setSetupNotice(`${mode === "gpu" ? "GPU" : "CPU"} engine ready.`);
       window.dispatchEvent(new CustomEvent("clipmode-changed", { detail: { mode } }));
-      await refreshConfig();
-      await refreshStatus();
       window.setTimeout(() => setSetupLines([]), 10000);
     } catch (e) {
       setError(readBridgeError(e));
