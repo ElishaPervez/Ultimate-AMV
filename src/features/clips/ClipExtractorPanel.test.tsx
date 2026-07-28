@@ -267,6 +267,7 @@ describe('H.264 10-bit export controls', () => {
     expect(formatSupportsRateControl('prores-lt')).toBe(false)
     expect(formatSupportsRateControl('prores-hq')).toBe(false)
     expect(formatSupportsRateControl('lossless-cut')).toBe(false)
+    expect(formatSupportsRateControl('smart-cut')).toBe(false)
   })
 
   it('uses format-appropriate bitrate defaults', () => {
@@ -484,6 +485,109 @@ describe('H.264 10-bit export controls', () => {
       const exportCalls = mockInvokeFn.mock.calls.filter(([command]) => command === 'clip_export')
       expect(exportCalls).toHaveLength(2)
       expect(exportCalls[0]?.[1]).toMatchObject({ preset: 'h264-cpu' })
+    })
+  })
+})
+
+// ─── Smart cut export preset ─────────────────────────────────────────────────
+
+describe('Smart cut export preset', () => {
+  it('offers no quality or rate control, like the other stream-copy presets', () => {
+    expect(clipQualitySpec('smart-cut')).toBeNull()
+    expect(clipQualitySpec('lossless-cut')).toBeNull()
+    expect(formatSupportsRateControl('smart-cut')).toBe(false)
+  })
+
+  it('is selectable in CPU and GPU clip mode', () => {
+    const cpuOptions = clipExportOptions('cpu', null)
+    const gpuOptions = clipExportOptions('gpu', {
+      compatible: true,
+      hasNvidiaGpu: true,
+      hasFfmpeg: true,
+      hasFfprobe: true,
+      hasH264Cuvid: true,
+      hasHevcCuvid: true,
+      hasHevcNvenc: true,
+      hasH264Nvenc: true,
+      hasAv1Nvenc: true,
+      message: 'ready',
+    })
+    expect(cpuOptions.find((option) => option.value === 'smart-cut')?.disabled).toBe(false)
+    expect(gpuOptions.find((option) => option.value === 'smart-cut')?.disabled).toBe(false)
+    // Sits directly under Lossless cut in the dropdown.
+    expect(cpuOptions.findIndex((option) => option.value === 'smart-cut')).toBe(
+      cpuOptions.findIndex((option) => option.value === 'lossless-cut') + 1,
+    )
+  })
+
+  it('hides the quality and rate-control inputs while it is selected', async () => {
+    installMinimalMocks()
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    await user.click(await screen.findByRole('button', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('option', { name: /Smart cut/i }))
+
+    expect(screen.queryByRole('group', { name: /export rate control/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('spinbutton', { name: /constant rate factor/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('spinbutton', { name: /average bitrate/i })).not.toBeInTheDocument()
+  })
+
+  it('exports with no quality value, rate mode or bitrate', async () => {
+    mockInvoke('get_config', () =>
+      JSON.stringify({
+        clip_extraction_mode: 'cpu',
+        clip_hover_preview: false,
+        featherweight_previews: false,
+      }),
+    )
+    mockInvoke('video_gpu_status', () =>
+      JSON.stringify({ hasHevcNvenc: false, hasH264Nvenc: false, hasAv1Nvenc: false }),
+    )
+    mockInvoke('discord_set_state', () => null)
+    mockInvoke('discord_clear', () => null)
+    mockInvoke('clip_extract', () =>
+      JSON.stringify({
+        type: 'done',
+        mode: 'cpu',
+        input: 'C:\\episode.mp4',
+        scenes: [
+          { source: 'C:\\episode.mp4', start: 1, end: 3, index: 0, label: 'Scene 1' },
+        ],
+        cuts: [],
+        sceneCount: 1,
+        fps: 24,
+        duration: 3,
+        totalSeconds: 0.1,
+      }),
+    )
+    mockInvoke('clip_preview_generate_batch', () =>
+      JSON.stringify({ type: 'done', items: [] }),
+    )
+    mockInvoke('clip_export', () => JSON.stringify({ type: 'done' }))
+    mockDialogOpen
+      .mockResolvedValueOnce(['C:\\episode.mp4'])
+      .mockResolvedValueOnce('C:\\exports')
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active={true} />)
+
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await user.click(await screen.findByRole('button', { name: /select all clips/i }))
+
+    await user.click(screen.getByRole('button', { name: /ProRes LT MOV/i }))
+    await user.click(screen.getByRole('option', { name: /Smart cut/i }))
+    await user.click(await screen.findByRole('button', { name: /Export 1 clips/i }))
+
+    await waitFor(() => {
+      const exportCall = mockInvokeFn.mock.calls.find(([command]) => command === 'clip_export')
+      expect(exportCall?.[1]).toMatchObject({
+        preset: 'smart-cut',
+        qualityValue: null,
+        rateMode: null,
+        bitrateMbps: null,
+      })
     })
   })
 })

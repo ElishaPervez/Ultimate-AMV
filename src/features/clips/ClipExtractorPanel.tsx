@@ -392,6 +392,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     "prores-lt": 20,
     "prores-hq": 20,
     "lossless-cut": 20,
+    "smart-cut": 20,
   });
   const [exportQuality, setExportQuality] = React.useState<Record<ClipExportFormat, number>>({
     "gpu-intra": 16,
@@ -404,6 +405,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     "prores-lt": 0,
     "prores-hq": 0,
     "lossless-cut": 0,
+    "smart-cut": 0,
   });
   const [visibleRowRange, setVisibleRowRange] = React.useState<{ startIndex: number; endIndex: number } | null>(null);
   /* DEV TOOLS: measured scroll-viewport geometry for viewport-fill decoder
@@ -3782,6 +3784,7 @@ function clipPresetExtension(format: ClipExportFormat): string {
     case "av1-nvenc":
       return "mp4";
     case "lossless-cut":
+    case "smart-cut":
       return "mkv";
     default:
       return "mov";
@@ -3870,6 +3873,7 @@ export function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | nu
     case "prores-lt":
     case "prores-hq":
     case "lossless-cut":
+    case "smart-cut":
     default:
       return null;
   }
@@ -3880,6 +3884,7 @@ export function formatSupportsRateControl(format: ClipExportFormat): boolean {
     case "prores-lt":
     case "prores-hq":
     case "lossless-cut":
+    case "smart-cut":
       return false;
     default:
       return true;
@@ -3913,6 +3918,12 @@ export function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus
       label: "Lossless cut (no re-encode)",
       disabled: false,
       description: "Bit-exact stream copy of the original, fastest. Snaps to the nearest keyframe (not frame-accurate). Saved as MKV.",
+    },
+    {
+      value: "smart-cut",
+      label: "Smart cut (frame-accurate, no quality loss)",
+      disabled: false,
+      description: "Copies the original like Lossless cut, but re-encodes only the first fraction of a second so the clip starts on the exact frame. H.264/HEVC sources only. Saved as MKV.",
     },
     {
       value: "prores-lt",

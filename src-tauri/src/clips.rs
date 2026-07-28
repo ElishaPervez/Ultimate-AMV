@@ -37,10 +37,10 @@ fn preset_extension(preset: &str) -> &'static str {
     match preset {
         "prores-lt" | "prores-hq" | "gpu-intra" => "mov",
         "h264-cpu" | "h264-10bit-cpu" | "hevc-cpu" | "h264-nvenc" | "h264-10bit-nvenc" | "av1-nvenc" => "mp4",
-        // Stream-copy preset: container must tolerate arbitrary source codecs
+        // Stream-copy presets: container must tolerate arbitrary source codecs
         // (10-bit HEVC, AV1, exotic profiles) without re-muxing limits. MKV is
         // the robust choice — MP4/MOV reject several codecs on -c copy.
-        "lossless-cut" => "mkv",
+        "lossless-cut" | "smart-cut" => "mkv",
         _ => "mov",
     }
 }
@@ -56,9 +56,10 @@ const VIDEO_PRESETS: &[&str] = &[
     "h264-10bit-cpu",
     "hevc-cpu",
     "lossless-cut",
+    "smart-cut",
 ];
 
-const VIDEO_PRESET_ERROR: &str = "Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, h264-10bit-nvenc, av1-nvenc, h264-cpu, h264-10bit-cpu, hevc-cpu, or lossless-cut";
+const VIDEO_PRESET_ERROR: &str = "Video preset must be gpu-intra, prores-lt, prores-hq, h264-nvenc, h264-10bit-nvenc, av1-nvenc, h264-cpu, h264-10bit-cpu, hevc-cpu, lossless-cut, or smart-cut";
 
 // Source color metadata read off the input stream with ffprobe. We TAG these
 // onto every re-encode output (no pixel conversion) so downstream players /
@@ -478,7 +479,229 @@ fn gpu_cpu_fallback_video_args(
 }
 
 fn preset_supports_rate_control(preset: &str) -> bool {
-    !matches!(preset, "prores-lt" | "prores-hq" | "lossless-cut")
+    !matches!(preset, "prores-lt" | "prores-hq" | "lossless-cut" | "smart-cut")
+}
+
+// Video stream properties smart cut needs before it can splice: the codec and
+// pixel format pick the head encoder, the two frame rates decide whether the
+// source is constant-rate enough to splice at all.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SourceVideoParams {
+    codec: String,
+    pix_fmt: String,
+    avg_frame_rate: String,
+    r_frame_rate: String,
+}
+
+// Every smart-cut refusal reads the same: name what we could not splice, then
+// point at the two presets that always work.
+fn smart_cut_refusal(reason: &str) -> String {
+    format!(
+        "Smart cut can't splice this source's video format ({reason}). Use \"Lossless cut\" for a byte-exact export (cuts snap to keyframes) or any re-encode preset for frame-accurate output."
+    )
+}
+
+// ffprobe reports frame rates as a rational ("24000/1001"); a plain decimal is
+// accepted too. "0/0" (what a VFR stream reports) yields None.
+fn parse_fps_rational(value: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    let fps = match trimmed.split_once('/') {
+        Some((num, den)) => {
+            let den: f64 = den.trim().parse().ok()?;
+            if den == 0.0 {
+                return None;
+            }
+            num.trim().parse::<f64>().ok()? / den
+        }
+        None => trimmed.parse::<f64>().ok()?,
+    };
+    (fps.is_finite() && fps > 0.0).then_some(fps)
+}
+
+// Frame rate used for the half-frame cut tolerance, plus the VFR guard: when
+// the average and nominal rates disagree by more than 1% the stream's timing is
+// not predictable across a splice, so refuse instead of emitting a cut that
+// drifts. Tolerances are computed from the average rate.
+fn smart_cut_fps(params: &SourceVideoParams) -> Result<f64, String> {
+    let (Some(avg), Some(nominal)) = (
+        parse_fps_rational(&params.avg_frame_rate),
+        parse_fps_rational(&params.r_frame_rate),
+    ) else {
+        return Err(smart_cut_refusal("variable frame rate"));
+    };
+    if (avg - nominal).abs() / avg.max(nominal) > 0.01 {
+        return Err(smart_cut_refusal("variable frame rate"));
+    }
+    Ok(avg)
+}
+
+// Bit depth carried by an ffprobe pix_fmt name. The depth is the digit run
+// after the last plane marker ("yuv420p10le" -> 10, "p010le" -> 10); names with
+// no such run are 8-bit ("yuv420p", "nv12", "rgb24"). Note "yuv410p" is 8-bit —
+// which is why this reads the suffix rather than searching for "10" anywhere.
+fn pix_fmt_bit_depth(pix_fmt: &str) -> Option<u8> {
+    if pix_fmt.trim().is_empty() {
+        return None;
+    }
+    let trimmed = pix_fmt.trim().trim_end_matches("le").trim_end_matches("be");
+    let tail = trimmed.rsplit('p').next().unwrap_or("");
+    if tail.is_empty() {
+        return Some(8);
+    }
+    match tail.parse::<u8>() {
+        Ok(depth) if (8..=16).contains(&depth) => Some(depth),
+        Ok(_) => None,
+        Err(_) => Some(8),
+    }
+}
+
+// Head-encoder matrix. CPU encoders only, deliberately: the head has to splice
+// onto the source's own bitstream, libx264/libx265 reproduce the source profile
+// far more reliably than NVENC, and it keeps CPU and GPU clip mode byte-for-byte
+// identical. CRF 12/14 over a sub-second head is visually transparent. Anything
+// outside the matrix is refused rather than silently re-encoded at a depth or
+// codec the body copy cannot be joined to.
+fn smart_cut_head_encoder_args(codec: &str, pix_fmt: &str) -> Result<Vec<String>, String> {
+    let codec = codec.trim();
+    let pix_fmt = pix_fmt.trim();
+    match (codec, pix_fmt_bit_depth(pix_fmt)) {
+        ("h264", Some(8)) => Ok(vec![
+            "-c:v".to_string(), "libx264".to_string(),
+            "-preset".to_string(), "medium".to_string(),
+            "-crf".to_string(), "12".to_string(),
+            "-pix_fmt".to_string(), pix_fmt.to_string(),
+        ]),
+        ("h264", Some(10)) => Ok(vec![
+            "-c:v".to_string(), "libx264".to_string(),
+            "-preset".to_string(), "medium".to_string(),
+            "-crf".to_string(), "12".to_string(),
+            "-profile:v".to_string(), "high10".to_string(),
+            "-pix_fmt".to_string(), "yuv420p10le".to_string(),
+        ]),
+        ("hevc", Some(8)) => Ok(vec![
+            "-c:v".to_string(), "libx265".to_string(),
+            "-preset".to_string(), "medium".to_string(),
+            "-crf".to_string(), "14".to_string(),
+            "-pix_fmt".to_string(), pix_fmt.to_string(),
+        ]),
+        ("hevc", Some(10)) => Ok(vec![
+            "-c:v".to_string(), "libx265".to_string(),
+            "-preset".to_string(), "medium".to_string(),
+            "-crf".to_string(), "14".to_string(),
+            "-pix_fmt".to_string(), "yuv420p10le".to_string(),
+        ]),
+        ("h264" | "hevc", _) => Err(smart_cut_refusal(&format!("{codec} {pix_fmt}"))),
+        ("", _) => Err(smart_cut_refusal("unknown")),
+        _ => Err(smart_cut_refusal(codec)),
+    }
+}
+
+// Earliest keyframe at or after `start` in ffprobe's `packet=pts_time,flags`
+// CSV. Packets are listed in decode order, so a stream with B-frames can print
+// a later pts before an earlier one — every line is scanned for the minimum
+// rather than trusting the first `K`. A keyframe up to half a frame before
+// `start` still counts as landing on the cut.
+fn first_keyframe_at_or_after(csv: &str, start: f64, tolerance: f64) -> Option<f64> {
+    let mut earliest: Option<f64> = None;
+    for line in csv.lines() {
+        let mut fields = line.split(',');
+        let Some(pts) = fields.next().and_then(|field| field.trim().parse::<f64>().ok()) else {
+            continue;
+        };
+        let Some(flags) = fields.next() else { continue };
+        if !flags.contains('K') || pts < start - tolerance {
+            continue;
+        }
+        if earliest.map_or(true, |current| pts < current) {
+            earliest = Some(pts);
+        }
+    }
+    earliest
+}
+
+fn parse_source_video_params(json_text: &str) -> Result<SourceVideoParams, String> {
+    let value: Value = serde_json::from_str(json_text)
+        .map_err(|error| format!("Could not read this file's video format: {error}"))?;
+    let stream = value
+        .get("streams")
+        .and_then(|streams| streams.get(0))
+        .ok_or_else(|| "This file has no video stream to cut.".to_string())?;
+    let field = |key: &str| {
+        stream
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(SourceVideoParams {
+        codec: field("codec_name"),
+        pix_fmt: field("pix_fmt"),
+        avg_frame_rate: field("avg_frame_rate"),
+        r_frame_rate: field("r_frame_rate"),
+    })
+}
+
+fn probe_source_video_params(ffprobe: &Path, input: &Path) -> Result<SourceVideoParams, String> {
+    let output = cmd(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate")
+        .arg("-of").arg("json")
+        .arg(input)
+        .output()
+        .map_err(|error| format!("Could not read this file's video format: {error}"))?;
+    if !output.status.success() {
+        return Err("Could not read this file's video format.".to_string());
+    }
+    parse_source_video_params(&String::from_utf8_lossy(&output.stdout))
+}
+
+// Video packet count of a finished segment. Only ever called on the short temp
+// segments smart cut writes, so listing every packet is cheap.
+fn probe_video_packet_count(ffprobe: &Path, input: &Path) -> Option<usize> {
+    let output = cmd(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("v:0")
+        .arg("-show_entries").arg("packet=pts_time")
+        .arg("-of").arg("csv=p=0")
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.trim().parse::<f64>().is_ok())
+            .count(),
+    )
+}
+
+// Keyframe lookup over a bounded 40 s window, not the whole file — a full
+// packet dump of a 24-minute episode costs seconds per clip. A start near EOF
+// or an absurd GOP length returns None, which the caller answers by re-encoding
+// the whole clip.
+fn probe_first_keyframe(
+    ffprobe: &Path,
+    input: &Path,
+    start: f64,
+    tolerance: f64,
+) -> Option<f64> {
+    let output = cmd(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("v:0")
+        .arg("-show_entries").arg("packet=pts_time,flags")
+        .arg("-read_intervals").arg(format!("{start:.3}%+40"))
+        .arg("-of").arg("csv=p=0")
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    first_keyframe_at_or_after(&String::from_utf8_lossy(&output.stdout), start, tolerance)
 }
 
 #[cfg(test)]
@@ -616,7 +839,162 @@ mod rate_control_tests {
         assert!(!super::preset_supports_rate_control("prores-lt"));
         assert!(!super::preset_supports_rate_control("prores-hq"));
         assert!(!super::preset_supports_rate_control("lossless-cut"));
+        assert!(!super::preset_supports_rate_control("smart-cut"));
         assert!(super::preset_supports_rate_control("h264-cpu"));
+    }
+}
+
+#[cfg(test)]
+mod smart_cut_tests {
+    use super::{
+        first_keyframe_at_or_after, parse_fps_rational, parse_source_video_params,
+        pix_fmt_bit_depth, preset_extension, smart_cut_fps, smart_cut_head_encoder_args,
+        SourceVideoParams, VIDEO_PRESETS,
+    };
+
+    fn params(codec: &str, pix_fmt: &str, avg: &str, r: &str) -> SourceVideoParams {
+        SourceVideoParams {
+            codec: codec.to_string(),
+            pix_fmt: pix_fmt.to_string(),
+            avg_frame_rate: avg.to_string(),
+            r_frame_rate: r.to_string(),
+        }
+    }
+
+    #[test]
+    fn smart_cut_is_a_registered_mkv_preset() {
+        assert!(VIDEO_PRESETS.contains(&"smart-cut"));
+        assert_eq!(preset_extension("smart-cut"), "mkv");
+    }
+
+    #[test]
+    fn keyframe_lines_are_read_flags_first_field_second() {
+        let csv = "12.000000,K__\n12.041667,__\n";
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02), Some(12.0));
+        // A non-keyframe packet at the requested time is never picked.
+        assert_eq!(first_keyframe_at_or_after("12.000000,__\n", 12.0, 0.02), None);
+    }
+
+    #[test]
+    fn out_of_order_packets_still_yield_the_earliest_keyframe() {
+        // Decode order: the later keyframe is listed first.
+        let csv = "18.500000,K__\n12.250000,K__\n9.000000,K__\n";
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02), Some(12.25));
+    }
+
+    #[test]
+    fn keyframes_within_half_a_frame_before_the_cut_still_count() {
+        let csv = "11.990000,K__\n";
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02), Some(11.99));
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.005), None);
+    }
+
+    #[test]
+    fn an_empty_or_garbled_probe_yields_no_keyframe() {
+        assert_eq!(first_keyframe_at_or_after("", 12.0, 0.02), None);
+        assert_eq!(first_keyframe_at_or_after("N/A,K__\nK__\n\n", 12.0, 0.02), None);
+    }
+
+    #[test]
+    fn frame_rates_parse_as_rationals_and_decimals() {
+        assert_eq!(parse_fps_rational("24000/1001"), Some(24000.0 / 1001.0));
+        assert_eq!(parse_fps_rational("25/1"), Some(25.0));
+        assert_eq!(parse_fps_rational("23.976"), Some(23.976));
+        assert_eq!(parse_fps_rational("0/0"), None);
+        assert_eq!(parse_fps_rational(""), None);
+    }
+
+    #[test]
+    fn pixel_format_depth_reads_the_suffix_not_any_digit() {
+        assert_eq!(pix_fmt_bit_depth("yuv420p"), Some(8));
+        assert_eq!(pix_fmt_bit_depth("nv12"), Some(8));
+        // 4:1:0 chroma — "10" in the name, still 8-bit.
+        assert_eq!(pix_fmt_bit_depth("yuv410p"), Some(8));
+        assert_eq!(pix_fmt_bit_depth("yuv420p10le"), Some(10));
+        assert_eq!(pix_fmt_bit_depth("p010le"), Some(10));
+        assert_eq!(pix_fmt_bit_depth("yuv444p12le"), Some(12));
+        assert_eq!(pix_fmt_bit_depth(""), None);
+    }
+
+    #[test]
+    fn the_head_encoder_matrix_matches_the_source_family() {
+        let h264_8bit = smart_cut_head_encoder_args("h264", "yuv420p").unwrap();
+        assert_eq!(
+            h264_8bit,
+            vec!["-c:v", "libx264", "-preset", "medium", "-crf", "12", "-pix_fmt", "yuv420p"]
+        );
+
+        let h264_10bit = smart_cut_head_encoder_args("h264", "yuv420p10le").unwrap();
+        assert_eq!(
+            h264_10bit,
+            vec![
+                "-c:v", "libx264", "-preset", "medium", "-crf", "12", "-profile:v", "high10",
+                "-pix_fmt", "yuv420p10le"
+            ]
+        );
+
+        let hevc_8bit = smart_cut_head_encoder_args("hevc", "yuv420p").unwrap();
+        assert_eq!(
+            hevc_8bit,
+            vec!["-c:v", "libx265", "-preset", "medium", "-crf", "14", "-pix_fmt", "yuv420p"]
+        );
+
+        for pix_fmt in ["yuv420p10le", "p010le"] {
+            let hevc_10bit = smart_cut_head_encoder_args("hevc", pix_fmt).unwrap();
+            assert_eq!(
+                hevc_10bit,
+                vec![
+                    "-c:v", "libx265", "-preset", "medium", "-crf", "14", "-pix_fmt",
+                    "yuv420p10le"
+                ],
+                "{pix_fmt}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_codecs_and_depths_refuse_with_the_alternatives() {
+        let av1 = smart_cut_head_encoder_args("av1", "yuv420p10le").unwrap_err();
+        assert!(av1.starts_with("Smart cut can't splice this source's video format (av1)."), "{av1}");
+        assert!(av1.contains("Lossless cut"), "{av1}");
+        assert!(av1.contains("frame-accurate"), "{av1}");
+
+        for codec in ["vp9", "mpeg4", "prores"] {
+            assert!(smart_cut_head_encoder_args(codec, "yuv420p").is_err(), "{codec}");
+        }
+
+        // Right codec family, depth we will not re-encode blind.
+        let deep = smart_cut_head_encoder_args("hevc", "yuv444p12le").unwrap_err();
+        assert!(deep.contains("(hevc yuv444p12le)"), "{deep}");
+        assert!(smart_cut_head_encoder_args("", "").is_err());
+    }
+
+    #[test]
+    fn constant_frame_rate_sources_pass_and_variable_ones_refuse() {
+        let ntsc = params("h264", "yuv420p", "24000/1001", "24000/1001");
+        assert_eq!(smart_cut_fps(&ntsc).unwrap(), 24000.0 / 1001.0);
+
+        // Under 1% apart (23.976 vs 24) is still treated as constant.
+        let close = params("h264", "yuv420p", "24000/1001", "24/1");
+        assert!(smart_cut_fps(&close).is_ok());
+
+        for (avg, r) in [("24000/1001", "30000/1001"), ("0/0", "24/1"), ("", "")] {
+            let vfr = params("h264", "yuv420p", avg, r);
+            let error = smart_cut_fps(&vfr).unwrap_err();
+            assert!(error.contains("(variable frame rate)"), "{avg}/{r}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_stream_probe_reads_the_first_video_stream() {
+        let json = r#"{"streams":[{"codec_name":"hevc","width":1920,"height":1080,
+            "pix_fmt":"yuv420p10le","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}]}"#;
+        assert_eq!(
+            parse_source_video_params(json).unwrap(),
+            params("hevc", "yuv420p10le", "24000/1001", "24000/1001")
+        );
+        assert!(parse_source_video_params(r#"{"streams":[]}"#).is_err());
+        assert!(parse_source_video_params("not json").is_err());
     }
 }
 
@@ -676,6 +1054,29 @@ fn run_clip_export(
             file_index += 1;
         };
         file_index += 1;
+
+        // Smart cut cannot share the single-invocation shape below: one clip is
+        // a head re-encode + a body copy + a concat. It is handled here and the
+        // arm list is left untouched.
+        if preset == "smart-cut" {
+            let (export_start, export_duration) = padded_clip_range(clip);
+            let span = 100.0 / clips.len() as f32;
+            run_smart_cut_clip(
+                &window,
+                &ffmpeg,
+                &ffprobe,
+                &input,
+                &color,
+                export_start,
+                export_duration,
+                &output,
+                &format!("Smart cut clip {}/{}", i + 1, clips.len()),
+                i as f32 * span,
+                span,
+            )?;
+            exported_paths.push(output.to_string_lossy().to_string());
+            continue;
+        }
 
         let mut args = vec![
             "-y".to_string(),
@@ -1072,6 +1473,22 @@ fn run_clip_export_merged(
         );
     }
 
+    // Smart-cut merge is the same stream-copy shape, with each segment cut
+    // frame-accurately instead of snapped to a keyframe.
+    if preset == "smart-cut" {
+        return run_smart_cut_merge(
+            &window,
+            &ffmpeg,
+            &ffprobe,
+            &clips,
+            &input_paths,
+            &input_index_for_clip,
+            &out_dir,
+            &output,
+            &color,
+        );
+    }
+
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
@@ -1333,6 +1750,502 @@ fn run_clip_export_merged(
     serde_json::to_string(&done).map_err(|error| error.to_string())
 }
 
+// RAII-ish cleanup of a segment temp dir on every exit path — success, error,
+// and cancel (the ffmpeg child dies first, then this unwinds).
+struct TempDirGuard(PathBuf);
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+// Temp dir for intermediate segments, next to the output so the final rename /
+// concat stays on one volume. The pid keeps two app instances writing into the
+// same output folder apart.
+fn create_segment_temp_dir(out_dir: &Path, prefix: &str) -> Result<PathBuf, String> {
+    let temp_dir = out_dir.join(format!(".{prefix}_tmp_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Could not create temporary merge directory: {e}"))?;
+    Ok(temp_dir)
+}
+
+// Shared tail of every stream-copy join: write the concat-demuxer list for the
+// finished segments, then join them with -c copy. List lines escape single
+// quotes per ffmpeg's syntax. `bitstream_filter` is for callers that need the
+// packets tidied on the way through (smart cut strips the access-unit
+// delimiters its transport-stream intermediates add); it never re-encodes.
+#[allow(clippy::too_many_arguments)]
+fn concat_copy_segments(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    temp_dir: &Path,
+    segments: &[PathBuf],
+    total_duration: f64,
+    output: &Path,
+    bitstream_filter: Option<&str>,
+    percent: f32,
+    message: String,
+    label: &str,
+) -> Result<(), String> {
+    let mut concat_list = String::new();
+    for segment in segments {
+        let escaped = segment.to_string_lossy().replace('\'', "'\\''");
+        concat_list.push_str(&format!("file '{escaped}'\n"));
+    }
+
+    let list_path = temp_dir.join("concat.txt");
+    fs::write(&list_path, concat_list)
+        .map_err(|e| format!("Could not write concat list: {e}"))?;
+
+    let mut concat_args: Vec<String> = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-f".to_string(),
+        "concat".to_string(),
+        "-safe".to_string(),
+        "0".to_string(),
+        "-i".to_string(),
+        list_path.to_string_lossy().to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+    ];
+    if let Some(filter) = bitstream_filter {
+        concat_args.extend(["-bsf:v".to_string(), filter.to_string()]);
+    }
+    concat_args.extend([
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        "-stats_period".to_string(),
+        "0.5".to_string(),
+        output.to_string_lossy().to_string(),
+    ]);
+    emit_conversion_progress(window, "encode", Some(percent), message, None, None);
+    run_ffmpeg_with_progress(
+        window,
+        ffmpeg,
+        concat_args,
+        total_duration,
+        label,
+        Some(&CLIP_CHILD_PID),
+    )
+}
+
+// How far back the audio cut seeks before the requested start. The demuxer
+// snaps an input seek to a keyframe, so this only has to cover one GOP; a
+// bigger window just means a few more packets are read and thrown away.
+const SMART_CUT_AUDIO_BACKOFF: f64 = 15.0;
+
+// One smart cut. The video is built in two pieces — the head (requested start
+// -> first keyframe at or after it) re-encoded so the clip opens on the exact
+// requested frame, the body (that keyframe -> requested end) copied byte for
+// byte — joined with the concat demuxer under -c copy. The audio is cut once,
+// for the whole clip, and copied.
+//
+// The pieces are VIDEO-ONLY on purpose. ffmpeg leaves a re-encoded video stream
+// on the source timeline whenever a stream-copied audio stream shares the same
+// output, which makes the concat demuxer read the head as (head + start) long
+// and pushes the body that far out — a 5.5s clip lands at 8.3s. Keeping video
+// and audio in separate files and muxing them at the end sidesteps that
+// entirely.
+//
+// Two shortcuts: a cut that already lands on a keyframe is a plain copy with no
+// temp files at all, and a keyframe past the requested end (or no keyframe in
+// the probe window) makes the whole clip a single re-encode. Refuses (Err) on
+// codecs and frame rates that cannot be spliced. Every ffmpeg run goes through
+// CLIP_CHILD_PID so cancel kills whichever child is live.
+#[allow(clippy::too_many_arguments)]
+fn run_smart_cut_clip(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    input: &Path,
+    color: &ColorMetadata,
+    start: f64,
+    duration: f64,
+    output: &Path,
+    label: &str,
+    percent_from: f32,
+    percent_span: f32,
+) -> Result<(), String> {
+    let params = probe_source_video_params(ffprobe, input)?;
+    let fps = smart_cut_fps(&params)?;
+    let head_encoder = smart_cut_head_encoder_args(&params.codec, &params.pix_fmt)?;
+
+    // Half a frame: closer than this and the cut IS the keyframe, so there is
+    // nothing to re-encode.
+    let tolerance = 0.5 / fps;
+    let end = start + duration;
+    let keyframe = probe_first_keyframe(ffprobe, input, start, tolerance);
+    let stage = |fraction: f32| Some(percent_from + percent_span * fraction);
+
+    // The cut already sits on a keyframe: one copy from the keyframe's exact
+    // timestamp is frame-accurate on its own, video and audio together.
+    if let Some(kf) = keyframe {
+        if (kf - start).abs() < tolerance {
+            let length = (end - kf).max(0.0);
+            emit_conversion_progress(
+                window,
+                "encode",
+                stage(0.0),
+                format!("{label} (already on a keyframe)..."),
+                None,
+                None,
+            );
+            return run_ffmpeg_with_progress(
+                window,
+                ffmpeg,
+                vec![
+                    "-y".to_string(),
+                    "-hide_banner".to_string(),
+                    "-nostdin".to_string(),
+                    "-loglevel".to_string(),
+                    "error".to_string(),
+                    "-ss".to_string(),
+                    format!("{kf:.6}"),
+                    "-i".to_string(),
+                    input.to_string_lossy().to_string(),
+                    "-t".to_string(),
+                    format!("{length:.3}"),
+                    "-map".to_string(),
+                    "0:v:0".to_string(),
+                    "-map".to_string(),
+                    "0:a:0?".to_string(),
+                    "-c".to_string(),
+                    "copy".to_string(),
+                    "-avoid_negative_ts".to_string(),
+                    "make_zero".to_string(),
+                    "-progress".to_string(),
+                    "pipe:1".to_string(),
+                    "-stats_period".to_string(),
+                    "0.5".to_string(),
+                    output.to_string_lossy().to_string(),
+                ],
+                length,
+                "Smart cut (stream copy)",
+                Some(&CLIP_CHILD_PID),
+            );
+        }
+    }
+
+    let temp_parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let temp_dir = create_segment_temp_dir(temp_parent, "smartcut")?;
+    let _guard = TempDirGuard(temp_dir.clone());
+    let video = temp_dir.join("video.mkv");
+
+    // Head re-encode. -ss before -i is frame-accurate here BECAUSE the video is
+    // re-encoded: ffmpeg decodes from the preceding keyframe and throws away
+    // the frames before the seek point. Only -c copy snaps to a keyframe.
+    let head_args = |length: f64, target: &Path, as_ts: bool| {
+        let mut args: Vec<String> = vec![
+            "-y".to_string(),
+            "-hide_banner".to_string(),
+            "-nostdin".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-ss".to_string(),
+            format!("{start:.3}"),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-t".to_string(),
+            format!("{length:.3}"),
+            "-map".to_string(),
+            "0:v:0".to_string(),
+        ];
+        args.extend(head_encoder.iter().cloned());
+        args.push("-vf".to_string());
+        args.push(setparams_filter(color));
+        args.extend(color_tag_args(color));
+        if as_ts {
+            args.extend(["-f".to_string(), "mpegts".to_string()]);
+        }
+        args.push(target.to_string_lossy().to_string());
+        args
+    };
+
+    // The two pieces are joined as MPEG-TS, not MKV. A re-encoded head and an
+    // untouched body carry different parameter sets, and MKV stores those once
+    // in the header — the muxer takes the head's and then rejects the body's
+    // packets outright ("Error muxing a packet" on HEVC). Transport streams
+    // carry the parameter sets in-band with every keyframe, so the two splice.
+    //
+    // Neither piece gets -avoid_negative_ts make_zero: on a stream copy it
+    // shifts every packet forward by the first frame's DTS/PTS gap (two frames
+    // on a B-frame source), which both offsets the body inside the join and
+    // drags two frames from before the keyframe in with it.
+    let mut joined = false;
+    if let Some(kf) = keyframe.filter(|kf| *kf < end - tolerance) {
+        let head = temp_dir.join("head.ts");
+        emit_conversion_progress(
+            window,
+            "encode",
+            stage(0.0),
+            format!("{label}: re-encoding the opening frames..."),
+            None,
+            None,
+        );
+        run_ffmpeg_with_progress(
+            window,
+            ffmpeg,
+            head_args(kf - start, &head, true),
+            kf - start,
+            "Smart cut head",
+            Some(&CLIP_CHILD_PID),
+        )?;
+
+        let body = temp_dir.join("body.ts");
+        emit_conversion_progress(
+            window,
+            "encode",
+            stage(0.4),
+            format!("{label}: copying the original stream..."),
+            None,
+            None,
+        );
+        run_ffmpeg_with_progress(
+            window,
+            ffmpeg,
+            vec![
+                "-y".to_string(),
+                "-hide_banner".to_string(),
+                "-nostdin".to_string(),
+                "-loglevel".to_string(),
+                "error".to_string(),
+                "-ss".to_string(),
+                format!("{kf:.6}"),
+                "-i".to_string(),
+                input.to_string_lossy().to_string(),
+                "-t".to_string(),
+                format!("{:.3}", end - kf),
+                "-map".to_string(),
+                "0:v:0".to_string(),
+                "-c".to_string(),
+                "copy".to_string(),
+                "-f".to_string(),
+                "mpegts".to_string(),
+                body.to_string_lossy().to_string(),
+            ],
+            end - kf,
+            "Smart cut body",
+            Some(&CLIP_CHILD_PID),
+        )?;
+
+        // A source whose keyframe index lies (ffmpeg says "File is broken,
+        // keyframes not correctly marked") seeks to the wrong place on a stream
+        // copy, and the body would silently hold footage from elsewhere in the
+        // episode. Counting what the copy actually produced catches it.
+        let wanted_frames = ((end - kf) * fps).round().max(1.0) as usize;
+        let copied_frames =
+            probe_video_packet_count(ffprobe, &body).unwrap_or(wanted_frames);
+        let slack = (wanted_frames / 10).max(3);
+        if copied_frames.abs_diff(wanted_frames) <= slack {
+            concat_copy_segments(
+                window,
+                ffmpeg,
+                &temp_dir,
+                &[head, body],
+                duration,
+                &video,
+                Some(&format!("{}_metadata=aud=remove", params.codec)),
+                percent_from + percent_span * 0.6,
+                format!("{label}: joining..."),
+                "Joining smart cut",
+            )?;
+            joined = true;
+        } else {
+            log_warn(
+                "clip.smart_cut.body_mismatch",
+                "Smart cut body copy landed on the wrong footage; re-encoding the whole clip",
+                json!({
+                    "input": input.to_string_lossy(),
+                    "keyframe": kf,
+                    "wantedFrames": wanted_frames,
+                    "copiedFrames": copied_frames,
+                }),
+            );
+        }
+    }
+
+    // No keyframe before the clip ends (start near EOF, a GOP longer than the
+    // probe window, or a source whose index cannot be trusted): re-encode the
+    // whole clip. Slower, but it only happens on degenerate sources and
+    // correctness wins.
+    if !joined {
+        emit_conversion_progress(
+            window,
+            "encode",
+            stage(0.0),
+            format!("{label} (no keyframe to splice — re-encoding)..."),
+            None,
+            None,
+        );
+        run_ffmpeg_with_progress(
+            window,
+            ffmpeg,
+            head_args(duration, &video, false),
+            duration,
+            "Smart cut (full re-encode)",
+            Some(&CLIP_CHILD_PID),
+        )?;
+    }
+
+    // Silent source: the joined video already IS the clip.
+    if !probe_has_audio_stream(ffprobe, input).unwrap_or(false) {
+        return fs::rename(&video, output)
+            .map_err(|e| format!("Could not write the finished clip: {e}"));
+    }
+
+    // Audio, cut once for the whole clip. Two-stage seek: the input -ss gets
+    // the demuxer near the cut (on its own it would snap back to a keyframe and
+    // hand back seconds of extra audio), then the output -ss — measured from the
+    // REQUESTED input seek, not from wherever the demuxer landed — drops the
+    // overshoot packet by packet. Exact, and it never reads more than the
+    // backoff window extra.
+    let audio = temp_dir.join("audio.mka");
+    let seek_from = (start - SMART_CUT_AUDIO_BACKOFF).max(0.0);
+    emit_conversion_progress(
+        window,
+        "encode",
+        stage(0.75),
+        format!("{label}: copying the audio..."),
+        None,
+        None,
+    );
+    run_ffmpeg_with_progress(
+        window,
+        ffmpeg,
+        vec![
+            "-y".to_string(),
+            "-hide_banner".to_string(),
+            "-nostdin".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-ss".to_string(),
+            format!("{seek_from:.3}"),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-ss".to_string(),
+            format!("{:.3}", start - seek_from),
+            "-t".to_string(),
+            format!("{duration:.3}"),
+            "-map".to_string(),
+            "0:a:0".to_string(),
+            "-c".to_string(),
+            "copy".to_string(),
+            "-avoid_negative_ts".to_string(),
+            "make_zero".to_string(),
+            audio.to_string_lossy().to_string(),
+        ],
+        duration,
+        "Smart cut audio",
+        Some(&CLIP_CHILD_PID),
+    )?;
+
+    emit_conversion_progress(
+        window,
+        "encode",
+        stage(0.9),
+        format!("{label}: writing the clip..."),
+        None,
+        None,
+    );
+    run_ffmpeg_with_progress(
+        window,
+        ffmpeg,
+        vec![
+            "-y".to_string(),
+            "-hide_banner".to_string(),
+            "-nostdin".to_string(),
+            "-i".to_string(),
+            video.to_string_lossy().to_string(),
+            "-i".to_string(),
+            audio.to_string_lossy().to_string(),
+            "-map".to_string(),
+            "0:v:0".to_string(),
+            "-map".to_string(),
+            "1:a:0".to_string(),
+            "-c".to_string(),
+            "copy".to_string(),
+            "-progress".to_string(),
+            "pipe:1".to_string(),
+            "-stats_period".to_string(),
+            "0.5".to_string(),
+            output.to_string_lossy().to_string(),
+        ],
+        duration,
+        "Smart cut mux",
+        Some(&CLIP_CHILD_PID),
+    )
+}
+
+// Smart-cut merge: identical in shape to the lossless merge below, except each
+// temp segment is cut frame-accurately (head re-encode + body copy) instead of
+// snapped to the nearest keyframe. The join is still -c copy. Color tags come
+// from the first input, matching the rest of the merge path.
+#[allow(clippy::too_many_arguments)]
+fn run_smart_cut_merge(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    clips: &[ExportClip],
+    input_paths: &[PathBuf],
+    input_index_for_clip: &[usize],
+    out_dir: &Path,
+    output: &Path,
+    color: &ColorMetadata,
+) -> Result<String, String> {
+    let temp_dir = create_segment_temp_dir(out_dir, "smartcutmerge")?;
+    let _guard = TempDirGuard(temp_dir.clone());
+
+    let mut total_duration = 0.0_f64;
+    let mut segment_paths: Vec<PathBuf> = Vec::with_capacity(clips.len());
+    let span = 90.0 / clips.len() as f32;
+
+    for (i, clip) in clips.iter().enumerate() {
+        let input = &input_paths[input_index_for_clip[i]];
+        let (start, duration) = padded_clip_range(clip);
+        total_duration += duration;
+
+        let segment = temp_dir.join(format!("seg_{i:04}.mkv"));
+        run_smart_cut_clip(
+            window,
+            ffmpeg,
+            ffprobe,
+            input,
+            color,
+            start,
+            duration,
+            &segment,
+            &format!("Smart cut segment {}/{}", i + 1, clips.len()),
+            i as f32 * span,
+            span,
+        )?;
+        segment_paths.push(segment);
+    }
+
+    concat_copy_segments(
+        window,
+        ffmpeg,
+        &temp_dir,
+        &segment_paths,
+        total_duration,
+        output,
+        None,
+        92.0_f32,
+        format!("Joining {} smart-cut segments...", clips.len()),
+        "Joining smart-cut segments",
+    )?;
+
+    let done = ConversionDone {
+        r#type: "done".to_string(),
+        input: format!("{} clips merged", clips.len()),
+        output: output.to_string_lossy().to_string(),
+        archived_original: None,
+        preset: "smart-cut".to_string(),
+    };
+    serde_json::to_string(&done).map_err(|error| error.to_string())
+}
+
 // Lossless-cut merge: stream-copy each segment to a keyframe-snapped temp MKV,
 // then concat-demux them into one MKV with -c copy. Bit-exact, no re-encode;
 // color metadata + every other stream parameter ride along untouched. Cuts
@@ -1350,21 +2263,10 @@ fn run_lossless_cut_merge(
     out_dir: &Path,
     output: &Path,
 ) -> Result<String, String> {
-    let temp_dir = out_dir.join(format!(".losslesscut_tmp_{}", std::process::id()));
-    fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Could not create temporary merge directory: {e}"))?;
-
-    // RAII-ish cleanup of the temp dir on every exit path.
-    struct TempDirGuard(PathBuf);
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    let temp_dir = create_segment_temp_dir(out_dir, "losslesscut")?;
     let _guard = TempDirGuard(temp_dir.clone());
 
     let mut total_duration = 0.0_f64;
-    let mut concat_list = String::new();
     let mut segment_paths: Vec<PathBuf> = Vec::with_capacity(clips.len());
 
     for (i, clip) in clips.iter().enumerate() {
@@ -1412,49 +2314,20 @@ fn run_lossless_cut_merge(
             Some(&CLIP_CHILD_PID),
         )?;
 
-        // Concat-demuxer list lines escape single quotes per ffmpeg's syntax.
-        let escaped = segment.to_string_lossy().replace('\'', "'\\''");
-        concat_list.push_str(&format!("file '{escaped}'\n"));
         segment_paths.push(segment);
     }
 
-    let list_path = temp_dir.join("concat.txt");
-    fs::write(&list_path, concat_list)
-        .map_err(|e| format!("Could not write concat list: {e}"))?;
-
-    let concat_args: Vec<String> = vec![
-        "-y".to_string(),
-        "-hide_banner".to_string(),
-        "-nostdin".to_string(),
-        "-f".to_string(),
-        "concat".to_string(),
-        "-safe".to_string(),
-        "0".to_string(),
-        "-i".to_string(),
-        list_path.to_string_lossy().to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-        "-progress".to_string(),
-        "pipe:1".to_string(),
-        "-stats_period".to_string(),
-        "0.5".to_string(),
-        output.to_string_lossy().to_string(),
-    ];
-    emit_conversion_progress(
-        window,
-        "encode",
-        Some(92.0_f32),
-        format!("Joining {} lossless segments...", clips.len()),
-        None,
-        None,
-    );
-    run_ffmpeg_with_progress(
+    concat_copy_segments(
         window,
         ffmpeg,
-        concat_args,
+        &temp_dir,
+        &segment_paths,
         total_duration,
+        output,
+        None,
+        92.0_f32,
+        format!("Joining {} lossless segments...", clips.len()),
         "Joining lossless segments",
-        Some(&CLIP_CHILD_PID),
     )?;
 
     let done = ConversionDone {

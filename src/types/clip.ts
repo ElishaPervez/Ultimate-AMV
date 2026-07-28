@@ -139,6 +139,7 @@ export type ClipExportFormat =
   | "h264-cpu"
   | "h264-10bit-cpu"
   | "hevc-cpu"
-  | "lossless-cut";
+  | "lossless-cut"
+  | "smart-cut";
 
 export type ClipExportRateMode = "quality" | "vbr" | "cbr";
