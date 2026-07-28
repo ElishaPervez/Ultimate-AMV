@@ -7,6 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Loader2, RefreshCw, Globe, Link } from "lucide-react";
 import { extractEpisodeNumber } from "../../lib/episode";
 import { logFrontend, safeLogValue } from "../../lib/log";
+import { getUiZoom, UI_ZOOM_CHANGED_EVENT } from "../../lib/uiScale";
 import { normalizeUrl } from "../../lib/url";
 import { parseBridgePayload } from "../../utils/bridge";
 import type { AppConfig } from "../../types/app";
@@ -43,6 +44,24 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
 ];
 
 const DEFAULT_PROVIDER_URL = PROVIDER_PRESETS[0].url;
+
+/**
+ * The provider page is a real native webview parented to our window, not an
+ * element in our DOM — so it is placed in the window manager's LOGICAL
+ * pixels, while the frame we measure to place it reports CSS pixels. Those
+ * two units only agree at zoom 1. Without this conversion the embedded site
+ * sits offset from its frame and overhangs the layout as soon as the window
+ * drives the page zoom below (or above) 100%.
+ */
+function frameBoundsToLogical(rect: DOMRect) {
+  const zoom = getUiZoom();
+  return {
+    x: Math.round(rect.left * zoom),
+    y: Math.round(rect.top * zoom),
+    width: Math.max(1, Math.round(rect.width * zoom)),
+    height: Math.max(1, Math.round(rect.height * zoom)),
+  };
+}
 
 function urlHost(value: string): string | null {
   try {
@@ -318,12 +337,10 @@ export function AnikaiBrowser({
       const webview = webviewRef.current;
       if (!activeRef.current || !frame || !webview) return;
 
-      const rect = frame.getBoundingClientRect();
-      const width = Math.max(1, Math.round(rect.width));
-      const height = Math.max(1, Math.round(rect.height));
-      await webview.setPosition(new LogicalPosition(Math.round(rect.left), Math.round(rect.top)));
+      const bounds = frameBoundsToLogical(frame.getBoundingClientRect());
+      await webview.setPosition(new LogicalPosition(bounds.x, bounds.y));
       if (webviewRef.current !== webview) return;
-      await webview.setSize(new LogicalSize(width, height));
+      await webview.setSize(new LogicalSize(bounds.width, bounds.height));
     } catch (error) {
       handleWebviewLayoutError(error);
     }
@@ -335,15 +352,13 @@ export function AnikaiBrowser({
       const webview = webviewRef.current;
       if (!activeRef.current || !frame || !webview) return;
 
-      const rect = frame.getBoundingClientRect();
-      const width = Math.max(1, Math.round(rect.width));
-      const height = Math.max(2, Math.round(rect.height));
-      const position = new LogicalPosition(Math.round(rect.left), Math.round(rect.top));
-      await webview.setPosition(position);
+      const bounds = frameBoundsToLogical(frame.getBoundingClientRect());
+      const height = Math.max(2, bounds.height);
+      await webview.setPosition(new LogicalPosition(bounds.x, bounds.y));
       if (webviewRef.current !== webview) return;
-      await webview.setSize(new LogicalSize(width, height - 1));
+      await webview.setSize(new LogicalSize(bounds.width, height - 1));
       if (webviewRef.current !== webview) return;
-      await webview.setSize(new LogicalSize(width, height));
+      await webview.setSize(new LogicalSize(bounds.width, height));
     } catch (error) {
       handleWebviewLayoutError(error);
     }
@@ -513,13 +528,13 @@ export function AnikaiBrowser({
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         if (cancelled || createRunRef.current !== createRun) return;
 
-        const rect = frame.getBoundingClientRect();
+        const bounds = frameBoundsToLogical(frame.getBoundingClientRect());
         const webview = new Webview(getCurrentWindow(), label, {
           url: normalizeUrl(targetUrl),
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          width: Math.max(1, Math.round(rect.width)),
-          height: Math.max(1, Math.round(rect.height)),
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
           focus: true,
           zoomHotkeysEnabled: true,
           devtools: true,
@@ -562,6 +577,11 @@ export function AnikaiBrowser({
         if (browserHost) resizeObserver.observe(browserHost);
         window.addEventListener("resize", syncWebviewBounds);
         window.addEventListener("scroll", syncWebviewBounds, true);
+        // A zoom change moves the frame in logical pixels even when its CSS
+        // box is unchanged, and the observers above cannot see that on their
+        // own — nor can they be trusted to fire after getUiZoom() has caught
+        // up with the zoom that is already on screen.
+        window.addEventListener(UI_ZOOM_CHANGED_EVENT, syncWebviewBounds);
       } catch (error) {
         if (cancelled || createRunRef.current !== createRun) return;
         setStatus("error");
@@ -576,6 +596,7 @@ export function AnikaiBrowser({
       resizeObserver?.disconnect();
       window.removeEventListener("resize", syncWebviewBounds);
       window.removeEventListener("scroll", syncWebviewBounds, true);
+      window.removeEventListener(UI_ZOOM_CHANGED_EVENT, syncWebviewBounds);
       const webview = webviewRef.current;
       webviewRef.current = null;
       void webview?.close().catch(() => undefined);
