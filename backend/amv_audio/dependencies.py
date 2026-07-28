@@ -197,6 +197,10 @@ def _stream_command(cmd, progress_callback):
     a file that is suddenly not there.
     """
     append_terminal_log(f"$ {' '.join(cmd)}")
+    # Anything this command touches can move NumPy or Numba as a side effect,
+    # so the remembered health answer stops being trustworthy the moment it
+    # starts.
+    invalidate_numeric_runtime_probe()
     output_lines = []
     try:
         process = subprocess.Popen(
@@ -356,6 +360,20 @@ def _ensure_pip(progress_callback=None):
 
 
 
+# The probe below starts a fresh Python and imports NumPy and Numba, which
+# costs half a second to a second and a half. A mode switch asked it five
+# times, and three of those five ran back to back with nothing installed in
+# between. The answer is remembered until something actually installs or
+# removes a package, at which point every command runner below clears it --
+# so the check that exists to catch damage done *during* a switch still runs
+# after every step, and only the provably identical repeats are skipped.
+_NUMERIC_PROBE = {}
+
+
+def invalidate_numeric_runtime_probe():
+    _NUMERIC_PROBE.clear()
+
+
 def _numeric_runtime_probe_error():
     """Return why the loaded NumPy/Numba pair is unusable, or None.
 
@@ -363,6 +381,13 @@ def _numeric_runtime_probe_error():
     NumPy build, pip needs to replace its files; importing NumPy here would
     keep native modules loaded while that replacement happens on Windows.
     """
+    if "error" in _NUMERIC_PROBE:
+        return _NUMERIC_PROBE["error"]
+    _NUMERIC_PROBE["error"] = error = _run_numeric_runtime_probe()
+    return error
+
+
+def _run_numeric_runtime_probe():
     probe = (
         "import numpy\n"
         f"assert numpy.__version__ == {NUMPY_VERSION!r}, "

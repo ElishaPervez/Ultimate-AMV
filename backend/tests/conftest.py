@@ -26,6 +26,22 @@ for _p in [str(_REPO_ROOT), str(_BACKEND_DIR)]:
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _forget_numeric_runtime_answer():
+    """Start every test with no remembered NumPy/Numba health answer.
+
+    The real code remembers it for the length of one setup run and throws it
+    away whenever a package is installed or removed. Tests drive that check
+    with different fakes, so a leftover answer from the previous test would
+    be the one they see.
+    """
+    from amv_audio.dependencies import invalidate_numeric_runtime_probe
+
+    invalidate_numeric_runtime_probe()
+    yield
+    invalidate_numeric_runtime_probe()
+
+
 @pytest.fixture()
 def fake_config_dir(tmp_path):
     """Return a temporary directory usable as the AMV state/config dir."""

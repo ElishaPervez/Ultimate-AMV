@@ -203,6 +203,34 @@ def test_collect_gpu_plan_reports_wrong_torch_mode(mocker):
     assert any("PyTorch" in issue or "CUDA" in issue for issue in plan["issues"])
 
 
+def test_collect_gpu_plan_installs_only_the_runtime_when_the_stack_is_present(mocker):
+    """Coming back from CPU mode, the GPU sound runtime is the only thing
+    missing. Reinstalling the whole audio stack to recover it costs ~5.7s of
+    resolving 70 packages and hands out blanket upgrade permission."""
+    m = _get_setup()
+    _patch_setup_checks(mocker, ort_gpu=False)
+
+    plan = m.collect_setup_plan("gpu")
+    flat = [" ".join(command) for command in plan["installs"]]
+
+    assert any("onnxruntime-gpu" in step and "uninstall" not in step for step in flat)
+    assert not any("audio-separator" in step for step in flat)
+
+
+def test_collect_gpu_plan_still_installs_the_stack_when_the_stack_is_missing(mocker):
+    m = _get_setup()
+    _patch_setup_checks(mocker, ort_gpu=False, audio_sep=False)
+
+    flat = [" ".join(command) for command in m.collect_setup_plan("gpu")["installs"]]
+
+    # audio-separator's GPU extra brings the runtime, so no separate step.
+    assert any("audio-separator[gpu]" in step for step in flat)
+    assert not any(
+        "onnxruntime-gpu" in step and "audio-separator" not in step and "uninstall" not in step
+        for step in flat
+    )
+
+
 def test_collect_gpu_plan_repairs_incompatible_numeric_runtime(mocker):
     m = _get_setup()
     _patch_setup_checks(mocker, numeric_runtime=False)

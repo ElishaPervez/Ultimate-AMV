@@ -342,6 +342,47 @@ def test_numeric_runtime_probe_returns_the_loaded_version_failure(mocker):
     assert deps_mod._numeric_runtime_probe_error().endswith("Got NumPy 2.5.")
 
 
+def test_numeric_runtime_probe_is_asked_once_until_something_installs(mocker):
+    """Starting a Python that loads NumPy and Numba costs up to 1.5s, and a
+    mode switch asked five times. Repeats with nothing installed in between
+    reuse the answer."""
+    run = mocker.patch(
+        "amv_audio.dependencies.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="", stderr=""),
+    )
+
+    assert deps_mod._numeric_runtime_probe_error() is None
+    assert deps_mod._numeric_runtime_probe_error() is None
+    assert deps_mod._numeric_runtime_ready() is True
+
+    assert run.call_count == 1
+
+
+def test_running_an_install_forces_the_health_question_to_be_asked_again(mocker):
+    """The check exists to catch a package that moved NumPy as a side effect
+    of installing something else, so it must never be answered from memory
+    across an install."""
+    mocker.patch(
+        "amv_audio.dependencies.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="", stderr=""),
+    )
+    assert deps_mod._numeric_runtime_probe_error() is None
+
+    mocker.patch("amv_audio.dependencies.installer.subprocess_env", return_value={})
+    mocker.patch(
+        "amv_audio.dependencies.subprocess.Popen",
+        side_effect=OSError("installer missing"),
+    )
+    deps_mod._stream_command(["uv", "pip", "install", "numpy"], None)
+
+    run = mocker.patch(
+        "amv_audio.dependencies.subprocess.run",
+        return_value=MagicMock(returncode=1, stdout="", stderr="ImportError: broken\n"),
+    )
+    assert deps_mod._numeric_runtime_probe_error() is not None
+    assert run.call_count == 1
+
+
 def test_audio_dependencies_flag_incompatible_numeric_runtime(mocker):
     mocker.patch("amv_audio.dependencies._module_exists", return_value=True)
     mocker.patch("amv_audio.dependencies._audio_runtime_missing", return_value=False)

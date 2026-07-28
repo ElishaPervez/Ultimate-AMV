@@ -3,9 +3,9 @@ Tests for backend/amv_audio/gpu.py
 
 Covers:
 - check_nvidia_gpu: GPU found, not found, timeout, FileNotFoundError
-- get_torch_install_cmd: --upgrade --force-reinstall form, correct index URL
+- get_torch_install_cmd: names the exact hardware build, correct index URL
 - get_gpu_switch_cmds / get_cpu_switch_cmds: command composition, no simultaneous
-  pip-uninstall + pip-install for torch (only --force-reinstall)
+  pip-uninstall + pip-install for torch (it swaps in place)
 """
 import sys
 import subprocess
@@ -89,21 +89,34 @@ def test_check_nvidia_gpu_returns_first_line_only(mocker):
 
 
 # ---------------------------------------------------------------------------
-# get_torch_install_cmd — CLAUDE.md rule: must use --upgrade --force-reinstall
+# get_torch_install_cmd — must name the exact hardware build, so that an
+# installer looking at the other build cannot call the requirement satisfied
 # ---------------------------------------------------------------------------
 
 
-def test_get_torch_install_cmd_gpu_uses_force_reinstall():
-    """GPU torch install must include --upgrade --force-reinstall (never separate uninstall)."""
+def test_get_torch_install_cmd_gpu_names_the_cuda_build():
     cmd = get_torch_install_cmd(gpu=True)
     assert "--upgrade" in cmd
-    assert "--force-reinstall" in cmd
+    assert "torch==2.11.0+cu128" in cmd
+    assert "torch==2.11.0" not in cmd
 
 
-def test_get_torch_install_cmd_cpu_uses_force_reinstall():
+def test_get_torch_install_cmd_cpu_names_the_cpu_build():
     cmd = get_torch_install_cmd(gpu=False)
     assert "--upgrade" in cmd
-    assert "--force-reinstall" in cmd
+    assert "torch==2.11.0+cpu" in cmd
+    assert "torch==2.11.0" not in cmd
+
+
+def test_torch_swap_does_not_force_a_refresh():
+    """A forced reinstall also discards uv's cached knowledge of these
+    packages and re-checks the download site, costing ~1.7s per switch. The
+    exact-build requirement makes the swap happen without it."""
+    for mode in (True, False):
+        cmd = get_torch_install_cmd(gpu=mode)
+        assert "--force-reinstall" not in cmd
+        assert "--reinstall" not in cmd
+        assert "--reinstall-package" not in cmd
 
 
 def test_get_torch_install_cmd_gpu_uses_cuda_index_url():
@@ -122,8 +135,10 @@ def test_get_torch_install_cmd_cpu_uses_cpu_index_url():
 def test_get_torch_install_cmd_contains_all_torch_packages():
     for mode in (True, False):
         cmd = get_torch_install_cmd(gpu=mode)
+        tag = "+cu128" if mode else "+cpu"
         for pkg in TORCH_PACKAGES:
-            assert pkg in cmd, f"Package {pkg!r} missing from {'GPU' if mode else 'CPU'} install cmd"
+            wanted = f"{pkg}{tag}"
+            assert wanted in cmd, f"Package {wanted!r} missing from {'GPU' if mode else 'CPU'} install cmd"
 
 
 def test_get_torch_install_cmd_no_separate_uninstall_step():
@@ -150,11 +165,33 @@ def test_get_gpu_switch_cmds_default_includes_torch_and_separator():
 def test_gpu_setup_pins_the_verified_torch_and_nelux_pair():
     cmds = get_gpu_switch_cmds()
     flat = [item for cmd in cmds for item in cmd]
-    assert "torch==2.11.0" in flat
-    assert "torchvision==0.26.0" in flat
-    assert "torchaudio==2.11.0" in flat
+    assert "torch==2.11.0+cu128" in flat
+    assert "torchvision==0.26.0+cu128" in flat
+    assert "torchaudio==2.11.0+cu128" in flat
     assert "nelux==0.11.0" in flat
     assert "nelux" not in flat
+
+
+def test_cpu_setup_pins_the_verified_torch_build():
+    flat = [item for cmd in get_cpu_switch_cmds() for item in cmd]
+    assert "torch==2.11.0+cpu" in flat
+    assert "torchvision==0.26.0+cpu" in flat
+    assert "torchaudio==2.11.0+cpu" in flat
+
+
+def test_gpu_runtime_can_be_installed_without_the_whole_audio_stack():
+    """Switching to CPU removes the GPU sound runtime, so switching back needs
+    it again. That must not drag the entire 70-package audio stack with it."""
+    cmds = get_gpu_switch_cmds(install_gpu_runtime=True, install_audio_separator=False)
+    flat = [" ".join(c) for c in cmds]
+    assert any("onnxruntime-gpu" in s and "uninstall" not in s for s in flat)
+    assert not any("audio-separator" in s for s in flat)
+
+
+def test_gpu_runtime_step_is_omitted_by_default():
+    flat = [" ".join(c) for c in get_gpu_switch_cmds()]
+    installs = [s for s in flat if "uninstall" not in s]
+    assert not any("onnxruntime-gpu" in s for s in installs)
 
 
 def test_gpu_and_cpu_audio_setup_pin_the_verified_numeric_pair():

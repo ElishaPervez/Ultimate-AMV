@@ -353,8 +353,17 @@ def test_the_torch_swap_only_rewrites_the_torch_packages(with_uv):
     cmd = gpu_mod.get_torch_install_cmd(gpu=False)
     assert "--reinstall" not in cmd
     assert "--upgrade" not in cmd
-    scoped = {cmd[i + 1] for i, token in enumerate(cmd) if token == "--reinstall-package"}
+    scoped = {cmd[i + 1] for i, token in enumerate(cmd) if token == "--upgrade-package"}
     assert scoped == {"torch", "torchvision", "torchaudio"}
+
+
+def test_the_torch_swap_asks_for_the_build_by_name(with_uv):
+    """Naming the build is what replaces the forced reinstall: "==2.11.0" is
+    satisfied by the CUDA build already on disk, "==2.11.0+cpu" is not."""
+    cmd = gpu_mod.get_torch_install_cmd(gpu=False)
+    assert "--reinstall-package" not in cmd
+    assert "torch==2.11.0+cpu" in cmd
+    assert " ".join(cmd).endswith("https://download.pytorch.org/whl/cpu")
 
 
 def test_switch_plans_still_pin_the_torch_versions(with_uv):

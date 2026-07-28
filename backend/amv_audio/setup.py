@@ -16,6 +16,7 @@ from .dependencies import (
     _numeric_runtime_ready,
     _prune_stale_numeric_metadata,
     _prune_unused_package_dirs,
+    invalidate_numeric_runtime_probe,
 )
 from .hardware import refresh_hardware
 from .logs import add_log, append_terminal_log
@@ -139,23 +140,45 @@ def collect_setup_plan(mode):
     raise ValueError("mode must be 'cpu' or 'gpu'")
 
 
+def _run_side_by_side(probes):
+    """Run independent probes at the same time instead of one after another.
+
+    Each of these launches something and then just waits for it: a fresh
+    Python that loads PyTorch, another that loads the maths libraries, and the
+    graphics driver's own query tool. Run in sequence their waiting adds up,
+    and the slowest of the three takes longer than the other two together.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=len(probes)) as pool:
+        started = {name: pool.submit(probe) for name, probe in probes.items()}
+        return {name: pending.result() for name, pending in started.items()}
+
+
 def _collect_gpu_plan():
     rows = []
     issues = []
 
-    gpu_name = check_nvidia_gpu()
     installed_mode, torch_version, _cuda_ready = _installed_torch_mode()
     audio_separator = _check_package("audio-separator")
     typing_extensions = _check_package("typing_extensions")
     pydub = _check_package("pydub")
     missing_audio_runtime = _missing_audio_runtime_modules()
-    numeric_runtime = _numeric_runtime_ready()
     ort_cpu = _check_package("onnxruntime")
     ort_gpu = _check_package("onnxruntime-gpu")
     nelux_installed = _check_package("nelux")
     global _LAST_NELUX_IMPORT_ERROR
     _LAST_NELUX_IMPORT_ERROR = None
-    nelux_importable = nelux_installed and _nelux_importable()
+    probed = _run_side_by_side(
+        {
+            "gpu_name": check_nvidia_gpu,
+            "numeric_runtime": _numeric_runtime_ready,
+            "nelux_importable": _nelux_importable if nelux_installed else (lambda: False),
+        }
+    )
+    gpu_name = probed["gpu_name"]
+    numeric_runtime = probed["numeric_runtime"]
+    nelux_importable = nelux_installed and probed["nelux_importable"]
     nelux = nelux_installed and nelux_importable
     nelux_broken_binaries = nelux_installed and not nelux_importable
     nelux_failure_status, nelux_repair_issue = _nelux_failure_status(_LAST_NELUX_IMPORT_ERROR)
@@ -178,7 +201,20 @@ def _collect_gpu_plan():
         return {"mode": "gpu", "rows": rows, "issues": [], "installs": [], "success_mode": "gpu", "gpu_name": gpu_name}
 
     reinstall_torch = installed_mode != "gpu"
-    install_audio_separator = not audio_separator or not typing_extensions or not ort_gpu or not pydub or not nelux or bool(missing_audio_runtime)
+    # The GPU sound runtime is deliberately NOT part of this condition. Every
+    # switch to CPU removes it, so every switch back was reinstalling the
+    # entire audio stack -- 70 packages resolved, all of them handed blanket
+    # upgrade permission -- to recover one file. It gets its own targeted step
+    # below. The stack install still runs when the stack itself is missing,
+    # and in that case it brings the runtime along with it.
+    install_audio_separator = (
+        not audio_separator
+        or not typing_extensions
+        or not pydub
+        or not nelux
+        or bool(missing_audio_runtime)
+    )
+    install_gpu_runtime = not ort_gpu and not install_audio_separator
 
     if not gpu_name:
         issues.append("No NVIDIA GPU found")
@@ -186,6 +222,8 @@ def _collect_gpu_plan():
         issues.append("Install PyTorch with CUDA 12.8")
     if install_audio_separator:
         issues.append("Install audio-separator[gpu], typing_extensions, and pydub")
+    if install_gpu_runtime:
+        issues.append("Install GPU ONNX Runtime")
     if not numeric_runtime:
         issues.append("Repair the NumPy/Numba audio runtime")
     if nelux_broken_binaries:
@@ -200,6 +238,7 @@ def _collect_gpu_plan():
         "installs": get_gpu_switch_cmds(
             reinstall_torch=reinstall_torch,
             cleanup_cpu_runtime=ort_cpu,
+            install_gpu_runtime=install_gpu_runtime,
             install_audio_separator=install_audio_separator,
             force_reinstall_nelux=nelux_broken_binaries,
             repair_numeric_runtime=not numeric_runtime,
@@ -474,6 +513,9 @@ def _run_command_streaming(cmd, step, total, progress_callback):
     the case the retry exists for.
     """
     append_terminal_log(f"$ {' '.join(cmd)}")
+    # This step can move NumPy or Numba as a side effect of resolving
+    # something else, so any remembered health answer is stale from here on.
+    invalidate_numeric_runtime_probe()
     output_lines = []
     try:
         process = subprocess.Popen(
