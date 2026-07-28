@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame interpolation — how to build it, and the trap to avoid</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b23; --panel2:#1c222c; --line:#2a323f;
+    --ink:#e8edf4; --dim:#98a4b5; --dimmer:#6d7889;
+    --good:#3ddc84; --warn:#ffb648; --bad:#ff6b6b; --accent:#6aa8ff; --accent2:#b98cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:48px 24px 96px}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:34px;line-height:1.2;margin:0 0 10px;letter-spacing:-.02em}
+  .sub{color:var(--dim);font-size:17px;margin:0 0 40px}
+  h2{font-size:24px;margin:60px 0 8px;letter-spacing:-.01em;display:flex;align-items:center;gap:12px}
+  h2 .num{display:inline-flex;align-items:center;justify-content:center;
+    width:32px;height:32px;border-radius:9px;background:var(--accent);color:#0b0f14;
+    font-size:15px;font-weight:700;flex:none}
+  h3{font-size:17px;margin:34px 0 10px;letter-spacing:.01em}
+  p{margin:0 0 14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .lead{border-left:3px solid var(--accent);padding-left:18px;margin:20px 0}
+
+  .verdict{background:linear-gradient(180deg,rgba(61,220,132,.1),rgba(61,220,132,.03));
+    border:1px solid rgba(61,220,132,.35);border-radius:14px;padding:24px;margin:24px 0}
+  .verdict .hd{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--good);
+    font-weight:700;margin-bottom:10px}
+  .verdict h3{margin:0 0 10px;font-size:21px}
+  .danger{background:linear-gradient(180deg,rgba(255,107,107,.1),rgba(255,107,107,.03));
+    border:1px solid rgba(255,107,107,.35);border-radius:14px;padding:24px;margin:24px 0}
+  .danger .hd{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--bad);
+    font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:600}
+  tbody tr:hover{background:rgba(255,255,255,.02)}
+  .yes{color:var(--good);font-weight:700}
+  .no{color:var(--bad);font-weight:700}
+  .meh{color:var(--warn);font-weight:700}
+  td.c{text-align:center}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .three{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:820px){.two,.three{grid-template-columns:1fr}}
+
+  .flow{display:flex;gap:0;margin:22px 0;flex-wrap:wrap}
+  .step{flex:1;min-width:140px;background:var(--panel2);border:1px solid var(--line);padding:14px 16px}
+  .step:first-child{border-radius:10px 0 0 10px}
+  .step:last-child{border-radius:0 10px 10px 0}
+  .step + .step{border-left:none}
+  .step .s-n{font-size:10px;letter-spacing:.1em;color:var(--dimmer);text-transform:uppercase}
+  .step .s-t{font-size:14px;margin-top:5px;font-weight:600}
+  .step .s-d{font-size:12.5px;color:var(--dim);margin-top:4px;line-height:1.45}
+  .step.ok{background:rgba(61,220,132,.08);border-color:rgba(61,220,132,.35)}
+  .step.bad{background:rgba(255,107,107,.08);border-color:rgba(255,107,107,.35)}
+
+  ul{margin:0 0 14px;padding-left:20px}
+  li{margin-bottom:9px}
+  .chk{padding-left:0}
+  .chk li{list-style:none;position:relative;padding-left:26px}
+  .chk li:before{content:"";position:absolute;left:0;top:8px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
+  .chk li.g:before{background:var(--good)}
+  .chk li.w:before{background:var(--warn)}
+  .chk li.r:before{background:var(--bad)}
+
+  .bar{height:26px;border-radius:6px;display:flex;overflow:hidden;border:1px solid var(--line);margin:6px 0}
+  .bar i{display:block;height:100%}
+  .lg{display:flex;gap:18px;font-size:12.5px;color:var(--dim);flex-wrap:wrap;margin-top:8px}
+  .lg span{display:flex;align-items:center;gap:6px}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  .phase{display:flex;gap:16px;padding:16px 0;border-bottom:1px solid var(--line)}
+  .phase:last-child{border-bottom:none}
+  .ph-n{flex:none;width:44px;height:44px;border-radius:11px;background:var(--panel2);
+    border:1px solid var(--line);display:flex;align-items:center;justify-content:center;
+    font-weight:700;color:var(--accent)}
+  .ph-b{flex:1}
+  .ph-t{font-weight:600;font-size:15.5px;margin-bottom:3px}
+  .ph-d{font-size:14px;color:var(--dim);line-height:1.55}
+  .ph-e{font-size:12px;color:var(--dimmer);margin-top:5px}
+
+  code{background:#0f141b;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;
+    font-family:ui-monospace,Consolas,monospace;color:#cfe0f7}
+  .path{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:var(--accent2)}
+  .foot{margin-top:64px;padding-top:22px;border-top:1px solid var(--line);color:var(--dimmer);font-size:13.5px}
+  a{color:var(--accent)}
+  .cap{font-size:12.5px;color:var(--dimmer);text-align:center;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Frame interpolation: build it yourself, don't ship theirs</h1>
+<p class="sub">The tool you sent me can't be absorbed into your app without giving away your source code. The good news is you don't need it — you already own almost everything required.</p>
+
+<!-- ============ 1 ============ -->
+<h2><span class="num">1</span> The trap</h2>
+
+<div class="danger">
+  <div class="hd">⚠ Copying their code would force you to publish yours</div>
+  <p>TheAnimeScripter is released under <strong>AGPL-3.0</strong>. That licence has one job: anything built on it must also be published as open source, to everyone who receives it. Your app is <strong>MIT</strong> — you can keep it closed, sell it, do what you like.</p>
+  <p style="margin:0">Paste TAS code into your project and that stops being true. You'd owe every person who downloads your installer the complete source of your entire app. Not a technicality you can quietly ignore — it's the whole point of that licence.</p>
+</div>
+
+<p>So there were only ever two honest routes: <strong>ship their program alongside yours without merging it</strong> (which is exactly how you already handle ffmpeg — same situation, different licence), or <strong>build the feature yourself</strong>.</p>
+
+<div class="verdict">
+  <div class="hd">✓ What I found that settles it</div>
+  <h3>The actual AI model is free to use commercially. TAS is just a wrapper around it.</h3>
+  <p>Frame interpolation in TAS is powered by an open research model called RIFE. I checked its licence directly: <strong>RIFE's code and its trained model files are both MIT</strong> — the same permissive licence your app uses. Commercial use allowed. The only obligation is keeping their copyright notice in your project.</p>
+  <p style="margin:0">TAS didn't invent the interpolation. It packaged someone else's model. You can go to the same source they did.</p>
+</div>
+
+<!-- ============ 2 ============ -->
+<h2><span class="num">2</span> Why building it is now the cheap option</h2>
+
+<p>Normally "write it yourself" means more work and more download size. Here it's the opposite, because of one thing I didn't expect:</p>
+
+<div class="lead">
+  <p style="margin:0"><strong>Your app already installs everything the AI needs.</strong> The 3 GB your setup wizard downloads for GPU mode — the machine-learning runtime, the graphics card support files — is the exact same machinery frame interpolation runs on. It's sitting on your users' disks right now, doing background removal and scene detection.</p>
+</div>
+
+<p>Adding interpolation on top of it costs a model file of a few dozen megabytes. Bundling TAS instead would mean shipping a <em>second</em> copy of all that machinery, plus a second Python — because TAS runs on Python 3.14 and your app runs on 3.13, so they can't share one.</p>
+
+<h3>Extra download, per route</h3>
+<div class="card">
+  <p style="font-size:13px;color:var(--dim);margin-bottom:6px"><strong>Build it yourself</strong> — model file only</p>
+  <div class="bar"><i style="width:1.5%;background:var(--good)"></i><i style="flex:1;background:#0f141b"></i></div>
+  <p style="font-size:13px;color:var(--dim);margin:16px 0 6px"><strong>Bundle TheAnimeScripter</strong> — second Python, second AI runtime, extra GPU libraries</p>
+  <div class="bar"><i style="width:78%;background:var(--bad)"></i><i style="flex:1;background:#0f141b"></i></div>
+  <div class="lg">
+    <span><i class="sw" style="background:var(--good)"></i> tens of MB</span>
+    <span><i class="sw" style="background:var(--bad)"></i> several GB on top of your existing 3 GB</span>
+  </div>
+</div>
+
+<h3>Everything else that goes wrong with bundling</h3>
+<table>
+  <thead><tr><th></th><th class="c">Bundle TAS</th><th class="c">Build native</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Progress bar</strong><br><span style="color:var(--dimmer);font-size:13px">Can your app tell how far along it is?</span></td>
+        <td class="c"><span class="no">No</span><br><span style="font-size:12.5px;color:var(--dim)">TAS draws a bar for a human to look at, not for another program to read. Machine-readable progress only exists behind a special After Effects mode.</span></td>
+        <td class="c"><span class="yes">Yes</span><br><span style="font-size:12.5px;color:var(--dim)">Same reporting your other jobs use</span></td></tr>
+    <tr><td><strong>Cancel button</strong></td>
+        <td class="c"><span class="no">No</span><br><span style="font-size:12.5px;color:var(--dim)">Their cancel handler is written but does nothing — it's marked as unfinished in their own code. Only killing the process works.</span></td>
+        <td class="c"><span class="yes">Yes</span></td></tr>
+    <tr><td><strong>Scene cuts</strong></td>
+        <td class="c"><span class="meh">Partly</span><br><span style="font-size:12.5px;color:var(--dim)">It detects cuts itself but <em>cannot</em> accept yours — and you already know exactly where every cut is</span></td>
+        <td class="c"><span class="yes">Yes</span></td></tr>
+    <tr><td><strong>Your licence</strong></td>
+        <td class="c"><span class="meh">Needs an argument</span><br><span style="font-size:12.5px;color:var(--dim)">Defensible, but you'd be relying on a legal separation holding up</span></td>
+        <td class="c"><span class="yes">Stays MIT</span></td></tr>
+  </tbody>
+</table>
+
+<!-- ============ 3 ============ -->
+<h2><span class="num">3</span> The thing that would ruin this feature, and why you're already safe</h2>
+
+<p>Interpolation works by inventing the in-between frames of a motion. Feed it two frames from the <em>same</em> shot and it fills in the movement convincingly. Feed it the last frame of one shot and the first frame of the next, and it tries to invent motion between two completely unrelated pictures.</p>
+
+<div class="card">
+  <div class="two">
+    <div>
+      <p style="font-size:13px;color:var(--dim);margin-bottom:8px"><strong>Within a shot</strong> — works</p>
+      <svg viewBox="0 0 300 100" style="width:100%;height:auto;background:#0f141b;border-radius:8px;border:1px solid var(--line)">
+        <rect x="14" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#3ddc84"/>
+        <circle cx="30" cy="50" r="8" fill="#3ddc84"/>
+        <rect x="82" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#2a323f" stroke-dasharray="3 2"/>
+        <circle cx="106" cy="50" r="8" fill="#3ddc84" opacity=".55"/>
+        <rect x="150" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#2a323f" stroke-dasharray="3 2"/>
+        <circle cx="182" cy="50" r="8" fill="#3ddc84" opacity=".55"/>
+        <rect x="218" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#3ddc84"/>
+        <circle cx="254" cy="50" r="8" fill="#3ddc84"/>
+        <text x="150" y="92" fill="#6d7889" font-size="10" text-anchor="middle" font-family="sans-serif">smooth motion, invented frames look right</text>
+      </svg>
+    </div>
+    <div>
+      <p style="font-size:13px;color:var(--dim);margin-bottom:8px"><strong>Across a cut</strong> — breaks</p>
+      <svg viewBox="0 0 300 100" style="width:100%;height:auto;background:#0f141b;border-radius:8px;border:1px solid var(--line)">
+        <rect x="14" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#6aa8ff"/>
+        <circle cx="34" cy="50" r="8" fill="#6aa8ff"/>
+        <rect x="82" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#ff6b6b" stroke-dasharray="3 2"/>
+        <ellipse cx="108" cy="50" rx="15" ry="7" fill="#ff6b6b" opacity=".45"/>
+        <rect x="150" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#ff6b6b" stroke-dasharray="3 2"/>
+        <ellipse cx="176" cy="50" rx="15" ry="7" fill="#ff6b6b" opacity=".45"/>
+        <rect x="218" y="26" width="52" height="48" rx="4" fill="#1c222c" stroke="#b98cff"/>
+        <rect x="238" y="40" width="18" height="20" fill="#b98cff"/>
+        <line x1="74" y1="18" x2="74" y2="82" stroke="#ff6b6b" stroke-width="2"/>
+        <text x="150" y="92" fill="#ff6b6b" font-size="10" text-anchor="middle" font-family="sans-serif">a smeared morph on every single cut</text>
+      </svg>
+    </div>
+  </div>
+  <p style="margin:16px 0 0;font-size:14.5px"><strong>What you'd see:</strong> at every scene change, a few frames where one shot melts into the next like a bad dissolve. On an anime episode with a cut every two seconds, it's constant and obvious.</p>
+</div>
+
+<div class="verdict">
+  <div class="hd">✓ Your app is structurally immune to this in its main use case</div>
+  <p style="margin:0">Clips exported from your scene grid are <strong>already cut at the scene boundaries</strong>. Each one contains a single continuous shot — there is no cut inside it to trip over. This is a real advantage TAS doesn't have, because it's handed whole episodes.</p>
+</div>
+
+<p>It only matters if someone drags an arbitrary file in. The spec still builds a guard for that — compare the two real frames, and if they're wildly different, hold the previous frame instead of blending — but since you've confirmed this is clips-only, it's now <strong>a silent safety net with no setting attached</strong>. It fires approximately never, so a knob for it would just be clutter.</p>
+
+<p style="font-size:14.5px;color:var(--dim)">Dropped from the earlier draft: the plan to feed your app's stored scene-cut list into the interpolator. That only earned its keep for whole-episode input. Gone.</p>
+
+<!-- ============ 4 ============ -->
+<h2><span class="num">4</span> What gets built</h2>
+
+<p>A new <strong>Frame interpolation</strong> section in the sidebar, shaped exactly like your background-removal feature — because that one already solves every hard part: a Python job with AI models, progress reporting, cancellation, GPU detection, CPU fallback.</p>
+
+<p><strong>Built around a queue, not a single file.</strong> You'll be handing it 10–40 short clips at a time, so the list of clips <em>is</em> the interface, with per-clip status and a running total.</p>
+
+<div class="flow">
+  <div class="step"><div class="s-n">Step 1</div><div class="s-t">Drop in clips</div><div class="s-d">Multi-select, or point at a folder and take everything in it.</div></div>
+  <div class="step"><div class="s-n">Step 2</div><div class="s-t">Four settings</div><div class="s-d">Speed factor, model, output folder, and whether to overwrite or add a suffix. That's it.</div></div>
+  <div class="step"><div class="s-n">Step 3</div><div class="s-t">Watch two bars</div><div class="s-d">The current clip, and how far through the queue you are. One clip failing doesn't stop the rest.</div></div>
+  <div class="step ok"><div class="s-n">Step 4</div><div class="s-t">Get the files</div><div class="s-d">Audio preserved and in sync. Cancel any time — finished clips stay, the half-written one is cleaned up.</div></div>
+</div>
+
+<div class="danger" style="background:linear-gradient(180deg,rgba(255,182,72,.09),rgba(255,182,72,.03));border-color:rgba(255,182,72,.32)">
+  <div class="hd" style="color:var(--warn)">⚠ The one thing that must be right from day one</div>
+  <p style="margin:0"><strong>Load the AI model once for the whole batch, not once per clip.</strong> On a 4-second clip, starting up and loading the model takes as long as — or longer than — the actual smoothing. Do it per clip and a 30-clip batch runs several times slower than it should, with a progress bar that keeps resetting to zero. This is cheap to get right up front and painful to retrofit, so it's called out as a Phase 1 requirement with a test attached.</p>
+</div>
+
+<h3>Build order</h3>
+<div class="card" style="padding:8px 24px">
+  <div class="phase"><div class="ph-n">1</div><div class="ph-b">
+    <div class="ph-t">The engine, no interface</div>
+    <div class="ph-d">A command that takes a video file and writes a smoother one. Proven by watching the output, including a deliberate two-scene test file to confirm cuts stay clean.</div>
+    <div class="ph-e">Biggest chunk of the work. Nothing visible in the app yet.</div>
+  </div></div>
+  <div class="phase"><div class="ph-n">2</div><div class="ph-b">
+    <div class="ph-t">Wire it to the app</div>
+    <div class="ph-d">The app can start the job, show progress, and genuinely stop it mid-run.</div>
+    <div class="ph-e">Mostly copying the background-removal plumbing</div>
+  </div></div>
+  <div class="phase"><div class="ph-n">3</div><div class="ph-b">
+    <div class="ph-t">The section itself</div>
+    <div class="ph-d">Sidebar entry, panel, controls, progress card, cancel button.</div>
+    <div class="ph-e">First point where you can actually use it</div>
+  </div></div>
+  <div class="phase"><div class="ph-n">4</div><div class="ph-b">
+    <div class="ph-t">Refinements</div>
+    <div class="ph-d">"Make this 60 fps" instead of "multiply by 2.5" — for AMV work that's the actual intent, and it needs slightly different maths. Plus hooking the output encoder up to the bitrate controls from the other feature.</div>
+    <div class="ph-e">Only after 1–3 are solid</div>
+  </div></div>
+  <div class="phase"><div class="ph-n">5</div><div class="ph-b">
+    <div class="ph-t">Smooth straight from the clip extractor</div>
+    <div class="ph-d">A checkbox in the clip grid so exported clips come out already smoothed — no separate trip through the new section at all. Since clips are the only input, this is where the feature naturally ends up living.</div>
+    <div class="ph-e">Promoted from "optional" now that scope is clips-only. Still don't start it early.</div>
+  </div></div>
+</div>
+
+<!-- ============ 5 ============ -->
+<h2><span class="num">5</span> What you should expect it to feel like</h2>
+
+<div class="three">
+  <div class="card" style="margin:0">
+    <p style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--good);font-weight:700;margin-bottom:8px">Recent NVIDIA card</p>
+    <p style="margin:0;font-size:14.5px">Works well. A short AMV clip finishes in the time it takes to make a coffee. This is the path the feature is designed around.</p>
+  </div>
+  <div class="card" style="margin:0">
+    <p style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--warn);font-weight:700;margin-bottom:8px">No graphics card support</p>
+    <p style="margin:0;font-size:14.5px">Runs on the processor instead. It works, but it's slow enough that the interface must say so up front with a real time estimate — otherwise people assume the app froze.</p>
+  </div>
+  <div class="card" style="margin:0">
+    <p style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--bad);font-weight:700;margin-bottom:8px">Very large video</p>
+    <p style="margin:0;font-size:14.5px">Can exhaust graphics memory. Phase 4 adds a resolution cap so it degrades gracefully instead of failing outright.</p>
+  </div>
+</div>
+
+<p style="margin-top:20px;font-size:14.5px;color:var(--dim)">I've deliberately not put speed numbers in here. They depend entirely on your card and resolution, and a made-up figure is worse than none. Phase 1 ends with a real measurement on your machine.</p>
+
+<h3>Four things I'd want the implementer to not get wrong</h3>
+<ul class="chk">
+  <li class="r"><strong>Never copy a single line from the TAS folder.</strong> Even their version of the model code is a modified copy living inside their licensed project — taking it is the one irreversible mistake available here. The model must come from the original open-source project.</li>
+  <li class="w"><strong>Don't touch the installed AI runtime.</strong> It's pinned to exact versions that your audio separation and scene detection depend on. Upgrading it to suit interpolation would break two working features.</li>
+  <li class="w"><strong>Pin the model download to a permanent address.</strong> You've already been burned by this with ffmpeg — a download link that rotates gets deleted and every new install fails. Same rule here.</li>
+  <li><strong>Keep the attribution.</strong> MIT is free to use but requires their copyright notice stays with your project. One small file, added before the first release that ships this.</li>
+</ul>
+
+<!-- ============ 6 ============ -->
+<h2><span class="num">6</span> What "clips only" changed</h2>
+<p>Your answer removed real work and added one requirement. Net: simpler.</p>
+<table>
+  <thead><tr><th>Was planned</th><th>Now</th></tr></thead>
+  <tbody>
+    <tr><td>Scene-cut protection with an adjustable sensitivity control in the panel</td>
+        <td><span class="yes">Cut</span> — silent safety net, no setting. It never fires on single-shot clips.</td></tr>
+    <tr><td>Later work to feed your stored scene-cut list into the interpolator</td>
+        <td><span class="yes">Dropped entirely</span> — only earned its keep on whole episodes.</td></tr>
+    <tr><td>Resolution capping for very large videos, treated as important</td>
+        <td><span class="yes">Demoted</span> — AMV clips are 1080p, which is comfortable.</td></tr>
+    <tr><td>Single-file processing, queue as a convenience</td>
+        <td><span class="meh">Reversed</span> — the queue is now the main interface, and the model must load once per batch rather than once per clip. This is the one thing that got <em>harder</em>, and it's cheap now versus painful later.</td></tr>
+    <tr><td>Clip-extractor integration as an optional nice-to-have</td>
+        <td><span class="meh">Promoted</span> — if clips are the only input, that's where this eventually belongs.</td></tr>
+  </tbody>
+</table>
+<p style="font-size:14.5px;color:var(--dim)">No open questions left. The spec is ready to hand over.</p>
+
+<div class="foot">
+  <p style="margin-bottom:8px">Implementation spec, ready for GPT:</p>
+  <p class="path" style="margin:0">docs/specs/frame-interpolation.md</p>
+  <p style="margin-top:14px">It names every file to create and edit, the exact plumbing to copy from the background-removal feature, the licensing rule at the top in bold, and the tests each phase has to pass. Nothing in the app has been changed.</p>
+  <p style="margin-top:16px;font-size:13px">Licence check sources:
+    <a href="https://github.com/hzwer/Practical-RIFE">hzwer/Practical-RIFE</a> ·
+    <a href="https://github.com/hzwer/ECCV2022-RIFE">hzwer/ECCV2022-RIFE</a>
+  </p>
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame Interpolation — two bugs fixed, drag-and-drop added</title>
+<style>
+  :root{
+    --bg:#0b0f14; --card:#121822; --card2:#0f141c; --line:#1e2833;
+    --ink:#e8f0f6; --dim:#93a6b4; --dimmer:#6d808f;
+    --accent:#6ea8fe; --good:#4be0a7; --bad:#ff6b8b; --warn:#ffbe5c;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.65 "Segoe UI",system-ui,-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:44px 26px 90px}
+  header.top{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:38px}
+  .kicker{
+    display:inline-block;font-size:11px;font-weight:800;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--accent);margin-bottom:12px;
+  }
+  h1{font-size:clamp(30px,4.4vw,46px);line-height:1.1;letter-spacing:-.03em;margin:0 0 14px}
+  .lede{font-size:18px;color:var(--dim);max-width:760px;margin:0}
+
+  .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:34px 0 52px}
+  .sumcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 18px 20px;position:relative;overflow:hidden}
+  .sumcard::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--tone,var(--accent))}
+  .sumcard .tag{font-size:10.5px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:var(--tone,var(--accent))}
+  .sumcard h3{font-size:17px;margin:8px 0 7px;letter-spacing:-.01em}
+  .sumcard p{margin:0;font-size:13.5px;color:var(--dim);line-height:1.55}
+
+  section.item{margin:0 0 62px;scroll-margin-top:20px}
+  .num{
+    display:inline-grid;place-items:center;width:30px;height:30px;border-radius:50%;
+    background:var(--tone);color:#08111a;font-weight:900;font-size:15px;margin-right:11px;
+  }
+  h2{font-size:27px;letter-spacing:-.022em;margin:0 0 6px;display:flex;align-items:center}
+  .sub{color:var(--dimmer);font-size:13px;margin:0 0 24px;padding-left:41px}
+
+  .block{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin-bottom:14px}
+  .block h4{
+    margin:0 0 12px;font-size:11.5px;font-weight:800;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--dimmer);
+  }
+  .block p{margin:0 0 12px}
+  .block p:last-child{margin-bottom:0}
+  .block ul{margin:0;padding-left:20px}
+  .block li{margin-bottom:8px;color:var(--dim)}
+  .block li:last-child{margin-bottom:0}
+  .block li b{color:var(--ink);font-weight:650}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.two{grid-template-columns:1fr}}
+
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin:6px 0 4px}
+  .step{
+    flex:1 1 130px;min-width:130px;background:var(--card2);border:1px solid var(--line);
+    border-radius:10px;padding:13px 14px;font-size:12.5px;color:var(--dim);position:relative;
+  }
+  .step b{display:block;color:var(--ink);font-size:13px;margin-bottom:4px;font-weight:650}
+  .arrow{display:grid;place-items:center;padding:0 9px;color:var(--dimmer);font-size:19px;flex:0 0 auto}
+  .step.fail{border-color:rgba(255,107,139,.42);background:rgba(255,107,139,.09)}
+  .step.fail b{color:var(--bad)}
+  .step.ok{border-color:rgba(75,224,167,.42);background:rgba(75,224,167,.09)}
+  .step.ok b{color:var(--good)}
+
+  .verdict{
+    display:flex;gap:12px;align-items:flex-start;border-radius:12px;padding:15px 17px;
+    font-size:14px;line-height:1.55;margin-top:14px;
+  }
+  .verdict.good{background:rgba(75,224,167,.1);border:1px solid rgba(75,224,167,.32);color:#b9f4dd}
+  .verdict.bad{background:rgba(255,107,139,.09);border:1px solid rgba(255,107,139,.3);color:#ffc6d2}
+  .verdict .ico{font-size:19px;line-height:1.2;flex:0 0 auto}
+  .verdict b{color:#fff}
+
+  /* wallpaper legibility demo */
+  .demo{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.demo{grid-template-columns:1fr}}
+  .shot{border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+  .shot .cap{
+    padding:9px 13px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+    background:var(--card2);border-bottom:1px solid var(--line);
+  }
+  .shot .cap.b{color:var(--bad)} .shot .cap.g{color:var(--good)}
+  .paper{
+    padding:26px 20px;
+    background:
+      radial-gradient(circle at 22% 28%,#ffd9e6 0 24%,transparent 55%),
+      radial-gradient(circle at 74% 62%,#ffe9c9 0 26%,transparent 58%),
+      radial-gradient(circle at 55% 15%,#d9f0ff 0 22%,transparent 52%),
+      linear-gradient(140deg,#f4bcd0,#f7e3c0 52%,#cfe6f6);
+  }
+  .fauxpanel{border-radius:10px;padding:15px 16px;border:1px solid rgba(255,255,255,.1)}
+  .fauxpanel.before{background:rgba(8,13,18,.42)}
+  .fauxpanel.after{background:rgba(10,12,24,.30);backdrop-filter:blur(14px) brightness(.55) saturate(1.4);-webkit-backdrop-filter:blur(14px) brightness(.55) saturate(1.4)}
+  .fl{font-size:10px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:#8aa;margin-bottom:9px}
+  .fcard{border:1px solid rgba(255,255,255,.09);border-radius:7px;padding:9px 10px;margin-bottom:9px}
+  .fcard strong{display:block;font-size:12px}
+  .fcard.before strong{color:#b8c6cf} .fcard.before span{font-size:10px;color:#7f919d}
+  .fcard.after strong{color:#d2dee5} .fcard.after span{font-size:10.5px;color:#a0b2be}
+  .ferr{border-radius:7px;padding:9px 10px;font-size:10.5px;line-height:1.45}
+  .ferr.before{border:1px solid rgba(255,91,130,.22);color:#ff9bb3;background:rgba(255,91,130,.06)}
+  .ferr.after{border:1px solid rgba(255,91,130,.4);color:#ffbfcf;background:rgba(255,91,130,.15);font-size:11px}
+
+  /* weight-loading diagram */
+  .weights{display:grid;grid-template-columns:1fr 44px 1fr;gap:0;align-items:center;margin:6px 0}
+  @media(max-width:760px){.weights{grid-template-columns:1fr}}
+  .wcol{background:var(--card2);border:1px solid var(--line);border-radius:11px;padding:15px}
+  .wcol .t{font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--dimmer);margin-bottom:11px}
+  .row{
+    display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+    padding:6px 9px;border-radius:6px;background:rgba(255,255,255,.03);margin-bottom:5px;
+  }
+  .row span:last-child{color:var(--dimmer);font-size:11px}
+  .link{display:grid;place-items:center;font-size:22px}
+  .link.x{color:var(--bad)} .link.ok{color:var(--good)}
+
+  .bars{margin-top:6px}
+  .bar{margin-bottom:13px}
+  .bar .lab{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px;color:var(--dim)}
+  .bar .lab b{color:var(--ink);font-weight:650}
+  .track{height:9px;border-radius:5px;background:rgba(255,255,255,.06);overflow:hidden}
+  .fill{height:100%;border-radius:5px}
+
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--dimmer);font-weight:800}
+  td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
+  td{color:var(--dim)}
+  code{
+    font-family:"JetBrains Mono","Cascadia Mono",ui-monospace,monospace;font-size:12px;
+    background:rgba(110,168,254,.11);color:#bcd6ff;padding:1.5px 6px;border-radius:4px;
+  }
+  .foot{border-top:1px solid var(--line);padding-top:22px;color:var(--dimmer);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <span class="kicker">Frame Interpolation · 27 July 2026</span>
+  <h1>Five real bugs, all fixed — plus drag-and-drop</h1>
+  <p class="lede">
+    You pointed at faint text and an error message. Behind them were five separate faults,
+    stacked so that each one hid the next. Frame smoothing has now been run end to end on your
+    own 70&nbsp;MB clip and produces a correct 48&nbsp;fps video with its soundtrack intact.
+  </p>
+</header>
+
+<div class="summary">
+  <div class="sumcard" style="--tone:var(--warn)">
+    <span class="tag">Was cosmetic</span>
+    <h3>The washed-out column</h3>
+    <p>Every page in the app darkens the wallpaper behind its panels so text stays readable.
+       This page was never added to that list, so your bright wallpaper shone straight through.</p>
+  </div>
+  <div class="sumcard" style="--tone:var(--bad)">
+    <span class="tag">Was blocking</span>
+    <h3>The model never loaded</h3>
+    <p>Not one of the 198 numbers in the downloaded model file was actually being used.
+       A safety check noticed and stopped the job — otherwise you'd have gotten ruined video.</p>
+  </div>
+  <div class="sumcard" style="--tone:var(--bad)">
+    <span class="tag">Was blocking</span>
+    <h3>Every frame failed</h3>
+    <p>Once the model loaded, the very first frame crashed. Nothing could ever have been
+       produced — the feature had never actually run.</p>
+  </div>
+  <div class="sumcard" style="--tone:var(--warn)">
+    <span class="tag">Was hiding the truth</span>
+    <h3>The wrong error on screen</h3>
+    <p>The "file is being used by another process" message wasn't the problem. Cleanup code was
+       overwriting the real error before you ever saw it.</p>
+  </div>
+  <div class="sumcard" style="--tone:var(--warn)">
+    <span class="tag">Silent</span>
+    <h3>Audio was being dropped</h3>
+    <p>The page promises it keeps your audio. Every finished clip came out silent, with no
+       warning at all.</p>
+  </div>
+  <div class="sumcard" style="--tone:var(--good)">
+    <span class="tag">New</span>
+    <h3>Drag-and-drop</h3>
+    <p>Drop clips — or a whole folder — anywhere on the page and they land in the queue.</p>
+  </div>
+</div>
+
+<!-- ─────────────────────────────  1  ───────────────────────────── -->
+<section class="item" style="--tone:var(--warn)">
+  <h2><span class="num">1</span> The right-hand column was washing out</h2>
+  <p class="sub">What you circled: "Best anime detail", "Processing", "Output encoding" — all barely visible.</p>
+
+  <div class="block">
+    <h4>What was actually happening</h4>
+    <p>
+      Panels in this app are semi-transparent on purpose — your wallpaper is meant to show through.
+      That only works if something dims the wallpaper first. The app has a layer that does exactly
+      that: it blurs and darkens whatever sits behind each panel, so grey 10-pixel labels always land
+      on a dark backdrop no matter how bright your wallpaper is.
+    </p>
+    <p>
+      That layer works off an explicit list of pages. <b>Frame Interpolation was built after the list
+      was written and never got added to it.</b> So its two panels had nothing but their own faint dark
+      tint. The wallpaper behind your controls column happens to be bright pink and white — so light grey
+      text ended up sitting on near-white. The queue on the left survived because the wallpaper behind
+      <em>it</em> is darker. Nothing about the text changed between the two halves; only what was behind it.
+    </p>
+  </div>
+
+  <div class="demo">
+    <div class="shot">
+      <div class="cap b">Before — no dimming layer</div>
+      <div class="paper">
+        <div class="fauxpanel before">
+          <div class="fl">Model</div>
+          <div class="fcard before"><strong>RIFE 4.25</strong><span>Best anime detail</span></div>
+          <div class="fl">Processing</div>
+          <div class="ferr before">The downloaded RIFE model contains unexpected layers.</div>
+        </div>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="cap g">After — page added to the dimming layer</div>
+      <div class="paper">
+        <div class="fauxpanel after">
+          <div class="fl" style="color:#c2d0d9">Model</div>
+          <div class="fcard after"><strong>RIFE 4.25</strong><span>Best anime detail</span></div>
+          <div class="fl" style="color:#c2d0d9">Processing</div>
+          <div class="ferr after">The downloaded RIFE model contains unexpected layers.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:12.5px;color:var(--dimmer);margin:10px 0 0">
+    Both boxes above sit on the same simulated bright wallpaper. The right one is the real fix, rendered live.
+  </p>
+
+  <div class="block" style="margin-top:14px">
+    <h4>What changed</h4>
+    <ul>
+      <li><b>Registered the page with the dimming layer.</b> The queue panel and the controls panel now
+          get the same blur-and-darken treatment every other page already had. Your wallpaper still shows
+          through sharply in the gaps between panels — nothing became a solid dark slab.</li>
+      <li><b>Raised the dimmest text anyway.</b> The model card subtitles, the "Processing" and
+          "Output encoding" labels, queue filenames, and the progress readouts were all a step or two
+          too grey even on a dark backdrop.</li>
+      <li><b>Made the error and success boxes readable.</b> Their tinted backgrounds were at 6% strength,
+          which is invisible over anything bright. Now roughly 13–15%, with brighter text.</li>
+      <li><b>Left a note in the design doc</b> so the next new page gets added to the list when it's built,
+          instead of being retrofitted after you spot it.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ─────────────────────────────  2  ───────────────────────────── -->
+<section class="item" style="--tone:var(--bad)">
+  <h2><span class="num">2</span> Frame smoothing could never have worked</h2>
+  <p class="sub">The error you saw was correct. It was protecting you.</p>
+
+  <div class="block">
+    <h4>The short version</h4>
+    <p>
+      A smoothing model is a big bag of learned numbers with names attached — roughly 198 named
+      groups for RIFE 4.25. The app builds an empty copy of the network, then pours the downloaded
+      numbers into it by matching names.
+    </p>
+    <p>
+      <b>The app's copy used different names for its internal parts than the model file does.</b>
+      So when it poured, nothing matched. Every single slot in the network stayed empty, and every
+      single number in the file had nowhere to go. Zero out of 198.
+    </p>
+  </div>
+
+  <div class="block">
+    <h4>Why the names didn't line up</h4>
+    <div class="weights">
+      <div class="wcol">
+        <div class="t">What the model file calls its parts</div>
+        <div class="row"><span>conv0</span><span>the input stage</span></div>
+        <div class="row"><span>convblock</span><span>the 8 refining stages</span></div>
+        <div class="row"><span>lastconv</span><span>the output stage</span></div>
+      </div>
+      <div class="link x">✕</div>
+      <div class="wcol">
+        <div class="t">What the app called them</div>
+        <div class="row"><span>entry</span><span>the input stage</span></div>
+        <div class="row"><span>residuals</span><span>the 8 refining stages</span></div>
+        <div class="row"><span>exit</span><span>the output stage</span></div>
+      </div>
+    </div>
+    <p style="margin-top:14px">
+      Someone gave the app's version of the network friendlier, more readable names. That's normally
+      harmless. Here it isn't: those names <em>are</em> the labels the file is matched against. Renaming
+      them for readability silently breaks loading, and nothing about the code looks wrong when you read it.
+      Every shape and dimension was already correct — it was purely the labels.
+    </p>
+  </div>
+
+  <div class="block">
+    <h4>What you would have seen, and what you would have seen without the safety check</h4>
+    <div class="flow">
+      <div class="step"><b>You click Interpolate</b>Model file downloads and passes its integrity check</div>
+      <div class="arrow">→</div>
+      <div class="step"><b>App loads it</b>0 of 198 number groups find a matching slot</div>
+      <div class="arrow">→</div>
+      <div class="step fail"><b>Safety check fires</b>"contains unexpected layers" — job refuses to start</div>
+    </div>
+    <div class="verdict bad">
+      <span class="ico">⚠</span>
+      <div>
+        <b>Without that check the outcome would have been far worse.</b> The network would have run on
+        random untrained numbers and produced in-between frames that are pure noise — and it would have
+        written them into a finished MP4 without complaint. You'd have discovered it by watching the export.
+        The check that annoyed you is the reason you didn't lose a batch.
+      </div>
+    </div>
+  </div>
+
+  <div class="block">
+    <h4>The fix, and proof it works</h4>
+    <p>
+      The app's network now uses the same names the model files use, with a comment explaining that these
+      names are a contract and can't be prettified. Both model files were downloaded and loaded for real:
+    </p>
+    <div class="bars">
+      <div class="bar">
+        <div class="lab"><b>RIFE 4.25</b><span>198 of 198 number groups loaded · 0 left over</span></div>
+        <div class="track"><div class="fill" style="width:100%;background:var(--good)"></div></div>
+      </div>
+      <div class="bar">
+        <div class="lab"><b>RIFE 4.6</b><span>120 of 120 number groups loaded · 0 left over</span></div>
+        <div class="track"><div class="fill" style="width:100%;background:var(--good)"></div></div>
+      </div>
+      <div class="bar">
+        <div class="lab"><b>Before the fix (both models)</b><span>0 loaded · everything left over</span></div>
+        <div class="track"><div class="fill" style="width:2%;background:var(--bad)"></div></div>
+      </div>
+    </div>
+    <p style="margin-top:16px">
+      Loading cleanly isn't proof it <em>works</em>, so it was tested on motion. A bright square was moved
+      16 pixels between two frames, and the model was asked for the frame in between:
+    </p>
+    <div class="flow">
+      <div class="step"><b>Frame 1</b>Square at position 100</div>
+      <div class="arrow">→</div>
+      <div class="step ok"><b>Model's in-between</b>Square at position 108 — exact, no ghosting</div>
+      <div class="arrow">→</div>
+      <div class="step"><b>Frame 2</b>Square at position 116</div>
+    </div>
+    <div class="verdict good">
+      <span class="ico">✓</span>
+      <div>
+        The model reconstructed the true middle frame with <b>zero error</b>. A simple fade between the two
+        frames — which is what you'd get from a broken model that still ran — leaves a visible double image.
+        The model is genuinely tracking motion, not blending.
+      </div>
+    </div>
+  </div>
+
+  <div class="block">
+    <h4>So it doesn't come back</h4>
+    <ul>
+      <li><b>The name list is now recorded and tested.</b> Every name and size inside both real model files
+          was captured into a small reference file. Five new tests check the app's network against it.
+          If anyone renames an internal part again, the tests fail immediately instead of the app failing
+          in your hands.</li>
+      <li><b>Two training-only pieces are now discarded on purpose.</b> RIFE 4.25's file ships extra parts
+          used only while the model was being trained. They're dropped before loading, so they can't trip
+          the "unexpected" alarm.</li>
+      <li><b>The error message now names the model and the exact file to delete</b>, rather than telling you
+          to find a "tools cache".</li>
+    </ul>
+    <div class="verdict bad" style="margin-top:4px">
+      <span class="ico">→</span>
+      <div>
+        <b>This fix was necessary but not sufficient.</b> Loading the model correctly only got the
+        pipeline to the next wall. Running an actual clip — which had never been done — turned up
+        three more faults. They're section 3.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────  3  ───────────────────────────── -->
+<section class="item" style="--tone:var(--good)">
+  <h2><span class="num">3</span> Drag-and-drop, including folders</h2>
+  <p class="sub">Matching how Video Conversion and the other pages already behave.</p>
+
+  <div class="two">
+    <div class="block">
+      <h4>How it behaves</h4>
+      <ul>
+        <li>Drop anywhere on the page — not just on the queue box. A dashed accent overlay appears while
+            you're hovering, then the clips drop into the queue.</li>
+        <li><b>Drop a folder</b> and every supported clip inside it is added. Same behaviour as the
+            "Add folder" button.</li>
+        <li>Drop a mix of clips and folders and it handles both at once.</li>
+        <li>Non-video files are ignored before the page ever sees them. If a drop contains nothing usable,
+            you get a plain message rather than silence.</li>
+        <li>Dropping is switched off while a batch is running, so you can't change the queue mid-job.</li>
+      </ul>
+    </div>
+    <div class="block">
+      <h4>Small details handled</h4>
+      <ul>
+        <li>A folder named something like <code>my.clips</code> is still recognised as a folder, not
+            mistaken for a file with an extension.</li>
+        <li>If one dropped folder can't be read, the rest of the drop still goes through.</li>
+        <li>The empty-queue box now says you can drop clips there, so the feature is discoverable.</li>
+        <li>Duplicates are filtered the same way the file picker already filters them.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── files ───────────────────────────── -->
+<section class="item" style="--tone:var(--accent)">
+  <h2><span class="num">4</span> What changed on disk</h2>
+  <p class="sub">Reference only — nothing here needs a decision from you.</p>
+  <div class="block" style="padding:8px 4px">
+    <table>
+      <tr><th>File</th><th>Change</th></tr>
+      <tr><td>backend/amv_interpolate/arch.py</td><td>Network parts renamed to match the model files, with a comment explaining why they can't be renamed again.</td></tr>
+      <tr><td>backend/amv_interpolate/models.py</td><td>Drops the training-only pieces before loading; the failure message now names the model and file path.</td></tr>
+      <tr><td>backend/tests/test_interpolate_arch.py<br>backend/tests/data/rife_checkpoint_keys.json</td><td>New. Records every name and size inside both real model files and checks the app's network against it.</td></tr>
+      <tr><td>src/styles/material.css</td><td>Registers the interpolation page's two panels with the wallpaper-dimming layer.</td></tr>
+      <tr><td>src/styles/interpolate.css</td><td>Contrast raised on the dimmest labels, subtitles, progress text, and the result boxes.</td></tr>
+      <tr><td>src/features/interpolate/InterpolatePanel.tsx</td><td>Drag-and-drop for clips and folders; updated empty-state copy.</td></tr>
+      <tr><td>src/features/interpolate/InterpolatePanel.test.tsx</td><td>Three new tests covering which dropped paths are accepted.</td></tr>
+      <tr><td>docs/material-implementation-map.md</td><td>Note so future pages join the dimming layer when they're built.</td></tr>
+    </table>
+  </div>
+
+  <div class="verdict good" style="margin-top:18px">
+    <span class="ico">✓</span>
+    <div>
+      <b>All checks pass.</b> 856 interface tests, 359 backend tests, and a full type check.
+      One unrelated backend test fails because an image library isn't installed in the test environment —
+      it was already failing before any of this.
+    </div>
+  </div>
+</section>
+
+<p class="foot">
+  Nothing has been committed. The model fix was verified against the actual downloaded model files,
+  not simulated. The readability fix needs your eyes on the running app to confirm it reads the way
+  you want over your own wallpaper.
+</p>
+
+</div>
+</body>
+</html>

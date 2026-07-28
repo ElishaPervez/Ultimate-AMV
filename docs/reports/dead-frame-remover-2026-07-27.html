@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dead Frame Remover — design</title>
+<style>
+:root{
+  --paper:#E9E9E3;
+  --paper-2:#DFDFD8;
+  --ink:#16181C;
+  --ink-soft:#585C64;
+  --rule:#8FB9C7;
+  --rule-strong:#3F7E94;
+  --mark:#B23A2E;
+  --keep:#2C6E52;
+  --slab:#1B1D22;
+  --slab-2:#24272E;
+  --sheet-max:1140px;
+}
+
+*{box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto;} }
+
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:Corbel,Candara,"Segoe UI",system-ui,sans-serif;
+  font-size:17px;
+  line-height:1.62;
+  /* faint cel-paper tooth */
+  background-image:
+    repeating-linear-gradient(0deg, rgba(143,185,199,.055) 0 1px, transparent 1px 34px);
+}
+
+/* ---------- sheet frame ---------- */
+.sheet{
+  max-width:var(--sheet-max);
+  margin:0 auto;
+  padding:0 28px 120px 28px;
+  position:relative;
+}
+
+/* left rail — the exposure-sheet gutter */
+.rail{
+  position:fixed;
+  left:0; top:0; bottom:0;
+  width:64px;
+  border-right:1px solid var(--rule);
+  background:linear-gradient(180deg, var(--paper-2), var(--paper));
+  display:flex; flex-direction:column;
+  align-items:center;
+  padding-top:22px;
+  gap:0;
+  z-index:20;
+}
+.rail-cap{
+  font-family:Consolas,"Cascadia Mono",monospace;
+  font-size:9px; letter-spacing:.16em;
+  color:var(--rule-strong);
+  writing-mode:vertical-rl;
+  text-orientation:mixed;
+  margin-bottom:18px;
+  text-transform:uppercase;
+}
+.rail a{
+  display:block;
+  width:100%;
+  text-align:center;
+  padding:9px 0;
+  font-family:Consolas,"Cascadia Mono",monospace;
+  font-size:11px;
+  color:var(--ink-soft);
+  text-decoration:none;
+  border-top:1px solid rgba(143,185,199,.55);
+  transition:background .15s, color .15s;
+}
+.rail a:last-child{border-bottom:1px solid rgba(143,185,199,.55);}
+.rail a:hover,.rail a:focus-visible{background:var(--rule-strong);color:#fff;}
+@media (max-width:900px){ .rail{display:none;} }
+@media (min-width:901px){ .sheet{padding-left:96px;} }
+
+/* ---------- type ---------- */
+h1,h2,h3,.stamp{
+  font-family:Bahnschrift,"Franklin Gothic Medium","Arial Narrow",Impact,sans-serif;
+  font-variation-settings:"wght" 700,"wdth" 80;
+  font-weight:700;
+  letter-spacing:.01em;
+}
+h1{
+  font-size:clamp(42px,7vw,84px);
+  line-height:.94;
+  margin:0 0 6px 0;
+  text-transform:uppercase;
+}
+h2{
+  font-size:clamp(24px,3.2vw,34px);
+  text-transform:uppercase;
+  margin:0 0 4px 0;
+  letter-spacing:.02em;
+}
+h3{
+  font-size:19px;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+  margin:0 0 8px 0;
+  color:var(--rule-strong);
+}
+.stamp{
+  font-size:10px;
+  letter-spacing:.28em;
+  text-transform:uppercase;
+  color:var(--rule-strong);
+}
+p{margin:0 0 16px 0; max-width:70ch;}
+strong{font-weight:700;}
+.lead{font-size:20px; line-height:1.5; max-width:60ch;}
+.mono{font-family:Consolas,"Cascadia Mono",monospace; font-size:.92em;}
+
+/* ---------- header ---------- */
+header{padding:56px 0 34px 0;}
+.head-meta{
+  display:flex; flex-wrap:wrap; gap:8px 26px;
+  border-top:2px solid var(--ink);
+  border-bottom:1px solid var(--rule);
+  padding:9px 0;
+  margin-bottom:30px;
+}
+.head-meta span{
+  font-family:Consolas,"Cascadia Mono",monospace;
+  font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--ink-soft);
+}
+.head-meta span b{color:var(--ink); font-weight:700;}
+
+/* ---------- signature: the strip ---------- */
+.strip-wrap{margin:34px 0 10px 0;}
+.strip{
+  display:flex; gap:2px;
+  height:104px;
+  align-items:stretch;
+}
+.cell{
+  flex:1 1 0;
+  min-width:0;
+  border:1px solid var(--rule);
+  background:#F6F6F2;
+  position:relative;
+  display:flex; align-items:flex-end; justify-content:center;
+  padding-bottom:4px;
+  font-family:Consolas,"Cascadia Mono",monospace;
+  font-size:9px;
+  color:var(--ink-soft);
+  opacity:0;
+  transform:translateY(8px);
+  animation:cellIn .34s cubic-bezier(.2,.8,.3,1) forwards;
+}
+@keyframes cellIn{to{opacity:1;transform:none;}}
+.cell.dup::before{
+  content:"";
+  position:absolute; inset:0;
+  background:repeating-linear-gradient(135deg, rgba(178,58,46,.20) 0 4px, transparent 4px 9px);
+}
+.cell.dup::after{
+  content:"";
+  position:absolute; left:50%; top:14%; bottom:30%;
+  width:2px; margin-left:-1px;
+  background:var(--mark);
+  transform:scaleY(0); transform-origin:top;
+  animation:markIn .3s ease forwards;
+  animation-delay:1.5s;
+}
+@keyframes markIn{to{transform:scaleY(1);}}
+.cell.uniq{background:#fff; border-color:var(--rule-strong);}
+.cell.uniq .glyph{
+  position:absolute; top:9px; left:0; right:0;
+  text-align:center;
+  font-family:Bahnschrift,"Arial Narrow",sans-serif;
+  font-size:15px; color:var(--rule-strong);
+}
+.strip-legend{
+  display:flex; gap:24px; flex-wrap:wrap;
+  margin-top:12px;
+  font-family:Consolas,"Cascadia Mono",monospace;
+  font-size:11px; color:var(--ink-soft);
+  letter-spacing:.04em;
+}
+.swatch{display:inline-block;width:11px;height:11px;border:1px solid var(--rule-strong);background:#fff;vertical-align:-1px;margin-right:6px;}
+.swatch.d{border-color:var(--mark);background:repeating-linear-gradient(135deg, rgba(178,58,46,.35) 0 3px, transparent 3px 7px);}
+
+/* ---------- sections ---------- */
+section{
+  padding:52px 0 8px 0;
+  border-top:1px solid var(--rule);
+}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-no{
+  font-family:Consolas,"Cascadia Mono",monospace;
+  font-size:11px; letter-spacing:.16em;
+  color:var(--mark);
+  border:1px solid var(--mark);
+  padding:2px 7px;
+  white-space:nowrap;
+}
+
+/* ---------- callouts ---------- */
+.note{
+  border-left:3px solid var(--rule-strong);
+  padding:2px 0 2px 18px;
+  margin:22px 0;
+  max-width:70ch;
+}
+.note.warn{border-left-color:var(--mark);}
+.note.good{border-left-color:var(--keep);}
+.note .stamp{display:block; margin-bottom:4px;}
+.note.warn .stamp{color:var(--mark);}
+.note.good .stamp{color:var(--keep);}
+.note p{margin:0;}
+
+/* ---------- flow diagram ---------- */
+.flow{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(158px,1fr));
+  gap:0;
+  margin:26px 0 8px 0;
+  border:1px solid var(--rule-strong);
+}
+.step{
+  padding:16px 16px 18px 16px;
+  border-right:1px solid var(--rule);
+  background:#F4F4EF;
+  position:relative;
+}
+.step:last-child{border-right:none;}
+.step .stamp{display:block;margin-bottom:7px;}
+.step b{
+  display:block;
+  font-family:Bahnschrift,"Arial Narrow",sans-serif;
+  font-size:17px; text-transform:uppercase; letter-spacing:.03em;
+  margin-bottom:5px;
+}
+.step span{font-size:14px; color:var(--ink-soft); line-height:1.45; display:block;}
+.step.hot{background:#fff; box-shadow:inset 0 3px 0 var(--mark);}
+
+/* ---------- interactive demo ---------- */
+.demo{
+  background:var(--slab);
+  color:#E6E7EA;
+  border:1px solid #000;
+  padding:26px 24px 28px 24px;
+  margin:28px 0;
+}
+.demo h3{color:#7FC4DC; margin-bottom:14px;}
+.demo p{color:#A9AEB8; font-size:15px;}
+.demo-grid{display:grid; grid-template-columns:1fr; gap:22px;}
+@media(min-width:820px){ .demo-grid{grid-template-columns:1fr 268px;} }
+
+.dstrip{display:flex; gap:1px; height:86px; margin-bottom:6px;}
+.dcell{
+  flex:1 1 0; min-width:0;
+  border:1px solid #3A3F49;
+  background:#2B303A;
+  position:relative;
+  transition:background .12s, border-color .12s, opacity .12s, transform .12s;
+}
+.dcell.cut{
+  background:#3A2320;
+  border-color:var(--mark);
+  opacity:.42;
+  transform:scaleY(.72);
+}
+.dcell.boundary{border-left:2px solid #7FC4DC;}
+.dbar{position:absolute; left:1px; right:1px; bottom:0; background:#4E7F9B;}
+.dcell.cut .dbar{background:#8E3A30;}
+
+.dscale{
+  display:flex; justify-content:space-between;
+  font-family:Consolas,monospace; font-size:10px; color:#767C88;
+  letter-spacing:.08em; text-transform:uppercase;
+  border-top:1px solid #3A3F49; padding-top:6px; margin-bottom:20px;
+}
+.dial-row{display:flex; align-items:center; gap:14px; margin-bottom:8px;}
+.dial-row label{
+  font-family:Bahnschrift,"Arial Narrow",sans-serif;
+  text-transform:uppercase; letter-spacing:.08em; font-size:13px; color:#E6E7EA;
+  white-space:nowrap;
+}
+input[type=range]{
+  flex:1; accent-color:#7FC4DC; height:22px; cursor:pointer;
+}
+input[type=range]:focus-visible{outline:2px solid #7FC4DC; outline-offset:4px;}
+.readout{
+  border:1px solid #3A3F49;
+  background:#20242B;
+  padding:16px 16px 14px 16px;
+  align-self:start;
+}
+.readout dl{margin:0;}
+.readout dt{
+  font-family:Consolas,monospace; font-size:10px; letter-spacing:.14em;
+  text-transform:uppercase; color:#767C88; margin-top:13px;
+}
+.readout dt:first-child{margin-top:0;}
+.readout dd{
+  margin:1px 0 0 0;
+  font-family:Bahnschrift,"Arial Narrow",sans-serif;
+  font-size:25px; letter-spacing:.01em; color:#fff;
+}
+.readout dd small{font-size:13px; color:#A9AEB8; letter-spacing:.04em;}
+.verdict{
+  margin-top:16px; padding-top:13px; border-top:1px solid #3A3F49;
+  font-size:14px; line-height:1.45;
+}
+.verdict.ok{color:#6FCFA3;}
+.verdict.bad{color:#E58174;}
+
+/* ---------- app mockup ---------- */
+.mock{
+  background:var(--slab);
+  border:1px solid #000;
+  padding:0;
+  margin:26px 0;
+  overflow:hidden;
+  color:#DDE0E5;
+  font-family:"Segoe UI",system-ui,sans-serif;
+  font-size:13px;
+}
+.mock-top{
+  display:flex; gap:0; border-bottom:1px solid #34383F; background:#15171B;
+}
+.mock-tab{padding:9px 15px; color:#7C828E; border-right:1px solid #34383F;}
+.mock-tab.on{color:#fff; background:var(--slab); box-shadow:inset 0 -2px 0 #7FC4DC;}
+.mock-body{display:grid; grid-template-columns:1fr; }
+@media(min-width:780px){ .mock-body{grid-template-columns:250px 1fr;} }
+.mock-q{border-right:1px solid #34383F; padding:14px;}
+.mock-q .qh{font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:#767C88; margin-bottom:9px;}
+.qrow{
+  display:flex; justify-content:space-between; align-items:center; gap:8px;
+  padding:7px 9px; border:1px solid #2E323A; margin-bottom:5px; background:#20242B;
+}
+.qrow.sel{border-color:#7FC4DC; background:#232B33;}
+.qrow em{font-style:normal; color:#767C88; font-family:Consolas,monospace; font-size:11px;}
+.mock-main{padding:16px;}
+.mock-panes{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;}
+.pane{
+  border:1px solid #2E323A; background:#0E1013; height:132px;
+  position:relative; display:flex; align-items:center; justify-content:center;
+  color:#4C525C; font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+}
+.pane .tag{
+  position:absolute; top:7px; left:7px; background:rgba(0,0,0,.72);
+  border:1px solid #34383F; padding:2px 6px; font-size:10px;
+  letter-spacing:.06em; color:#DDE0E5; text-transform:none;
+}
+.pane .dur{
+  position:absolute; bottom:7px; right:8px; font-family:Consolas,monospace;
+  font-size:11px; color:#8B919C; letter-spacing:0; text-transform:none;
+}
+.pane.on{border-color:#7FC4DC;}
+.mock-ctl{display:grid; grid-template-columns:repeat(auto-fit,minmax(126px,1fr)); gap:9px;}
+.mock-foot{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin-top:14px; padding-top:13px; border-top:1px solid #2E323A;
+}
+.foot-note{flex:1; min-width:180px; font-size:11px; color:#767C88; font-family:Consolas,monospace; letter-spacing:.03em;}
+.btn{
+  padding:8px 18px; font-size:13px; letter-spacing:.04em;
+  border:1px solid #3A3F49; color:#DDE0E5; background:#20242B;
+}
+.btn.go{background:#2C6E52; border-color:#3D8C6A; color:#fff; font-weight:600;}
+.ctl.wide{margin-bottom:9px;}
+.fmt-row{
+  border:1px solid #2E323A; background:#20242B; padding:9px 10px; margin-bottom:9px;
+  display:flex; flex-direction:column; gap:7px;
+}
+.fmt-set{display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:6px;}
+.fmt{border:1px solid #2E323A; background:#191D23; padding:6px 9px; display:block;}
+.fmt.on{border-color:#7FC4DC; background:#232B33;}
+.fmt b{display:block; color:#fff; font-size:12px; font-weight:600;}
+.fmt i{display:block; font-style:normal; color:#767C88; font-size:10px; margin-top:1px;}
+.seg{display:inline-flex; border:1px solid #2E323A; align-self:flex-start;}
+.segbtn{padding:5px 15px; font-size:12px; color:#8B919C; border-right:1px solid #2E323A;}
+.segbtn:last-child{border-right:none;}
+.segbtn.on{background:#7FC4DC; color:#10141A; font-weight:600;}
+.qslider{display:flex; align-items:center; gap:11px;}
+.qlab{font-size:11px; color:#767C88; white-space:nowrap;}
+.qlab em{
+  font-style:normal; margin-left:7px; padding:1px 6px; border:1px solid #3A3F49;
+  color:#DDE0E5; font-family:Consolas,monospace; font-size:10px;
+}
+.qtrack{flex:1; height:4px; background:#2E323A; position:relative; min-width:80px;}
+.qtrack i{position:absolute; left:0; top:0; bottom:0; width:36%; background:#7FC4DC;}
+.qval{font-family:Consolas,monospace; font-size:12px; color:#fff;}
+.ctl{border:1px solid #2E323A; background:#20242B; padding:9px 10px;}
+.ctl .cl{font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:#767C88; display:block; margin-bottom:3px;}
+.ctl .cv{color:#fff; font-size:14px;}
+.mock-cap{
+  font-family:Consolas,monospace; font-size:11px; color:var(--ink-soft);
+  letter-spacing:.04em; margin-top:-16px; margin-bottom:26px;
+}
+
+/* ---------- tables ---------- */
+table{border-collapse:collapse; width:100%; margin:22px 0; font-size:15px;}
+th,td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--rule); vertical-align:top;}
+th{
+  font-family:Bahnschrift,"Arial Narrow",sans-serif;
+  text-transform:uppercase; letter-spacing:.08em; font-size:12px;
+  color:var(--rule-strong); border-bottom:1px solid var(--rule-strong);
+  white-space:nowrap;
+}
+td:first-child{font-weight:700; width:30%;}
+tr:last-child td{border-bottom:none;}
+
+/* ---------- option cards ---------- */
+.opts{display:grid; grid-template-columns:1fr; gap:0; margin:24px 0; border:1px solid var(--rule-strong);}
+@media(min-width:800px){ .opts{grid-template-columns:1fr 1fr;} }
+.opt{padding:20px; border-right:1px solid var(--rule); background:#F4F4EF;}
+.opt:last-child{border-right:none;}
+.opt.pick{background:#fff; box-shadow:inset 0 3px 0 var(--keep);}
+.opt h4{
+  font-family:Bahnschrift,"Arial Narrow",sans-serif;
+  text-transform:uppercase; letter-spacing:.04em; font-size:19px; margin:8px 0 10px 0;
+}
+.opt ul{margin:0; padding-left:17px;}
+.opt li{margin-bottom:7px; font-size:15px; line-height:1.45;}
+.opt li.plus::marker{color:var(--keep);}
+.opt li.minus::marker{color:var(--mark);}
+.badge{
+  font-family:Consolas,monospace; font-size:10px; letter-spacing:.14em;
+  text-transform:uppercase; padding:2px 7px; border:1px solid currentColor;
+}
+.badge.pick{color:var(--keep);}
+.badge.alt{color:var(--ink-soft);}
+
+ul.plain{padding-left:18px; max-width:70ch;}
+ul.plain li{margin-bottom:9px;}
+
+footer{
+  margin-top:60px; padding-top:18px;
+  border-top:2px solid var(--ink);
+  font-family:Consolas,monospace; font-size:11px;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--ink-soft);
+  display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;
+}
+
+a{color:var(--rule-strong);}
+:focus-visible{outline:2px solid var(--mark); outline-offset:3px;}
+@media (prefers-reduced-motion: reduce){
+  .cell{animation:none; opacity:1; transform:none;}
+  .cell.dup::after{animation:none; transform:scaleY(1);}
+  .dcell{transition:none;}
+}
+</style>
+</head>
+<body>
+
+<nav class="rail" aria-label="Sections">
+  <span class="rail-cap">Sheet</span>
+  <a href="#problem">01</a>
+  <a href="#repro">02</a>
+  <a href="#flow">03</a>
+  <a href="#dial">04</a>
+  <a href="#panel">05</a>
+  <a href="#locked">06</a>
+  <a href="#build">07</a>
+  <a href="#risk">08</a>
+</nav>
+
+<div class="sheet">
+
+<header>
+  <span class="stamp">Media · new tool · design proposal</span>
+  <h1>Dead&nbsp;Frame<br>Remover</h1>
+  <p class="lead">Anime doesn't draw 24 pictures a second. It draws about 10 and holds each one for two or three frames. This tool throws the held copies away, so a clip contains only real drawings.</p>
+
+  <div class="head-meta">
+    <span>Lives in <b>Media</b></span>
+    <span>Sits beside <b>Frame Interpolation</b></span>
+    <span>Status <b>design, not built</b></span>
+    <span>27 Jul 2026</span>
+  </div>
+
+  <div class="strip-wrap">
+    <span class="stamp">One second of a typical anime shot, as stored on disk</span>
+    <div class="strip" id="heroStrip" aria-hidden="true"></div>
+    <div class="strip-legend">
+      <span><i class="swatch"></i>real drawing — <b id="legUniq">—</b> of them</span>
+      <span><i class="swatch d"></i>held copy — <b id="legDup">—</b> of them, identical to the one before</span>
+    </div>
+  </div>
+</header>
+
+<!-- ============ 01 ============ -->
+<section id="problem">
+  <div class="sec-head"><span class="sec-no">01</span><h2>What's wrong right now</h2></div>
+
+  <p>Open any anime clip in your library and step through it one frame at a time. For long stretches the picture doesn't change at all — you press next, next, next, and you're still looking at the same drawing. That's not a bug in the file. It's how the show was made: the animators drew one picture and held it on screen for two or three frames to save work. A 24-frame second usually contains about 10 actual pictures.</p>
+
+  <p>Every tool you point at that clip is fooled by it. <strong>Frame Interpolation is the loudest example.</strong> It works by inventing a picture halfway between two frames. When both frames are the same held drawing, there is no halfway — so it invents a copy. You get a 60fps file that still moves in the same lumpy 10-steps-a-second rhythm, just with more frames wasted on saying nothing. You paid GPU time and file size for zero smoothness.</p>
+
+  <div class="note warn">
+    <span class="stamp">The consequence you can see</span>
+    <p>Smooth a 24fps anime clip to 60fps today and it still judders. Not because the smoothing is broken — because two thirds of what you fed it was the same picture repeated, and the smoothing dutifully repeated it back at you.</p>
+  </div>
+
+  <p>The same held copies bloat every clip you cut. A third to a half of every file on your disk is frames that say nothing new.</p>
+</section>
+
+<!-- ============ 02 ============ -->
+<section id="repro">
+  <div class="sec-head"><span class="sec-no">02</span><h2>How to see it for yourself, in ten seconds</h2></div>
+  <ul class="plain">
+    <li>Take any anime clip out of <strong>Scene Splitter</strong> — a dialogue shot works best, something where a character is talking but not moving much.</li>
+    <li>Run it through <strong>Frame Interpolation</strong> at 2×.</li>
+    <li>Play the result. It has twice the frames and looks exactly as choppy as it did before.</li>
+    <li>Now step through the <em>original</em> frame by frame in the comparison player. Count how many presses it takes before the picture actually changes. On most shots it's two. On slow dialogue it's three.</li>
+  </ul>
+  <p>Those repeated presses are what this tool deletes.</p>
+</section>
+
+<!-- ============ 03 ============ -->
+<section id="flow">
+  <div class="sec-head"><span class="sec-no">03</span><h2>What the tool does</h2></div>
+
+  <p>Same shape as Frame Interpolation: drop clips on the panel, they stack up in a queue, you set it once, it works through the lot. Two things are different — a measuring step in the middle so the dial can tell you the truth instantly, and a preview you have to watch before the tool will let you export anything.</p>
+
+  <div class="flow">
+    <div class="step">
+      <span class="stamp">A</span>
+      <b>Drop clips</b>
+      <span>Drag files or a folder in, or pick several. They queue up exactly like they do for smoothing.</span>
+    </div>
+    <div class="step">
+      <span class="stamp">B</span>
+      <b>It measures</b>
+      <span>Each clip is read once at thumbnail size and scored: how different is every frame from the one before it. A 30-second clip takes about two seconds.</span>
+    </div>
+    <div class="step hot">
+      <span class="stamp">C</span>
+      <b>You set the dial</b>
+      <span>Drag sensitivity and the count updates the instant you move — no re-reading the file, it's re-reading the scores it already has.</span>
+    </div>
+    <div class="step hot">
+      <span class="stamp">D</span>
+      <b>You preview</b>
+      <span>Builds a quick low-resolution version of the selected clip at that setting and drops it into the right-hand player. A few seconds. Move the dial and preview again — the new one replaces the old.</span>
+    </div>
+    <div class="step">
+      <span class="stamp">E</span>
+      <b>You export</b>
+      <span>The button at the bottom, locked until you've previewed. Runs the whole queue at the setting you watched. Each file lands beside its own original with a suffix.</span>
+    </div>
+  </div>
+
+  <div class="note warn">
+    <span class="stamp">The export button locks itself again</span>
+    <p>Touch the dial after previewing and Export goes back to greyed out. It has to — otherwise you'd ship a setting you never actually watched, which is the exact thing the preview exists to prevent. Clicking a different clip in the queue locks it too, so the two players are never showing you two different clips. Preview again and it lights back up. Changing format or quality does <em>not</em> lock it — the preview is low-resolution and was only ever vouching for the dial.</p>
+  </div>
+
+  <div class="note">
+    <span class="stamp">What the preview is and isn't</span>
+    <p>It's rendered small and fast, so it's for judging timing and motion — did the pan survive, did the dialogue collapse cleanly. It is not for judging picture quality. The exported file uses your real output settings at full resolution.</p>
+  </div>
+
+  <div class="note">
+    <span class="stamp">Yes, it re-encodes — and you control how</span>
+    <p>Frames can't be removed without rebuilding the file, so every export is a re-encode. You get the same controls as everywhere else: pick H.264 MP4, HEVC MP4, H.264 MKV or ProRes MOV, then Quality, VBR or CBR with a slider for the number. Each format is one button — the app uses your graphics card's encoder when there is one and the processor when there isn't, so there's no CPU-versus-GPU choice to make. The only tell is the little label on the number field: <span class="mono">CQ</span> means the card is doing it, <span class="mono">CRF</span> means the processor is. ProRes is the exception with no quality dial at all — its profile fixes that, so the whole row disappears when you pick it.</p>
+  </div>
+</section>
+
+<!-- ============ 04 ============ -->
+<section id="dial">
+  <div class="sec-head"><span class="sec-no">04</span><h2>The dial, and where it bites</h2></div>
+
+  <p>Two frames are never byte-for-byte identical after video compression — there's always a little noise. And a slow camera pan changes every frame by a tiny amount. So the tool has to draw a line: below this much change, call it a copy. That line is the dial, and it is the entire interface.</p>
+
+  <p>Below is a real-shaped 48-frame clip you can play with: it opens on a dialogue hold, hard-cuts to an action beat where every frame is a new drawing, then settles into a slow pan. <strong>Drag the dial and watch what the pan does.</strong></p>
+
+  <div class="demo">
+    <h3>Sensitivity, live</h3>
+    <div class="demo-grid">
+      <div>
+        <div class="dstrip" id="demoStrip" role="img" aria-label="48 frames of a sample clip; bar height is how much each frame changed from the one before"></div>
+        <div class="dscale">
+          <span>◤ dialogue hold, on 3s</span>
+          <span>◤ cut · action, on 1s</span>
+          <span>◤ slow pan</span>
+        </div>
+        <div class="dial-row">
+          <label for="thr">Sensitivity</label>
+          <input type="range" id="thr" min="0" max="100" value="18" step="1"
+                 aria-describedby="verdict">
+        </div>
+        <p style="margin:0;font-size:13px;">Left = only bin frames that are almost perfect copies. Right = bin anything that barely moved.</p>
+      </div>
+
+      <div class="readout">
+        <dl>
+          <dt>Frames removed</dt>
+          <dd id="rRemoved">—</dd>
+          <dt>Frames kept</dt>
+          <dd id="rKept">—</dd>
+          <dt>Length</dt>
+          <dd id="rLen">—</dd>
+        </dl>
+        <div class="verdict" id="verdict" role="status" aria-live="polite">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note warn">
+    <span class="stamp">The failure the dial can cause</span>
+    <p>Push sensitivity too far and the slow pan gets eaten. Those frames each moved by a few pixels — real motion, not a held drawing — but they moved less than your line allows, so they get binned. The pan comes out as a hard jump instead of a glide. The count on the readout is your defence: if a clip you know is mostly panning reports 60% removed, the setting is wrong for that clip.</p>
+  </div>
+</section>
+
+<!-- ============ 05 ============ -->
+<section id="panel">
+  <div class="sec-head"><span class="sec-no">05</span><h2>What the panel looks like</h2></div>
+
+  <div class="mock">
+    <div class="mock-top">
+      <span class="mock-tab">Vocal Separation</span>
+      <span class="mock-tab">Scene Splitter</span>
+      <span class="mock-tab">BG Remover</span>
+      <span class="mock-tab">Frame Interpolation</span>
+      <span class="mock-tab on">Dead Frame Remover</span>
+    </div>
+    <div class="mock-body">
+      <div class="mock-q">
+        <div class="qh">Clip queue — 4 clips</div>
+        <div class="qrow sel"><span>ep07_shot_014.mp4</span><em>720 → 291</em></div>
+        <div class="qrow"><span>ep07_shot_015.mp4</span><em>412 → 168</em></div>
+        <div class="qrow"><span>ep07_shot_022.mp4</span><em>measuring…</em></div>
+        <div class="qrow"><span>ep08_shot_003.mp4</span><em>queued</em></div>
+        <div class="qh" style="margin-top:16px;">Add clips · Add folder · Clear</div>
+      </div>
+      <div class="mock-main">
+        <div class="mock-panes">
+          <div class="pane"><span class="tag">Original</span>source<span class="dur">30.0s · 720f · 24fps</span></div>
+          <div class="pane on"><span class="tag">Preview · sensitivity 18</span>cleaned<span class="dur">12.1s · 291f · 24fps</span></div>
+        </div>
+        <div class="ctl wide">
+          <span class="cl">Sensitivity</span>
+          <span class="cv">18 — 429 of 720 frames removed</span>
+        </div>
+
+        <div class="fmt-row">
+          <span class="cl">Output format</span>
+          <div class="fmt-set">
+            <span class="fmt on"><b>H.264 · MP4</b><i>Plays on everything</i></span>
+            <span class="fmt"><b>HEVC · MP4</b><i>Same look, smaller file</i></span>
+            <span class="fmt"><b>H.264 · MKV</b><i>Keeps any audio track</i></span>
+            <span class="fmt"><b>ProRes · MOV</b><i>Near-lossless, very large</i></span>
+          </div>
+        </div>
+
+        <div class="fmt-row">
+          <span class="cl">Rate control</span>
+          <div class="seg">
+            <span class="segbtn on">Quality</span><span class="segbtn">VBR</span><span class="segbtn">CBR</span>
+          </div>
+          <div class="qslider">
+            <span class="qlab">Constant quality<em>CQ</em></span>
+            <span class="qtrack"><i></i></span>
+            <span class="qval">18</span>
+          </div>
+        </div>
+
+        <div class="mock-ctl">
+          <div class="ctl"><span class="cl">Audio</span><span class="cv">Drop</span></div>
+          <div class="ctl"><span class="cl">Suffix</span><span class="cv">_nodead</span></div>
+          <div class="ctl"><span class="cl">Saves to</span><span class="cv">beside the original</span></div>
+        </div>
+        <div class="mock-foot">
+          <span class="foot-note">Preview matches the dial — ready to export 4 clips</span>
+          <span class="btn ghost">Preview</span>
+          <span class="btn go">Export queue</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="mock-cap">Sketch, not final visuals — it inherits the same shell, queue and output controls as Frame Interpolation.</p>
+
+  <p>The queue shows each clip's before-and-after frame count as soon as it's been measured, so you can spot the outlier before you export anything. Click any row and the dial reads against that clip. The setting still applies to the whole queue — you're tuning on one and trusting it across the rest, which is why the per-clip counts in the list matter.</p>
+
+  <p>The two players sit side by side and run independently, because the cleaned clip is genuinely shorter. There's no wipe slider and no synced scrub — those only make sense when both files share a timeline, and these don't.</p>
+
+  <p><strong>The bottom bar is the whole safety mechanism.</strong> Preview sits next to Export, and the line of text beside them is always telling you which state you're in: <span class="mono">no preview yet</span>, <span class="mono">preview matches the dial</span>, or <span class="mono">dial moved — preview again</span>. Export is only clickable in the middle state. That's why there's no output folder to choose either — the destination is decided (next to each original, with your suffix), so the only two things you can get wrong are the dial and the format, and you've watched the dial.</p>
+</section>
+
+<!-- ============ 06 ============ -->
+<section id="locked">
+  <div class="sec-head"><span class="sec-no">06</span><h2>Decisions, locked</h2></div>
+
+  <table>
+    <tr><th>Question</th><th>Answer</th><th>What it means for you</th></tr>
+    <tr><td>What's a dead frame</td><td>A held copy of the drawing before it</td><td>Not black frames, not boring shots — repeated pictures only</td></tr>
+    <tr><td>What comes out</td><td>A new file, no smoothing applied</td><td>One job only: held copies gone</td></tr>
+    <tr><td>Its length</td><td>Shorter, and it moves faster</td><td>Frames are actually gone; nothing stretches to fill the gap</td></tr>
+    <tr><td>Comparison view</td><td>Original and preview playing, independently</td><td>Different lengths, so nothing to sync</td></tr>
+    <tr><td>Control</td><td>One sensitivity dial with a live count</td><td>You judge by the number, then confirm by watching</td></tr>
+    <tr><td>Preview</td><td>Required, one at a time, replaces the last</td><td>Try as many settings as you like; only the current one is loaded</td></tr>
+    <tr><td>Export button</td><td>Bottom of the panel, locked until you preview</td><td>Moving the dial or switching clips re-locks it — you can't ship something unwatched</td></tr>
+    <tr><td>Export scope</td><td>The whole queue, at the setting you watched</td><td>Preview one clip, export all of them</td></tr>
+    <tr><td>Where files go</td><td>Beside each original, with a suffix</td><td>No folder to pick, nothing to misplace</td></tr>
+    <tr><td>Input</td><td>A queue — drop clips or a folder, or pick several</td><td>Same as Frame Interpolation</td></tr>
+    <tr><td>Output format</td><td>H.264 MP4, HEVC MP4, H.264 MKV, ProRes MOV</td><td>One button each — the app picks graphics-card or processor encoding for you</td></tr>
+    <tr><td>Rate control</td><td>Quality / VBR / CBR, same switch as elsewhere</td><td>ProRes hides it entirely; its profile already fixes the quality</td></tr>
+    <tr><td>Audio</td><td>A toggle, defaulting to drop</td><td>Keep it and it will run past the end of the picture — that's on you</td></tr>
+  </table>
+</section>
+
+<!-- ============ 07 ============ -->
+<section id="build">
+  <div class="sec-head"><span class="sec-no">07</span><h2>Two ways to build it</h2></div>
+
+  <div class="opts">
+    <div class="opt pick">
+      <span class="badge pick">Recommended</span>
+      <h4>Reuse the smoothing tool's export machinery</h4>
+      <ul>
+        <li class="plus">Your output settings behave identically to the ones you already know, because it's the same code — not a lookalike.</li>
+        <li class="plus">The live count is a promise, not an estimate: the same measurement that feeds the dial is the one that decides what gets dropped.</li>
+        <li class="plus">Nothing new to install. It runs on the pieces the app already ships, and works the same on a machine with no graphics card.</li>
+        <li class="minus">The shared export code has to be lifted into a place both tools can reach, so Frame Interpolation needs retesting after.</li>
+      </ul>
+    </div>
+    <div class="opt">
+      <span class="badge alt">Alternative</span>
+      <h4>Build it standalone, sharing nothing</h4>
+      <ul>
+        <li class="plus">Frame Interpolation is not touched at all, so it can't break.</li>
+        <li class="minus">You end up with two separate sets of output settings that drift apart over time — a fix to one silently misses the other.</li>
+        <li class="minus">The count on the dial becomes an estimate. It can disagree with what actually comes out, which undermines the one control the whole tool rests on.</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>Either way the work splits into five pieces that can be checked separately: the measuring step, the dial-to-frame-list decision, the fast preview render, the full export, and the panel. The second one is worth testing hardest — feed it a clip that's known to be on 2s and it must remove exactly half, no more. Preview and export are the same code with different quality settings, which is what makes the preview trustworthy: what you watched is what you get, just bigger.</p>
+</section>
+
+<!-- ============ 08 ============ -->
+<section id="risk">
+  <div class="sec-head"><span class="sec-no">08</span><h2>What could still go wrong</h2></div>
+
+  <ul class="plain">
+    <li><strong>Grain and film noise defeat it.</strong> An older show with heavy grain changes every frame slightly, so nothing looks like a copy at a careful setting and nothing gets removed. You'd have to push the dial well right on those, and the live count will tell you when you're in that situation.</li>
+    <li><strong>You preview one clip and export forty.</strong> This is the sharpest edge in the design. A dialogue shot and a chase shot want different settings, and the one you watched might be the only one that survives it. The per-clip counts in the queue are your warning system — a clip reporting 60% removed when its neighbours report 30% is the one to check — but the tool will not stop you.</li>
+    <li><strong>A second export overwrites the first.</strong> Files land beside the original with a fixed suffix, so exporting the same clip twice at different settings writes over the earlier one. Change the suffix between runs if you want to keep both.</li>
+    <li><strong>Re-encoding costs quality.</strong> Frames can't be removed without re-encoding, so every cleaned clip is a second-generation copy. Use the quality-based setting rather than a bitrate cap and it's negligible, but it isn't free.</li>
+    <li><strong>Very long clips measure slowly.</strong> Reading is at thumbnail size so it's quick, but a ten-minute file is still a ten-minute read. Measuring happens per clip as it enters the queue rather than all at once, so the first clip is ready to tune while the rest catch up.</li>
+  </ul>
+
+  <div class="note good">
+    <span class="stamp">Next step</span>
+    <p>If this matches what you had in mind, the design gets written up as a spec and turned into a build plan. If any of the eight locked decisions above reads wrong, that's the moment to say so — changing one now is a sentence, changing it later is a rewrite.</p>
+  </div>
+</section>
+
+<footer>
+  <span>Dead Frame Remover — design proposal</span>
+  <span>Ultimate AMV · 27 Jul 2026</span>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---- hero strip: 24 frames of anime, mostly on 2s with one on-3s hold ---- */
+  var hero = document.getElementById("heroStrip");
+  if (hero) {
+    // true = a new drawing, false = a held copy of the one before
+    var pattern = [1,0,1,0,1,0,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0,0,1];
+    var drawing = 0;
+    pattern.forEach(function(isNew, i){
+      var c = document.createElement("div");
+      c.className = "cell " + (isNew ? "uniq" : "dup");
+      c.style.animationDelay = (i * 34) + "ms";
+      if (isNew) { drawing++; }
+      c.innerHTML = (isNew ? '<span class="glyph">' + String.fromCharCode(64 + drawing) + '</span>' : '')
+                  + (i + 1);
+      hero.appendChild(c);
+    });
+    document.getElementById("legUniq").textContent = drawing;
+    document.getElementById("legDup").textContent = pattern.length - drawing;
+  }
+
+  /* ---- interactive dial demo ---- */
+  // Per-frame change score, 0 = identical to previous frame.
+  // Section 1 (0-17)  dialogue hold on 3s
+  // Section 2 (18-31) hard cut then action on 1s
+  // Section 3 (32-47) slow pan, every frame genuinely moves a little
+  var scores = [
+    1.00,0.003,0.002, 0.081,0.004,0.002, 0.074,0.002,0.003, 0.069,0.003,0.002,
+    0.092,0.002,0.004, 0.058,0.003,0.002,
+    0.870, 0.243,0.198,0.276,0.221,0.187,0.302,0.234,0.169,0.258,0.212,0.191,0.246,0.177,
+    0.016,0.013,0.015,0.011,0.014,0.012,0.016,0.013,0.011,0.015,0.012,0.014,0.013,0.016,0.011,0.014
+  ];
+  var PAN_START = 32;
+  var FPS = 24;
+
+  var strip   = document.getElementById("demoStrip");
+  var slider  = document.getElementById("thr");
+  var elRem   = document.getElementById("rRemoved");
+  var elKeep  = document.getElementById("rKept");
+  var elLen   = document.getElementById("rLen");
+  var elVerd  = document.getElementById("verdict");
+  if (!strip || !slider) { return; }
+
+  var cells = scores.map(function(s, i){
+    var d = document.createElement("div");
+    d.className = "dcell" + (i === 18 ? " boundary" : "");
+    var bar = document.createElement("div");
+    bar.className = "dbar";
+    // sqrt keeps the tiny pan values visible next to a hard cut
+    bar.style.height = Math.max(3, Math.sqrt(Math.min(s, 0.4) / 0.4) * 100) + "%";
+    d.appendChild(bar);
+    strip.appendChild(d);
+    return d;
+  });
+
+  // dial 0..100 maps to a change threshold of 0.001 .. 0.030
+  function threshold(v){ return 0.001 + (v / 100) * 0.029; }
+
+  function render(){
+    var t = threshold(Number(slider.value));
+    var removed = 0, panRemoved = 0;
+
+    scores.forEach(function(s, i){
+      // frame 0 is always kept — there is nothing before it to copy
+      var cut = i > 0 && s < t;
+      cells[i].classList.toggle("cut", cut);
+      if (cut) {
+        removed++;
+        if (i >= PAN_START) { panRemoved++; }
+      }
+    });
+
+    var kept = scores.length - removed;
+    elRem.innerHTML  = removed + ' <small>of ' + scores.length + '</small>';
+    elKeep.textContent = kept;
+    elLen.innerHTML  = (scores.length / FPS).toFixed(2) + 's <small>→ ' + (kept / FPS).toFixed(2) + 's</small>';
+
+    var panTotal = scores.length - PAN_START;
+    if (panRemoved === 0 && removed === 0) {
+      elVerd.className = "verdict bad";
+      elVerd.textContent = "Nothing removed. The dial is tighter than the compression noise in this clip — push it right.";
+    } else if (panRemoved === 0) {
+      elVerd.className = "verdict ok";
+      elVerd.textContent = "Clean. Every held copy in the dialogue is gone, the action beat is untouched, and the pan still glides.";
+    } else if (panRemoved < panTotal * 0.5) {
+      elVerd.className = "verdict bad";
+      elVerd.textContent = "Careful — " + panRemoved + " frames of the pan are being binned. The glide will start to stutter.";
+    } else {
+      elVerd.className = "verdict bad";
+      elVerd.textContent = "Too far. The pan has collapsed to " + (panTotal - panRemoved) + " frames — it will jump instead of glide.";
+    }
+  }
+
+  slider.addEventListener("input", render);
+  render();
+})();
+</script>
+</body>
+</html>

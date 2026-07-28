@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAKU.XV — Everything He's Telling You</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --ink:#e7eaf0; --muted:#9aa3b2;
+    --line:#2a2f3a; --accent:#7cc4ff; --good:#5fd68b; --warn:#ffcf6b; --bad:#ff7b7b; --purple:#b39bff;
+    --shadow:0 1px 0 rgba(255,255,255,.03), 0 8px 24px rgba(0,0,0,.35);
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f4f6fa; --panel:#ffffff; --panel2:#f0f3f8; --ink:#151a22; --muted:#5a6473;
+      --line:#e2e7ef; --accent:#1f7bd0; --good:#1e9e5a; --warn:#b7791f; --bad:#d64545; --purple:#7a5cff;
+      --shadow:0 1px 2px rgba(20,26,34,.06), 0 8px 22px rgba(20,26,34,.08);}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:920px;margin:0 auto;padding:40px 24px 80px}
+  header{margin-bottom:8px}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  h1{font-size:32px;line-height:1.15;margin:.25em 0 .1em;letter-spacing:-.02em}
+  h2{font-size:20px;margin:2.4em 0 .6em;letter-spacing:-.01em;display:flex;align-items:center;gap:.5em}
+  h2 .n{font-size:12px;font-weight:700;color:var(--bg);background:var(--accent);
+    width:22px;height:22px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;flex:none}
+  .lede{font-size:18px;color:var(--ink);margin:.6em 0 0}
+  .muted{color:var(--muted)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;
+    box-shadow:var(--shadow);margin:14px 0}
+  .verdict{border-left:4px solid var(--good);}
+  .verdict.mixed{border-left-color:var(--warn)}
+  .tag{display:inline-block;font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted);background:var(--panel2);white-space:nowrap}
+  .tag.good{color:var(--good);border-color:color-mix(in srgb,var(--good) 40%,transparent)}
+  .tag.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+  .tag.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+  .tag.acc{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:680px){.grid2{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:6px}
+  .scroll{overflow-x:auto}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+  ul{margin:.4em 0;padding-left:1.2em}
+  li{margin:.35em 0}
+  b.hi{color:var(--ink)}
+  .foot{margin-top:34px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:16px}
+  a{color:var(--accent)}
+  /* flow */
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px;margin:14px 0 4px}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px;
+    font-weight:600;display:flex;flex-direction:column;justify-content:center;min-width:120px}
+  .step small{display:block;font-weight:500;color:var(--muted);font-size:11px;margin-top:2px}
+  .step.good{border-color:color-mix(in srgb,var(--good) 45%,transparent)}
+  .step.bad{border-color:color-mix(in srgb,var(--bad) 45%,transparent)}
+  .arrow{color:var(--muted);font-size:20px;display:flex;align-items:center}
+  /* request rows */
+  .req{display:grid;grid-template-columns:34px 1fr auto;gap:14px;align-items:start;padding:14px 0;border-bottom:1px solid var(--line)}
+  .req:last-child{border-bottom:0}
+  .req .rank{font-weight:800;font-size:18px;color:var(--accent);font-variant-numeric:tabular-nums}
+  .req h4{margin:0 0 .2em;font-size:15px}
+  .req p{margin:.15em 0;font-size:14px}
+  .why{color:var(--muted);font-size:13px}
+  .status{font-size:12px;text-align:right;min-width:120px}
+  .keyval{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+    padding:1px 7px;font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .pull{border-left:3px solid var(--purple);padding-left:14px;color:var(--ink);font-style:italic;margin:12px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="kicker">User feedback digest · SAKU.XV · Jun 29 – Jul 5</div>
+  <h1>Everything SAKU.XV is telling you, sorted</h1>
+  <p class="lede">He ran a full quality bake-off on your export formats, then landed on a short pile of concrete requests. Two threads: <b>“fix how exports look”</b> and <b>“add these editing tools.”</b></p>
+</header>
+
+<div class="card verdict mixed">
+  <p style="margin:0 0 .5em"><span class="tag good">He likes the app</span> <span class="tag warn">2 real quality gaps</span> <span class="tag acc">7 requests</span></p>
+  <p style="margin:.2em 0">The one-line takeaway: <b class="hi">your smallest, best-looking export is unusable because it cuts the wrong length, and your other export shifts colours blue — but he found a fix and wants it built in.</b> On top of that he has a wish-list of editing features. He's happy overall and has switched to your app over his old After Effects workflow.</p>
+</div>
+
+<!-- ============ EXPORT QUALITY ============ -->
+<h2><span class="n">1</span>The export bake-off — what he actually found</h2>
+<p class="muted" style="margin-top:0">He took one raw anime clip and pushed it through every export path you offer plus his own, then compared them frame-by-frame against the original. Here's the scoreboard.</p>
+
+<div class="card scroll" style="padding-top:8px">
+<table>
+  <thead><tr><th>Export path</th><th>How it looks</th><th>File size</th><th>His verdict</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b class="hi">Lossless / “no re-encode”</b><br><span class="muted" style="font-size:12.5px">(he calls it “lossless ct”)</span></td>
+      <td><span class="tag good">Perfect</span> Identical 1:1 to the raw. Colours untouched, zero blocky artefacts.</td>
+      <td><span class="keyval">~2 MB</span><br><span class="muted" style="font-size:12px">smallest by far</span></td>
+      <td><b class="hi">Best quality, but he won't use it.</b> It cuts to the wrong length and drags in extra footage from before/after the scene.</td>
+    </tr>
+    <tr>
+      <td><b class="hi">ProRes HQ MOV</b></td>
+      <td><span class="tag bad">Colour shift</span> Expected 1:1, but the whole clip turned a blue/purple hue and looked worse.</td>
+      <td><span class="keyval">~60 MB</span><br><span class="muted" style="font-size:12px">biggest</span></td>
+      <td>Bad on its own. <b class="hi">But it becomes great once he runs it through Handbrake</b> (next row).</td>
+    </tr>
+    <tr>
+      <td><b class="hi">ProRes → Handbrake 10-bit</b><br><span class="muted" style="font-size:12.5px">his own two-step recipe</span></td>
+      <td><span class="tag good">1:1 again</span> The blue tint fully reverts, blocky pixels gone, matches the raw and the lossless shot.</td>
+      <td><span class="keyval">~9 MB</span><br><span class="muted" style="font-size:12px">tiny vs quality</span></td>
+      <td><b class="hi">His winner.</b> This is what he's using now.</td>
+    </tr>
+    <tr>
+      <td>Adobe Media Encoder<br><span class="muted" style="font-size:12.5px">his old method (VBR 2-pass / CBR)</span></td>
+      <td><span class="tag bad">Artefacts</span> Low-bitrate blocky patches in some areas, worse than Handbrake.</td>
+      <td><span class="keyval">~5.35 MB</span></td>
+      <td><b class="hi">Abandoning it.</b> Says he'll never compress in Media Encoder again — Handbrake beat it on artefacts.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="card" style="border-left:4px solid var(--purple)">
+  <div style="font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:8px">The exact recipe that fixed everything</div>
+  <p style="margin:.2em 0 .6em">His breakthrough was one setting change in Handbrake. Before it, nothing looked right; after it, the blue tint vanished and the picture matched the raw:</p>
+  <div class="flow">
+    <div class="step">Export as<br><small>ProRes 422 HQ</small></div>
+    <div class="arrow">→</div>
+    <div class="step good">Handbrake · h.264 <b>10-bit</b><br><small>avg bitrate 20000, multi-pass</small></div>
+    <div class="arrow">→</div>
+    <div class="step good">Matches raw 1:1<br><small>~9 MB, no artefacts</small></div>
+  </div>
+  <p class="muted" style="margin:.6em 0 0;font-size:13.5px">Switching to <b class="hi">10-bit</b> is what killed both problems at once — the blocky pixels <em>and</em> the blue colour cast. It also quietly fixed a resolution glitch where clips were coming out 1920×1072 instead of 1920×1080.</p>
+</div>
+
+<div class="card decision" style="background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent)">
+  <p style="margin:0 0 .3em"><b class="hi">What he's actually asking you to do about all this:</b></p>
+  <ul style="margin:.3em 0 0">
+    <li><b>Ideal:</b> make the lossless export cut to the exact right length (frame-accurate). Then it wins outright — perfect quality, 2 MB, done.</li>
+    <li><b>Realistic:</b> bake his Handbrake 10-bit settings straight into the app as the default h.264 export, so users get his result with one click and never touch Handbrake. His words: <span class="muted">“most people won't have the patience for it.”</span></li>
+    <li>He's <b>unsure</b> whether his recipe secretly depends on the ProRes step, but hopes it doesn't and that you can reproduce it directly.</li>
+  </ul>
+  <p class="pull" style="margin-top:14px">Whatever's left over, Topaz AI cleans up 100% anyway — so he's not chasing perfection, just a good default.</p>
+</div>
+
+<!-- ============ WHY LOSSLESS MISCUTS ============ -->
+<h2><span class="n">2</span>Why the lossless export cuts the wrong length</h2>
+<div class="card">
+  <p style="margin-top:0">He worked this out himself and he's right. The lossless export skips re-encoding to stay perfect and fast — but that means <b class="hi">it can only cut at the video's built-in “anchor” frames, not at any arbitrary frame.</b> So when the scene starts between two anchors, the cut jumps to the nearest one and sweeps in a bit of the neighbouring clip.</p>
+  <div class="flow">
+    <div class="step">Scene you<br>selected</div>
+    <div class="arrow">→</div>
+    <div class="step bad">Cut snaps to<br>nearest anchor<br><small>can't land mid-clip</small></div>
+    <div class="arrow">→</div>
+    <div class="step bad">Extra footage<br>bleeds in<br><small>wrong length</small></div>
+  </div>
+  <p class="muted" style="margin-bottom:0;font-size:13.5px">Your own export description already warns “snaps to nearest keyframe (not frame-accurate)” — he read that and connected it to the miscut. <b class="hi">You've already agreed</b> to look into whether a frame-accurate lossless export is possible.</p>
+</div>
+
+<!-- ============ FEATURE REQUESTS ============ -->
+<h2><span class="n">3</span>The feature requests, in his order of importance</h2>
+<div class="card" style="padding-top:6px">
+
+  <div class="req">
+    <div class="rank">1</div>
+    <div>
+      <h4>10-bit h.264 export with uncapped bitrate</h4>
+      <p>Add a 10-bit h.264 render, and let the quality slider go all the way (down to 0 / uncapped) instead of stopping at 14.</p>
+      <p class="why">Why: this is the single setting that fixed his colour + artefact problems. He flat-out calls it <b class="hi">“the most important thing.”</b></p>
+    </div>
+    <div class="status"><span class="tag warn">open</span></div>
+  </div>
+
+  <div class="req">
+    <div class="rank">2</div>
+    <div>
+      <h4>VBR 2-pass encoding (like Media Encoder's)</h4>
+      <p>Give the h.264 export a target bitrate + max bitrate with a two-pass option, matching what Media Encoder offers.</p>
+      <p class="why">Why: he wants the familiar controls so he can dial in quality/size himself.</p>
+    </div>
+    <div class="status"><span class="tag acc">you said yes</span><br><span class="muted" style="font-size:11.5px">“ffmpeg can do anything AME can”</span></div>
+  </div>
+
+  <div class="req">
+    <div class="rank">3</div>
+    <div>
+      <h4>Frame-accurate lossless export</h4>
+      <p>Make the no-re-encode export cut at the exact scene boundary instead of the nearest anchor frame.</p>
+      <p class="why">Why: it's already the best-looking, smallest option — this is the only thing blocking it from being the clear winner.</p>
+    </div>
+    <div class="status"><span class="tag acc">you'll investigate</span></div>
+  </div>
+
+  <div class="req">
+    <div class="rank">4</div>
+    <div>
+      <h4>Pick which audio track gets exported</h4>
+      <p>Raw episodes often ship with both Japanese and English audio. Let the user choose which track ends up in the export.</p>
+      <p class="why">Why: he currently does this by hand with .bat scripts + mkvmerge. He sent you a sample multi-audio episode (Google Drive link).</p>
+    </div>
+    <div class="status"><span class="tag acc">queued</span><br><span class="muted" style="font-size:11.5px">“ok next release”</span></div>
+  </div>
+
+  <div class="req">
+    <div class="rank">5</div>
+    <div>
+      <h4>A real scroll bar on the clip grid</h4>
+      <p>The clip extractor only scrolls by mouse wheel and his is “kinda fucked.” He wants a draggable bar to jump to the top or a section fast.</p>
+      <p class="why">Why: on his second pass he scrolls the whole grid to merge/export chosen clips — the wheel-only scroll is slow and unreliable.</p>
+    </div>
+    <div class="status"><span class="tag acc">you said yes</span><br><span class="muted" style="font-size:11.5px">“alright”</span></div>
+  </div>
+
+  <div class="req">
+    <div class="rank">6</div>
+    <div>
+      <h4>A trim tool inside a clip</h4>
+      <p>Let him hand-pick a sub-section of a single clip to export, while the rest of his selected scenes still export alongside it.</p>
+      <p class="why">Why: right now trimming forces a separate second pass (like merge does). He wants it done in one go.</p>
+    </div>
+    <div class="status"><span class="tag warn">open</span></div>
+  </div>
+
+  <div class="req">
+    <div class="rank">7</div>
+    <div>
+      <h4>A split tool with markers</h4>
+      <p>Drop one or more markers on a clip, split it there, and export each piece as its own clip.</p>
+      <p class="why">Why: he selects by thumbnail without watching everything, so a scene he wants often arrives fused to a neighbouring clip. Split + trim lets him rescue it without hunting.</p>
+    </div>
+    <div class="status"><span class="tag warn">open</span></div>
+  </div>
+
+</div>
+
+<!-- ============ HIS TAKE ON THE APP ============ -->
+<h2><span class="n">4</span>What he thinks of the app right now</h2>
+<div class="grid2">
+  <div class="card" style="margin:0;border-left:4px solid var(--good)">
+    <div style="font-size:13px;font-weight:700;color:var(--good);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Working for him</div>
+    <ul style="margin:0">
+      <li>He's <b class="hi">switched to your app over After Effects</b> for cutting episodes into scenes.</li>
+      <li>Cuts aren't always perfect, but close enough — easy to trim leftovers when editing.</li>
+      <li>Thumbnails in his folders come out correct because the cuts are mostly accurate.</li>
+      <li>Watching scenes back-to-back speeds up his filtering vs doing each one individually in AE.</li>
+    </ul>
+  </div>
+  <div class="card" style="margin:0;border-left:4px solid var(--warn)">
+    <div style="font-size:13px;font-weight:700;color:var(--warn);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">One small polish idea</div>
+    <p style="margin:.2em 0">Add a little notice somewhere that <b class="hi">the previews look lower-quality on purpose</b> and the actual export is much better.</p>
+    <p class="muted" style="margin:.4em 0 0;font-size:13.5px">Why: he's fine with it himself, but worries new users will see the lightweight previews and assume their exports will look that rough.</p>
+  </div>
+</div>
+
+<!-- ============ WHAT YOU ALREADY REPLIED ============ -->
+<h2><span class="n">5</span>What you already committed to (so it's not lost)</h2>
+<div class="card">
+  <ul style="margin:0">
+    <li><span class="tag good">yes</span> VBR 2-pass — confirmed doable, ffmpeg covers everything Media Encoder does.</li>
+    <li><span class="tag acc">investigating</span> Frame-accurate lossless export — you'll check if it's possible and push whatever's fixable.</li>
+    <li><span class="tag bad">probably not</span> The ProRes blue-tint colour shift — you flagged it as a long-standing ProRes issue that likely won't change. <span class="muted">(His Handbrake 10-bit step already sidesteps it anyway.)</span></li>
+    <li><span class="tag acc">next release</span> Audio-track picker + scroll bar — both acknowledged. You asked for and received his sample multi-audio episode.</li>
+    <li><span class="muted">Note: the trim + split tools (requests 6 & 7) came in after your “I'll address your stuff on next update” — worth confirming they're on your list too.</span></li>
+  </ul>
+</div>
+
+<p class="foot">One-glance model of his world: he already has a manual pipeline that produces near-perfect clips (auto-cut → ProRes → Handbrake 10-bit). Everything he's asking for is really <b>“fold my manual steps into your app so I — and everyone else — don't have to run them by hand.”</b> The export-quality asks collapse the compression step; the trim/split/scroll/audio asks collapse the editing steps.</p>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Why `npm run tauri dev` crashes before it compiles — 27 Jul 2026</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2230; --ink:#e6edf3; --dim:#9aa7b4;
+    --line:#2a313c; --bad:#ff6b6b; --good:#3fb950; --warn:#f0a92e; --accent:#6ea8fe;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.6 -apple-system,"Segoe UI",Roboto,sans-serif;}
+  .wrap{max-width:1060px;margin:0 auto;padding:40px 28px 90px}
+  h1{font-size:31px;line-height:1.25;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--dim);font-size:15px;margin-bottom:34px}
+  h2{font-size:21px;margin:46px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+  h3{font-size:16px;margin:26px 0 8px;color:var(--accent)}
+  p{margin:0 0 14px}
+  .lead{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--bad);
+        border-radius:10px;padding:20px 22px;margin-bottom:8px}
+  .lead b{color:#fff}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 22px;margin:16px 0}
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:16px 18px;text-align:center}
+  .stat .n{font-size:29px;font-weight:700;letter-spacing:-.02em;display:block}
+  .stat .l{font-size:12.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin-top:4px}
+  .n.bad{color:var(--bad)} .n.good{color:var(--good)} .n.warn{color:var(--warn)}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;
+       background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:#cdd9e5}
+  pre{background:#0b0e13;border:1px solid var(--line);border-radius:9px;padding:15px 17px;
+      overflow-x:auto;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.55;color:#cdd9e5;margin:12px 0}
+  .muted{color:var(--dim)}
+  .chain{display:flex;flex-direction:column;gap:0;margin:20px 0}
+  .step{display:flex;gap:16px;align-items:flex-start;position:relative;padding:0 0 22px 0}
+  .step:last-child{padding-bottom:0}
+  .step:not(:last-child)::before{content:'';position:absolute;left:17px;top:38px;bottom:0;width:2px;background:var(--line)}
+  .dot{flex:0 0 36px;height:36px;border-radius:50%;background:var(--panel2);border:2px solid var(--line);
+       display:grid;place-items:center;font-weight:700;font-size:15px;z-index:1}
+  .step.hot .dot{border-color:var(--bad);color:var(--bad)}
+  .step .body{padding-top:5px}
+  .step .body b{display:block;font-size:16px;margin-bottom:3px}
+  .step .body span{color:var(--dim);font-size:14.5px}
+  .stackviz{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:18px;margin:16px 0}
+  .bars{display:flex;align-items:flex-end;gap:2px;height:130px;margin-top:12px}
+  .bar{flex:1;background:linear-gradient(180deg,#ff6b6b,#7a2b2b);border-radius:2px 2px 0 0}
+  .ceil{border-top:2px dashed var(--warn);margin:8px 0 4px;position:relative}
+  .ceil span{position:absolute;right:0;top:-22px;font-size:12px;color:var(--warn)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-size:12.5px;text-transform:uppercase;letter-spacing:.06em}
+  .pill{display:inline-block;font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:.04em}
+  .p-good{background:rgba(63,185,80,.15);color:var(--good);border:1px solid rgba(63,185,80,.4)}
+  .p-warn{background:rgba(240,169,46,.14);color:var(--warn);border:1px solid rgba(240,169,46,.4)}
+  .p-bad{background:rgba(255,107,107,.14);color:var(--bad);border:1px solid rgba(255,107,107,.4)}
+  .opt{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+  .opt.pick{border-color:var(--good);box-shadow:0 0 0 1px rgba(63,185,80,.25)}
+  .opt h3{margin-top:0}
+  ul{margin:8px 0 0;padding-left:20px} li{margin-bottom:6px}
+  .foot{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13.5px}
+  .kv{display:flex;gap:10px;font-size:14px;color:var(--dim);margin-bottom:5px}
+  .kv b{color:var(--ink);font-weight:600;min-width:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Your dev server dies before a single line of Rust gets compiled</h1>
+<div class="sub">27 July 2026 · diagnosis confirmed by measurement, not inference · one folder is responsible</div>
+
+<div class="lead">
+  <p><b>What you see:</b> you run <code>npm run tauri dev</code>, it prints thousands of file paths, then
+  <code>thread 'main' has overflowed its stack</code> and quits. The window never opens.</p>
+  <p style="margin-bottom:0"><b>What is actually happening:</b> installing the audio-separation tools dropped
+  <b>3,825 empty folders</b> into your bundled Python. Every time you start the app, Tauri walks that whole
+  Python folder to copy it into the app. Its walker takes one step deeper into itself for each <i>empty</i>
+  folder it passes and only unwinds when it finally finds a real file. It hits <b>3,771 empty folders in a
+  row</b>, runs out of room to keep track of where it was, and the crash kills the whole startup.</p>
+</div>
+
+<div class="grid g3" style="margin-top:20px">
+  <div class="stat"><span class="n bad">3,825</span><span class="l">folders added</span></div>
+  <div class="stat"><span class="n warn">9</span><span class="l">actual files in them</span></div>
+  <div class="stat"><span class="n bad">3,771</span><span class="l">empty ones in a row</span></div>
+</div>
+
+<h2>The chain, start to crash</h2>
+
+<div class="chain">
+  <div class="step">
+    <div class="dot">1</div>
+    <div class="body">
+      <b>The app ships its own Python, and Tauri copies it on every start</b>
+      <span>Your build config lists the <code>python</code> and <code>backend</code> folders as things to
+      bundle into the app. Before Rust compiles, Tauri walks every file in them, prints it, and copies it.
+      That is the flood of <code>rerun-if-changed=..\python\...</code> lines you saw — 25,148 files, all normal.</span>
+    </div>
+  </div>
+  <div class="step">
+    <div class="dot">2</div>
+    <div class="body">
+      <b>Audio separation needed <code>onnx</code>, and <code>onnx</code> ships its own test scaffolding</b>
+      <span>The stem-splitting feature pulls in a model-conversion library, which pulls in <code>onnx</code>.
+      That package includes a folder tree of test fixtures. In the version that got installed, the fixture
+      <i>folders</i> are all there but the fixture <i>files</i> are not — 3,825 directories holding 9 small
+      text files between them, all under
+      <code>python/Lib/site-packages/onnx/backend/test/data</code>.</span>
+    </div>
+  </div>
+  <div class="step hot">
+    <div class="dot">3</div>
+    <div class="body">
+      <b>Tauri's folder walker digs into itself once per empty folder</b>
+      <span>The walker's job is to hand back the next <i>file</i>. When the next thing it sees is a folder,
+      it doesn't loop — it calls itself again to ask for the next thing, and stays paused waiting for the
+      answer. Ten folders in a row means ten paused calls stacked up. A few thousand in a row means a few
+      thousand, all still waiting. The pile only collapses once a real file turns up.</span>
+    </div>
+  </div>
+  <div class="step hot">
+    <div class="dot">4</div>
+    <div class="body">
+      <b>The pile hits the wall at ~3,771 deep and the process is killed outright</b>
+      <span>Each paused call needs a slice of a fixed 1&nbsp;MB scratch area. Around 3,771 of them, the area is
+      full and Windows kills the process on the spot — exit code <code>0xc00000fd</code>, "stack overflow".
+      Because this is the pre-compile step, nothing downstream runs: no Rust build, no window, no dev server.</span>
+    </div>
+  </div>
+</div>
+
+<div class="stackviz">
+  <div class="muted" style="font-size:13.5px">Scratch space used while walking, folder by folder — it only ever goes up while empty folders keep coming</div>
+  <div class="ceil"><span>1 MB limit — process killed here</span></div>
+  <div class="bars" id="bars"></div>
+  <div class="muted" style="font-size:12.5px;margin-top:9px">
+    Everywhere else in the bundled Python the deepest run of back-to-back folders is <b>5</b>. Only this one
+    tree goes into the thousands.
+  </div>
+</div>
+
+<h2>How I know it's this and nothing else</h2>
+<div class="card">
+  <p class="muted" style="margin-bottom:12px">I re-ran Tauri's walking order over your actual Python folder and
+  measured the longest run of consecutive folders, first as-is, then pretending the onnx fixture tree was gone:</p>
+  <pre>as it stands now      →  3,771 folders in a row   (last one: onnx/backend/test/data/real/test_bvlc_alexnet)
+with that tree gone   →      5 folders in a row   (deepest spot: a numpy license folder)</pre>
+  <div class="kv"><b>Crash point matches:</b> the final line your terminal printed was
+    <code>onnx/backend/test/cmd_tools.py</code> — the last real file immediately <i>before</i> that fixture tree.</div>
+  <div class="kv"><b>Not a Tauri version problem:</b> the newest Tauri build tooling on your machine (2.9.2)
+    has the exact same self-calling walker. Upgrading does not help.</div>
+  <div class="kv"><b>Not your code:</b> nothing in this repo changed. Only the contents of the bundled
+    Python folder did.</div>
+</div>
+
+<h2>What's in the folder I want to delete</h2>
+<div class="card">
+  <table>
+    <tr><th>Item</th><th>Contents</th><th>Used at runtime?</th></tr>
+    <tr>
+      <td><code>onnx/backend/test/data/</code></td>
+      <td>3,825 folders, 9 files (1.1 MB). The 9 files are small pointers listing download URLs for
+        public test models — AlexNet, ResNet50, VGG19 and friends.</td>
+      <td><span class="pill p-good">No</span> Fixtures for onnx's own test suite. Nothing your app does
+        touches them; the app never runs onnx's tests.</td>
+    </tr>
+    <tr>
+      <td><code>onnx/backend/test/case/</code>, <code>runner/</code>, <code>report/</code></td>
+      <td>Real Python code, ~700 files, importable.</td>
+      <td><span class="pill p-warn">Leave alone</span> Harmless, and shallow enough that it never triggers
+        the crash. No reason to touch it.</td>
+    </tr>
+  </table>
+  <p style="margin:14px 0 0" class="muted">If it were ever needed, one <code>pip install --force-reinstall onnx-weekly</code>
+  brings it straight back. Nothing is unrecoverable here.</p>
+</div>
+
+<h2>Ways to fix it</h2>
+<div class="grid g2">
+  <div class="opt pick">
+    <h3>A · Delete that fixture tree, then teach the installer to delete it too <span class="pill p-good">recommended</span></h3>
+    <p>Two parts. First, remove the folder now — your dev server starts again within seconds. Second, add a
+    cleanup step where the audio tools get installed, so the next person (or the next reinstall on your own
+    machine) doesn't hit the same wall.</p>
+    <ul>
+      <li>Unblocks you immediately.</li>
+      <li>Survives reinstalling the audio dependencies.</li>
+      <li>Also trims 3,825 pointless folders out of the shipped installer, which speeds up packaging.</li>
+      <li>Nothing about how the app runs changes.</li>
+    </ul>
+  </div>
+  <div class="opt">
+    <h3>B · Delete the folder and nothing else</h3>
+    <p>Fastest possible move, no code change.</p>
+    <ul>
+      <li>Works today.</li>
+      <li>Comes back the moment audio dependencies are reinstalled or a fresh machine sets up — and the
+        crash message gives no hint what caused it, so you'd lose another hour rediscovering this.</li>
+    </ul>
+  </div>
+  <div class="opt">
+    <h3>C · Stop bundling the whole Python folder wholesale</h3>
+    <p>List narrower paths instead of the entire <code>python</code> folder, so 25,148 files aren't walked and
+    re-copied on every single start.</p>
+    <ul>
+      <li>Would genuinely speed up every dev start and every build.</li>
+      <li>Risky to do casually — miss one path and the app ships a Python that can't import something,
+        which only shows up when a user clicks the feature that needs it. Worth doing deliberately later,
+        not as a crash fix.</li>
+    </ul>
+  </div>
+  <div class="opt">
+    <h3>D · Report it upstream to Tauri</h3>
+    <p>Their walker should loop instead of calling itself; then no number of empty folders could ever break it.</p>
+    <ul>
+      <li>Correct long-term, but it does nothing for you this week.</li>
+      <li>Worth filing alongside whichever fix you pick.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>How to check it's fixed</h2>
+<div class="card">
+  <p style="margin-bottom:0">Run <code>npm run tauri dev</code> again. You should still see the long flood of
+  file paths — that part is normal and unchanged — but it now runs to the end, Rust starts compiling, and the
+  window opens. If it crashes at the same spot with the folder gone, the diagnosis was wrong and I'll dig again;
+  the measurement above says it won't.</p>
+</div>
+
+<div class="foot">
+  Measured on your working copy, 27 July 2026 · bundled Python: 25,148 files ·
+  Tauri build tooling 2.5.6 (2.9.2 also affected) · offending package: onnx-weekly 1.22.0.dev20260608
+</div>
+
+</div>
+<script>
+  // A simple picture of the pile growing: flat everywhere, then one long climb into the ceiling.
+  const bars = document.getElementById('bars');
+  const N = 90;
+  for (let i = 0; i < N; i++) {
+    const b = document.createElement('div');
+    b.className = 'bar';
+    let h;
+    if (i < 46) {
+      h = 2 + (i % 7);                       // ordinary folders: never more than a few deep
+    } else {
+      h = Math.min(100, (i - 45) / (N - 46) * 108);  // the fixture tree: straight up
+    }
+    b.style.height = h + '%';
+    if (i < 46) b.style.background = 'linear-gradient(180deg,#3fb950,#1d5c2a)';
+    bars.appendChild(b);
+  }
+</script>
+</body>
+</html>

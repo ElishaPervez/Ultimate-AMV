@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dead Frame Remover — why the source preview is black</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141821; --panel2:#1b2029; --line:#272d3a;
+    --ink:#e8ecf4; --dim:#98a2b8; --dimmer:#6b7488;
+    --bad:#ff5f6d; --good:#3ddc97; --warn:#ffc453; --info:#6aa9ff; --accent:#8b7bff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.65 "Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 28px 100px}
+  h1{font-size:38px;line-height:1.15;margin:0 0 10px;letter-spacing:-.02em}
+  h2{font-size:24px;margin:56px 0 6px;letter-spacing:-.01em}
+  h2 .num{color:var(--dimmer);font-variant-numeric:tabular-nums;margin-right:10px;font-weight:600}
+  h3{font-size:17px;margin:26px 0 8px}
+  p{margin:10px 0}
+  .lede{font-size:19px;color:var(--dim);max-width:74ch}
+  .sub{color:var(--dim);font-size:14.5px;margin:0 0 30px}
+  .rule{height:1px;background:var(--line);margin:40px 0 0}
+
+  /* verdict */
+  .verdict{
+    background:linear-gradient(180deg,#1e1216,#15121a);
+    border:1px solid #4a2630;border-left:4px solid var(--bad);
+    border-radius:14px;padding:24px 26px;margin:32px 0 8px;
+  }
+  .verdict .tag{
+    display:inline-block;font-size:11px;letter-spacing:.14em;font-weight:700;
+    color:var(--bad);border:1px solid #5d2c37;border-radius:999px;
+    padding:3px 11px;margin-bottom:12px;
+  }
+  .verdict p{font-size:18px;margin:0}
+  .verdict strong{color:#fff}
+
+  .callout{
+    border:1px solid var(--line);border-left:4px solid var(--info);
+    background:var(--panel);border-radius:12px;padding:18px 20px;margin:22px 0;
+  }
+  .callout.good{border-left-color:var(--good)}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout .h{font-weight:700;margin:0 0 6px;font-size:15px}
+  .callout p{margin:0;color:var(--dim);font-size:15px}
+  .callout.good .h{color:var(--good)}
+  .callout.warn .h{color:var(--warn)}
+  .callout.info .h{color:var(--info)}
+
+  /* mock screenshot */
+  .mock{
+    display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:26px 0 8px;
+  }
+  .mockpane{
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px;
+  }
+  .mockpane .cap{font-size:11px;letter-spacing:.13em;color:var(--dimmer);font-weight:700;margin-bottom:2px}
+  .mockpane .fn{font-size:13px;color:var(--dim);margin-bottom:12px}
+  .screen{
+    aspect-ratio:16/9;background:#000;border-radius:9px;position:relative;
+    display:flex;align-items:center;justify-content:center;overflow:hidden;
+    border:1px solid #23283a;
+  }
+  .screen .void{color:#3a4152;font-size:13px;letter-spacing:.05em}
+  /* fake default chrome control bar */
+  .chrome{
+    position:absolute;left:8px;right:8px;bottom:8px;height:34px;
+    background:rgba(28,28,30,.94);border-radius:8px;display:flex;align-items:center;
+    gap:9px;padding:0 10px;font-size:11px;color:#e6e6e6;
+  }
+  .chrome .glyph{font-size:12px;opacity:.92}
+  .chrome .bar{flex:1;height:3px;background:rgba(255,255,255,.28);border-radius:3px;position:relative}
+  .chrome .bar i{position:absolute;inset:0 62% 0 0;background:#fff;border-radius:3px}
+  .badge-bad{
+    position:absolute;top:9px;left:9px;background:rgba(255,95,109,.14);
+    border:1px solid rgba(255,95,109,.5);color:#ff8b95;font-size:10.5px;
+    letter-spacing:.09em;font-weight:700;padding:3px 9px;border-radius:999px;
+  }
+  .arrowlabel{
+    display:flex;align-items:center;gap:8px;color:var(--bad);font-size:13px;
+    margin-top:11px;font-weight:600;
+  }
+  .arrowlabel::before{content:"▲";font-size:10px}
+
+  /* flow diagram */
+  .flow{
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    padding:28px 24px;margin:26px 0;
+  }
+  .flowtitle{font-size:12px;letter-spacing:.14em;color:var(--dimmer);font-weight:700;text-align:center;margin-bottom:22px}
+  .track{display:flex;align-items:stretch;gap:0;flex-wrap:nowrap}
+  .node{
+    flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+    padding:14px 13px;text-align:center;min-width:0;
+  }
+  .node .t{font-weight:700;font-size:14px;margin-bottom:4px}
+  .node .d{font-size:12.5px;color:var(--dim);line-height:1.45}
+  .node.ok{border-color:rgba(61,220,151,.42);background:rgba(61,220,151,.06)}
+  .node.ok .t{color:var(--good)}
+  .node.fail{border-color:rgba(255,95,109,.5);background:rgba(255,95,109,.07)}
+  .node.fail .t{color:var(--bad)}
+  .node.fix{border-color:rgba(139,123,255,.5);background:rgba(139,123,255,.08)}
+  .node.fix .t{color:#a99cff}
+  .arrow{
+    display:flex;align-items:center;justify-content:center;color:var(--dimmer);
+    font-size:20px;padding:0 10px;flex:0 0 auto;
+  }
+  .arrow.bad{color:var(--bad)}
+  .arrow.fix{color:#a99cff}
+  .branchnote{text-align:center;font-size:12.5px;color:var(--dimmer);margin-top:16px;font-style:italic}
+
+  /* two-column split diagram */
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:24px 0}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+  .col.now{border-top:3px solid var(--bad)}
+  .col.after{border-top:3px solid var(--good)}
+  .col h4{margin:0 0 14px;font-size:14px;letter-spacing:.1em;text-transform:uppercase}
+  .col.now h4{color:var(--bad)}
+  .col.after h4{color:var(--good)}
+  .steplist{list-style:none;margin:0;padding:0;counter-reset:s}
+  .steplist li{
+    counter-increment:s;position:relative;padding:0 0 0 32px;margin:0 0 13px;
+    font-size:14.5px;color:var(--dim);line-height:1.5;
+  }
+  .steplist li::before{
+    content:counter(s);position:absolute;left:0;top:1px;width:21px;height:21px;
+    border-radius:50%;background:var(--panel2);border:1px solid var(--line);
+    font-size:11px;font-weight:700;color:var(--dim);
+    display:flex;align-items:center;justify-content:center;
+  }
+  .col.now .steplist li:last-child{color:#ff9aa3;font-weight:600}
+  .col.after .steplist li:last-child{color:#7fe8bd;font-weight:600}
+
+  /* tables */
+  table{width:100%;border-collapse:collapse;margin:20px 0;font-size:14.5px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:11px;letter-spacing:.12em;color:var(--dimmer);text-transform:uppercase;font-weight:700}
+  td.k{color:var(--dim);width:34%}
+  td strong{color:var(--ink)}
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;letter-spacing:.04em}
+  .pill.no{background:rgba(255,95,109,.15);color:#ff8b95;border:1px solid rgba(255,95,109,.35)}
+  .pill.yes{background:rgba(61,220,151,.14);color:#6ee7b7;border:1px solid rgba(61,220,151,.35)}
+
+  /* options */
+  .opt{
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    padding:24px 26px;margin:20px 0;position:relative;
+  }
+  .opt.pick{border-color:rgba(139,123,255,.55);background:linear-gradient(180deg,rgba(139,123,255,.07),var(--panel))}
+  .opt .lbl{
+    position:absolute;top:-11px;left:22px;background:var(--accent);color:#0b0d12;
+    font-size:10.5px;font-weight:800;letter-spacing:.13em;padding:3px 11px;border-radius:999px;
+  }
+  .opt h3{margin:0 0 4px;font-size:19px}
+  .opt .oneline{color:var(--dim);margin:0 0 16px;font-size:15px}
+  .pros{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px}
+  .pros ul{margin:6px 0 0;padding-left:18px;font-size:14px;color:var(--dim);line-height:1.6}
+  .pros .hd{font-size:11px;letter-spacing:.12em;font-weight:700;text-transform:uppercase}
+  .pros .up .hd{color:var(--good)}
+  .pros .down .hd{color:var(--warn)}
+  .effort{
+    display:inline-flex;gap:7px;align-items:center;margin-top:16px;font-size:13px;
+    color:var(--dim);border-top:1px solid var(--line);padding-top:14px;width:100%;
+  }
+  .effort b{color:var(--ink)}
+
+  code{
+    background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+    padding:1px 6px;font:13px/1 ui-monospace,Consolas,monospace;color:#cbd3e4;
+  }
+  .repro{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 24px;margin:22px 0}
+  .repro ol{margin:0;padding-left:20px;color:var(--dim);font-size:15px;line-height:1.75}
+  .repro ol strong{color:var(--ink)}
+  .foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);color:var(--dimmer);font-size:13px}
+  @media (max-width:860px){
+    .mock,.split,.pros{grid-template-columns:1fr}
+    .track{flex-wrap:wrap}.arrow{transform:rotate(90deg);padding:6px 0;width:100%}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>The source preview is black<br>because nothing can play that file</h1>
+  <p class="sub">Dead Frame Remover · <code>1.mov</code> · 28 July 2026</p>
+
+  <div class="verdict">
+    <span class="tag">WHAT'S ACTUALLY WRONG</span>
+    <p><strong>Your file is Apple ProRes.</strong> The window your app draws its interface in
+    can display H.264, HEVC and a couple of web formats — and that's it. It has never been
+    able to show ProRes. So it opens the file, reads the label that says "2.87 seconds long",
+    draws a scrubber for those 2.87 seconds, and then paints nothing, forever.</p>
+  </div>
+
+  <p class="lede">Two separate things went wrong at once, and they look like one bug.
+  The picture is missing because of the file. The ugly grey bar is missing your styling
+  because of the panel. Fixing one doesn't fix the other.</p>
+
+  <div class="rule"></div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">01</span>What you're looking at</h2>
+  <p>Here is the panel as it appears now, with the two independent problems marked.</p>
+
+  <div class="mock">
+    <div class="mockpane">
+      <div class="cap">SOURCE</div>
+      <div class="fn">1.mov</div>
+      <div class="screen">
+        <span class="badge-bad">PROBLEM 1</span>
+        <span class="void">no picture — ever</span>
+        <div class="chrome">
+          <span class="glyph">▶</span>
+          <span>0:00 / 0:02</span>
+          <span class="bar"><i></i></span>
+          <span class="glyph">🔊</span>
+          <span class="glyph">⋮</span>
+        </div>
+      </div>
+      <div class="arrowlabel">Problem 2 — the browser's own control bar, not yours</div>
+    </div>
+
+    <div class="mockpane">
+      <div class="cap">DUPLICATES REMOVED</div>
+      <div class="fn">Nothing rendered yet</div>
+      <div class="screen">
+        <span class="void">Press Preview to render the selected clip.</span>
+      </div>
+      <div class="arrowlabel" style="color:var(--good)">This one was always fine — see section 4</div>
+    </div>
+  </div>
+
+  <div class="callout good">
+    <p class="h">The detection itself worked perfectly</p>
+    <p>The queue says <strong>69 → 31</strong>, and the slider correctly reports 38 duplicate
+    frames found. The part of the app that actually reads the video has no trouble with ProRes —
+    it uses a full media toolkit. Only the on-screen preview is blind. Nothing about your
+    dead-frame logic is broken.</p>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">02</span>What's inside the file</h2>
+  <p>I probed <code>C:\Users\PC\Downloads\1.mov</code> directly. Every line below is measured, not guessed.</p>
+
+  <table>
+    <thead><tr><th>Property</th><th>Value</th><th>Can the UI show it?</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Picture format</td><td><strong>Apple ProRes LT</strong></td><td><span class="pill no">NO</span></td></tr>
+      <tr><td class="k">Colour depth</td><td>10-bit, 4:2:2</td><td><span class="pill no">NO</span></td></tr>
+      <tr><td class="k">Sound format</td><td><strong>Uncompressed PCM</strong> inside a .mov</td><td><span class="pill no">NO</span></td></tr>
+      <tr><td class="k">Size on screen</td><td>1920 × 1080</td><td><span class="pill yes">fine</span></td></tr>
+      <tr><td class="k">Rate</td><td>24 frames per second</td><td><span class="pill yes">fine</span></td></tr>
+      <tr><td class="k">Length</td><td>2.87 seconds — 69 frames</td><td><span class="pill yes">fine</span></td></tr>
+      <tr><td class="k">File size</td><td>21.4 MB, about 61 Mbit/s</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <p>That 69 matches the queue exactly, which confirms the app read the file correctly.
+  It also explains the <strong>0:02</strong> on the scrubber: length lives in the file's index,
+  which is plain text the UI can read without decoding a single frame. So it knows how long
+  the video is while being completely unable to see it.</p>
+
+  <div class="callout warn">
+    <p class="h">The sound is unplayable too</p>
+    <p>Even if you fixed only the picture, the audio track is raw uncompressed sound, which
+    this window also can't play. Any fix has to convert both, not just the video.</p>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">03</span>Why it fails, step by step</h2>
+
+  <div class="flow">
+    <div class="flowtitle">WHAT HAPPENS WHEN YOU SELECT A CLIP</div>
+    <div class="track">
+      <div class="node ok"><div class="t">You add 1.mov</div><div class="d">The panel stores the file path</div></div>
+      <div class="arrow">→</div>
+      <div class="node ok"><div class="t">Analysis runs</div><div class="d">Full media toolkit reads it. Finds 69 frames, 38 duplicates. Works.</div></div>
+      <div class="arrow">→</div>
+      <div class="node fail"><div class="t">Preview hands over the raw path</div><div class="d">The panel points the on-screen player straight at the original file</div></div>
+      <div class="arrow bad">→</div>
+      <div class="node fail"><div class="t">Black rectangle</div><div class="d">Reads the length, can't decode a frame, gives up silently</div></div>
+    </div>
+    <div class="branchnote">No error is shown anywhere — the player has no way to say "I can't read this".</div>
+  </div>
+
+  <p>The critical detail is the third box. The panel makes no attempt to check whether the
+  file is playable before showing it. It assumes every video the app accepts is also a video
+  the interface can display — and for ProRes, MKV, 10-bit HEVC and several others, that
+  assumption is wrong.</p>
+
+  <div class="callout info">
+    <p class="h">Your Scene Splitter already solved exactly this</p>
+    <p>The Scene Splitter checks each file first, and when it finds one the interface can't
+    show, it quietly builds a small, low-resolution stand-in copy in a format that plays,
+    then previews that instead. You'd never notice it happened. Two ready-made pieces already
+    exist for this — one that inspects a file and answers "playable, or does it need a
+    stand-in?", and one that builds the stand-in. Dead Frame Remover simply never got wired
+    to them. <span style="color:var(--dim)">(<code>src-tauri/src/clips.rs</code> — the
+    playback-plan and proxy-builder commands, already registered app-wide.)</span></p>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">04</span>A second bug I predicted here — and was wrong about</h2>
+
+  <div class="callout warn">
+    <p class="h">Correction to an earlier draft of this report</p>
+    <p>I originally wrote that picking <strong>ProRes · MOV</strong> as the output would make
+    the right-hand window go black too. <strong>That was wrong.</strong> I checked the code
+    that actually builds the preview and it never touches your format choice.</p>
+  </div>
+
+  <p>The Preview button always writes a small, fast, always-playable file, no matter which
+  output format button is lit. Your format choice only applies when you press
+  <strong>Export</strong>. That is a deliberate decision someone made when building this
+  panel, and a good one for a reason worth knowing:</p>
+
+  <div class="callout good">
+    <p class="h">Why the preview ignores your export settings</p>
+    <p>The preview exists to answer one question — <em>did the sensitivity dial pick the right
+    frames?</em> — and nothing else. Because it never depends on the format or quality
+    settings, changing those doesn't invalidate the preview you're already looking at. You can
+    dial in sensitivity, then choose your export format afterwards, without re-rendering.</p>
+  </div>
+
+  <p>So only the left-hand Source window was ever black. The right-hand one was always fine.</p>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">05</span>Who hits this in the real world</h2>
+  <p>This is not an exotic edge case for an AMV tool. ProRes is what comes out of:</p>
+  <table>
+    <tbody>
+      <tr><td class="k">After Effects / Premiere exports</td><td>ProRes is the standard hand-off format between editing stages</td></tr>
+      <tr><td class="k">Your own app</td><td>ProRes · MOV is an offered output in this very panel and in Frame Interpolation</td></tr>
+      <tr><td class="k">Upscaler and restoration tools</td><td>Topaz and similar default to ProRes or lossless output</td></tr>
+      <tr><td class="k">Blu-ray remux workflows</td><td>Often land as ProRes or 10-bit intermediates before the final encode</td></tr>
+    </tbody>
+  </table>
+  <p>An editor chaining your tools together — interpolate to ProRes, then drop that into the
+  Dead Frame Remover — walks straight into a black screen on the very first step.</p>
+
+  <div class="repro">
+    <h3 style="margin-top:0">Reproducing it in ten seconds</h3>
+    <ol>
+      <li>Open <strong>Dead Frame Remover</strong>.</li>
+      <li>Add any ProRes .mov — <code>C:\Users\PC\Downloads\1.mov</code> works.</li>
+      <li>The queue fills in correctly (<strong>69 → 31</strong>), so analysis clearly worked.</li>
+      <li>The Source window stays <strong>black</strong>, with a grey control bar showing <strong>0:00 / 0:02</strong>.</li>
+      <li>Press play — the scrubber moves, the picture never appears, no sound comes out.</li>
+      <li>Press <strong>Preview</strong> — the right-hand window plays normally. Only the Source side is affected.</li>
+    </ol>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">06</span>Three ways to fix it</h2>
+
+  <div class="opt pick">
+    <span class="lbl">RECOMMENDED</span>
+    <h3>A · Reuse the stand-in preview the Scene Splitter already uses</h3>
+    <p class="oneline">Check the file first. If the interface can't show it, quietly build a small playable copy and preview that.</p>
+
+    <div class="split" style="margin:18px 0 0">
+      <div class="col now">
+        <h4>Today</h4>
+        <ol class="steplist">
+          <li>Panel takes the file path</li>
+          <li>Hands it straight to the player</li>
+          <li>Player can't decode it</li>
+          <li>Black rectangle, no explanation</li>
+        </ol>
+      </div>
+      <div class="col after">
+        <h4>With this fix</h4>
+        <ol class="steplist">
+          <li>Panel takes the file path</li>
+          <li>Asks: can the interface show this?</li>
+          <li>If not, builds a small playable copy (a second or two)</li>
+          <li>Preview plays normally — you never know it happened</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="pros">
+      <div class="up"><div class="hd">In its favour</div>
+        <ul>
+          <li>The machinery already exists, is registered, and is proven in the Scene Splitter</li>
+          <li>Fixes every unplayable format at once, not just ProRes — MKV, 10-bit, odd codecs</li>
+          <li>Both windows go through the same check, so the result player is protected if that encoder ever changes</li>
+          <li>Nothing new for you to learn or click</li>
+        </ul>
+      </div>
+      <div class="down"><div class="hd">The cost</div>
+        <ul>
+          <li>A short wait before an unplayable clip appears, with a progress state to show</li>
+          <li>Stand-in copies take temporary disk space and need cleaning up</li>
+          <li>The preview is lower resolution than the original — fine for spotting duplicate frames, not for judging fine detail</li>
+        </ul>
+      </div>
+    </div>
+    <div class="effort"><b>Scope:</b> Dead Frame Remover panel only. Both windows. No backend work — the backend pieces exist.</div>
+  </div>
+
+  <div class="opt">
+    <h3>B · Just say so</h3>
+    <p class="oneline">Detect the unplayable file and replace the black rectangle with a clear message plus an "Open in your video player" button.</p>
+    <div class="pros">
+      <div class="up"><div class="hd">In its favour</div>
+        <ul>
+          <li>Smallest possible change</li>
+          <li>No waiting, no temporary files, no disk use</li>
+          <li>Honest — never leaves you staring at a black box wondering</li>
+        </ul>
+      </div>
+      <div class="down"><div class="hd">The cost</div>
+        <ul>
+          <li>You still can't preview inside the app, which is the whole point of the panel</li>
+          <li>Comparing before/after side by side becomes impossible for these files</li>
+          <li>Feels like an apology rather than a feature</li>
+        </ul>
+      </div>
+    </div>
+    <div class="effort"><b>Scope:</b> One panel, cosmetic. Good as a stopgap, or as the fallback when building a stand-in fails.</div>
+  </div>
+
+  <div class="opt">
+    <h3>C · Do both — stand-in preview, with the message as a safety net</h3>
+    <p class="oneline">Option A normally; if building the stand-in fails or the file is enormous, fall back to Option B's message.</p>
+    <div class="pros">
+      <div class="up"><div class="hd">In its favour</div>
+        <ul>
+          <li>Never shows a black rectangle under any circumstances</li>
+          <li>Handles the case where a huge source would take too long to convert</li>
+          <li>Covers corrupt or half-written files gracefully</li>
+        </ul>
+      </div>
+      <div class="down"><div class="hd">The cost</div>
+        <ul>
+          <li>Two code paths to keep working instead of one</li>
+          <li>Slightly more to test</li>
+        </ul>
+      </div>
+    </div>
+    <div class="effort"><b>Scope:</b> Option A plus a small failure branch. This is where I'd expect to end up eventually.</div>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">07</span>The separate, smaller problem: that grey bar</h2>
+  <p>Even after the picture works, the player will still look wrong. That dark grey bar with
+  the three-dot menu is the browser engine's built-in control bar — the app is asking for
+  default controls rather than drawing its own.</p>
+
+  <p>Your Tsukyio player and Scene Viewer both hide the default bar and draw a matching custom
+  transport instead. The Dead Frame Remover asks for the default one, so it gets stock Chrome
+  chrome, complete with a "⋮" menu offering things like Picture-in-Picture and Download that
+  don't belong in your app.
+  <span style="color:var(--dim)">(<code>src/features/deadframe/DeadFramePanel.tsx:561</code>
+  and <code>:576</code>.)</span></p>
+
+  <div class="callout">
+    <p class="h">Worth deciding separately</p>
+    <p>This is purely cosmetic and independent of the black-screen bug. Two side-by-side
+    windows comparing before and after would also benefit from a <em>shared</em> transport —
+    one play button scrubbing both at once — which is a genuinely better fit for this panel
+    than two unlinked players. Say the word and I'll spec that on its own.</p>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2><span class="num">08</span>Built — what actually changed</h2>
+
+  <div class="callout good">
+    <p class="h">Option A is implemented, with Option B as the safety net</p>
+    <p>Both players now check each file first and quietly build a playable stand-in when
+    they need one. If that ever fails, you get a plain message and an
+    <strong>Open in your video player</strong> button instead of a black box. The stock grey
+    control bar is gone, replaced with the app's own transport.</p>
+  </div>
+
+  <table>
+    <thead><tr><th>What changed</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Both preview windows ask "can this be shown?" first</td>
+          <td>Playable files play instantly as before. Unplayable ones get a small copy built, then play.</td></tr>
+      <tr><td class="k">Answers are remembered per file</td>
+          <td>Re-selecting a clip is instant — no rebuild, no "Preparing" flash.</td></tr>
+      <tr><td class="k">Switching clips mid-build discards the old answer</td>
+          <td>A copy that finishes after you've moved on can't hijack the window you're now looking at.</td></tr>
+      <tr><td class="k">The panel stays usable while a copy builds</td>
+          <td>The sensitivity dial, queue and buttons never lock up waiting.</td></tr>
+      <tr><td class="k">Failure shows a message, not a black box</td>
+          <td>You always find out, and you can still open the file elsewhere in one click.</td></tr>
+      <tr><td class="k">The app's own player controls replace the browser's</td>
+          <td>No more stock grey bar with its Picture-in-Picture and Download menu.</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>Still open:</strong> one shared transport scrubbing both windows together, so you
+  can compare before and after frame by frame. That's a separate change and I haven't made it.</p>
+
+  <div class="callout warn">
+    <p class="h">Not yet confirmed in the running app</p>
+    <p>The automated tests pass and the types check clean, but nobody has opened the app and
+    dropped <code>1.mov</code> in yet. The permission needed by that "Open in your video
+    player" button also can't be exercised without a full build.</p>
+  </div>
+
+  <div class="foot">
+    Findings come from a direct probe of
+    <code>C:\Users\PC\Downloads\1.mov</code> and from reading
+    <code>C:\projects (code)\27. Ultimate AMV script\src\features\deadframe\DeadFramePanel.tsx</code>,
+    <code>C:\projects (code)\27. Ultimate AMV script\src-tauri\src\clips.rs</code> and
+    <code>C:\projects (code)\27. Ultimate AMV script\backend\amv_deadframe\processor.py</code>.
+    Section 4 corrects a wrong claim in the first draft of this report.
+  </div>
+
+</div>
+</body>
+</html>

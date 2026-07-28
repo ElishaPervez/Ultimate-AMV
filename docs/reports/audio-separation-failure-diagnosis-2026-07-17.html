@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio separation failure — root-cause diagnosis</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090b10;
+      --panel: #11151d;
+      --panel-2: #171c26;
+      --text: #edf1f8;
+      --muted: #9aa6b7;
+      --line: #293243;
+      --bad: #ff6b7a;
+      --bad-bg: rgba(255, 107, 122, .10);
+      --warn: #ffc66d;
+      --warn-bg: rgba(255, 198, 109, .10);
+      --good: #65d6a7;
+      --good-bg: rgba(101, 214, 167, .10);
+      --accent: #8ea8ff;
+      --accent-bg: rgba(142, 168, 255, .10);
+      --shadow: 0 22px 70px rgba(0,0,0,.32);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 16% -8%, rgba(142,168,255,.15), transparent 34rem),
+        radial-gradient(circle at 100% 24%, rgba(255,107,122,.08), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { width: min(1160px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 72px; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 8px 0 10px; max-width: 900px; font-size: clamp(34px, 5.5vw, 64px); line-height: 1.02; letter-spacing: -.045em; }
+    h2 { margin: 0 0 14px; font-size: 25px; line-height: 1.15; letter-spacing: -.02em; }
+    h3 { margin: 0 0 8px; font-size: 16px; }
+    p { margin: 0; }
+    .lede { max-width: 880px; color: #c8d1df; font-size: 18px; }
+    .verdict {
+      display: grid; grid-template-columns: 92px 1fr; gap: 20px; align-items: center;
+      margin-top: 28px; padding: 22px; border: 1px solid rgba(255,107,122,.35);
+      border-radius: 18px; background: linear-gradient(135deg, var(--bad-bg), rgba(17,21,29,.94)); box-shadow: var(--shadow);
+    }
+    .verdict .stamp { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 18px; background: #29141a; color: var(--bad); font-size: 31px; font-weight: 900; }
+    .verdict strong { display: block; margin-bottom: 4px; font-size: 21px; }
+    .verdict span { color: #c9d1de; }
+    section { margin-top: 44px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .card { padding: 19px; border: 1px solid var(--line); border-radius: 16px; background: rgba(17,21,29,.92); }
+    .card .label { margin-bottom: 10px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    .metric { color: var(--bad); font-size: 25px; font-weight: 800; letter-spacing: -.02em; }
+    .card p + p { margin-top: 8px; }
+    .muted { color: var(--muted); }
+    .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; align-items: stretch; }
+    .node { position: relative; padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .node:not(:last-child)::after { content: "→"; position: absolute; z-index: 2; top: 50%; right: -14px; width: 18px; color: var(--accent); font-weight: 900; text-align: center; transform: translateY(-50%); }
+    .node b { display: block; margin-bottom: 6px; color: var(--accent); }
+    .node.bad b { color: var(--bad); }
+    .node small { display: block; color: var(--muted); line-height: 1.45; }
+    .evidence { overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+    .row { display: grid; grid-template-columns: 230px 1fr; gap: 22px; padding: 17px 19px; border-bottom: 1px solid var(--line); }
+    .row:last-child { border-bottom: 0; }
+    .row b { color: #d8e0ed; }
+    code { color: #d9e1ff; font: 13px/1.5 "Cascadia Code", Consolas, monospace; }
+    .pill { display: inline-flex; align-items: center; margin-right: 5px; padding: 3px 8px; border-radius: 999px; background: var(--panel-2); color: #dbe3f1; font: 12px "Cascadia Code", Consolas, monospace; }
+    .callout { padding: 18px 20px; border-left: 4px solid var(--warn); border-radius: 8px 14px 14px 8px; background: var(--warn-bg); }
+    .callout strong { display: block; margin-bottom: 4px; color: var(--warn); }
+    .steps { display: grid; gap: 12px; counter-reset: item; }
+    .step { position: relative; padding: 19px 20px 19px 64px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+    .step::before { counter-increment: item; content: counter(item); position: absolute; top: 18px; left: 18px; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--accent-bg); color: var(--accent); font-weight: 900; }
+    .step p { color: #c2ccda; }
+    .step .why { margin-top: 7px; color: var(--muted); font-size: 13px; }
+    .priority { display: inline-block; margin-left: 7px; padding: 2px 7px; border-radius: 6px; background: var(--bad-bg); color: var(--bad); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .decision { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; }
+    .good { border-color: rgba(101,214,167,.35); background: linear-gradient(145deg, var(--good-bg), var(--panel)); }
+    .good h3 { color: var(--good); }
+    .warn { border-color: rgba(255,198,109,.35); background: linear-gradient(145deg, var(--warn-bg), var(--panel)); }
+    .warn h3 { color: var(--warn); }
+    .source { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    @media (max-width: 900px) {
+      .grid, .decision { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .node:not(:last-child)::after { content: "↓"; top: auto; right: 50%; bottom: -17px; transform: translateX(50%); }
+    }
+    @media (max-width: 620px) {
+      main { width: min(100% - 22px, 1160px); padding-top: 28px; }
+      .verdict { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Ultimate AMV · diagnosis · 17 July 2026</div>
+    <h1>The installed audio runtime contains incompatible package files.</h1>
+    <p class="lede">Every separation attempt stops before audio processing begins because NumPy 2.5.1 is loaded, while Numba 0.65.1 refuses NumPy 2.5 or newer. Changing the input video cannot change the result.</p>
+    <div class="verdict">
+      <div class="stamp">×</div>
+      <div>
+        <strong>Root cause confirmed</strong>
+        <span>The updater copied a new, unconstrained NumPy build into an existing Python package folder. Older version records remained beside it, so the app's readiness check sees a compatible record while Python actually loads incompatible code.</span>
+      </div>
+    </div>
+  </header>
+
+  <section>
+    <h2>What you observe</h2>
+    <div class="grid">
+      <article class="card">
+        <div class="label">Attempts</div>
+        <div class="metric">2 files, same failure</div>
+        <p class="muted">Unrelated videos both stop in about six seconds. The media files are not the cause.</p>
+      </article>
+      <article class="card">
+        <div class="label">Actual loaded code</div>
+        <div class="metric">NumPy 2.5.1</div>
+        <p class="muted">This is the version Python imports from the installed app.</p>
+      </article>
+      <article class="card">
+        <div class="label">Required by Numba 0.65.1</div>
+        <div class="metric">NumPy below 2.5</div>
+        <p class="muted">Numba aborts as soon as audio processing reaches code that needs it.</p>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Failure chain</h2>
+    <div class="flow" aria-label="Failure sequence">
+      <div class="node"><b>1 · Release build</b><small>The build asks for the newest NumPy, with no upper limit.</small></div>
+      <div class="node"><b>2 · Silent update</b><small>NumPy 2.5.1 files are copied into the already-used Python folder.</small></div>
+      <div class="node"><b>3 · False readiness</b><small>Old 2.4.x version records remain, so package checks report success.</small></div>
+      <div class="node bad"><b>4 · Processing starts</b><small>The real 2.5.1 code loads; Numba rejects it before separation work begins.</small></div>
+      <div class="node bad"><b>5 · Error is obscured</b><small>The separator returns no files, and the app shows only “produced no output files.”</small></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Evidence from this installation</h2>
+    <div class="evidence">
+      <div class="row">
+        <b>Direct import test</b>
+        <div><code>Numba needs NumPy 2.4 or less. Got NumPy 2.5.</code><div class="source">Observed using the installed app's own Python interpreter.</div></div>
+      </div>
+      <div class="row">
+        <b>Code actually loaded</b>
+        <div><span class="pill">NumPy 2.5.1</span><span class="pill">Numba 0.65.1</span><div class="source">The loaded NumPy file is inside C:\Users\Elisha\AppData\Local\Ultimate AMV\python\Lib\site-packages.</div></div>
+      </div>
+      <div class="row">
+        <b>Conflicting records</b>
+        <div><span class="pill">2.4.4</span><span class="pill">2.4.6</span><span class="pill">2.5.1</span><div class="source">Three NumPy version-record folders coexist in the same installed environment.</div></div>
+      </div>
+      <div class="row">
+        <b>Why repair does not start</b>
+        <div>The package checker reads the 2.4.4 record first and says “No broken requirements found,” even though importing the actual code fails.<div class="source">The app also checks that audio packages exist, but it does not verify that NumPy and Numba can load together.</div></div>
+      </div>
+      <div class="row">
+        <b>How 2.5.1 entered the app</b>
+        <div>The July 16 release build downloaded NumPy 2.5.1. The build script currently requests <code>numpy</code> without a version limit.<div class="source">bundle-deps.ps1:52; the captured release build records the selected 2.5.1 wheel.</div></div>
+      </div>
+      <div class="row">
+        <b>Why the visible message is vague</b>
+        <div>The third-party separator catches the incompatibility and returns an empty result. The app then replaces that specific failure with “Separation produced no output files.”<div class="source">backend/amv_audio/separator.py:121–126.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="callout">
+      <strong>This is not a GPU, model, FFmpeg, filename, or source-video failure.</strong>
+      The crash happens in Python package loading before the separator produces its first stem. CPU and GPU separation can both hit the same incompatible package pair.
+    </div>
+  </section>
+
+  <section>
+    <h2>Proposed fix</h2>
+    <div class="steps">
+      <article class="step">
+        <h3>Ship one exact NumPy version that is known to work <span class="priority">required</span></h3>
+        <p>Pin the base bundle to NumPy 2.4.4 in the release build and the project dependency list. The current development runtime already runs NumPy 2.4.4 with Numba 0.65.1 successfully.</p>
+        <p class="why">Consequence: every installer contains the same compatible files; a later NumPy release cannot silently enter a release build.</p>
+      </article>
+      <article class="step">
+        <h3>Make setup repair the files Python loads, not trust version records <span class="priority">required</span></h3>
+        <p>Before reporting audio as ready, launch a clean probe that imports NumPy and Numba together and reads their loaded versions. If that probe fails, force-reinstall NumPy 2.4.4 and remove stale NumPy version-record folders.</p>
+        <p class="why">Consequence: this existing installation repairs itself instead of reading the old 2.4.4 record and falsely passing.</p>
+      </article>
+      <article class="step">
+        <h3>Apply the same pin in CPU and GPU setup paths <span class="priority">required</span></h3>
+        <p>Both setup modes install the audio stack. Both must enforce the same NumPy version, including dependency repair after an update.</p>
+        <p class="why">Consequence: changing modes cannot recreate the mismatch, and CPU users receive equivalent behavior.</p>
+      </article>
+      <article class="step">
+        <h3>Stop hiding the original processing error</h3>
+        <p>When separation returns no files, preserve the last specific separator failure and show it in Settings or the extraction result. Keep the generic message only when no underlying error exists.</p>
+        <p class="why">Consequence: if another package collision occurs, the user sees the actionable cause instead of a misleading output symptom.</p>
+      </article>
+      <article class="step">
+        <h3>Reject incompatible release bundles before publishing</h3>
+        <p>Add a release check that imports the bundled NumPy code, verifies the exact expected version, and fails the build if it differs. Add a regression test where old and new version records coexist but the loaded code is incompatible.</p>
+        <p class="why">Consequence: this failure is caught in the release job and in the updater-overwrite scenario before users receive it.</p>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Repair choice</h2>
+    <div class="decision">
+      <article class="card good">
+        <h3>Recommended: fix and release together</h3>
+        <p>Repair the current installed runtime, pin NumPy 2.4.4 in the bundle and both setup modes, add the real import probe, and add the release guard. Then test separation once on GPU and once in CPU mode.</p>
+        <p class="source">This fixes today's installation and prevents the next silent update from restoring the problem.</p>
+      </article>
+      <article class="card warn">
+        <h3>Temporary recovery only</h3>
+        <p>Force-reinstall NumPy 2.4.4 in the installed app and remove the extra NumPy version records.</p>
+        <p class="source">Separation should work immediately, but another release built with unconstrained NumPy can overwrite it again.</p>
+      </article>
+    </div>
+  </section>
+
+  <footer>
+    Diagnosis is read-only. No application source or installed package was changed. The only added file is this report.
+  </footer>
+</main>
+</body>
+</html>
