@@ -29,7 +29,9 @@
    26. LOGS PANEL
    27. HISTORY ROW
    28. COMPACT SIDEBAR OVERRIDES
-   29. RESPONSIVE: max-width 860px
+   29. (retired) RESPONSIVE BREAKPOINTS — see lib/uiScale.ts: the page now
+       zooms to fit the window, so the CSS viewport never drops below
+       1440x900 and width-based media queries can never match.
    30. SETTINGS PANEL
    31. SETUP WIZARD
    32. CLIP SERVER BADGE

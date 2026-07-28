@@ -250,6 +250,7 @@ Active under `html.bright-ink` (`App.tsx:267`, toggle in `BackgroundCustomizer.t
 7. **Clips**: material on `.clip-extractor-rail`.
 8. **Downloader queue**: material on `.download-queue-panel`.
 9. **Home**: material on `.home-grid`; hero halo.
+10. **Frame interpolation** (added after the original phase list): material on `.interpolate-queue-pane` + `.interpolate-controls`. This page shipped in v0.14.0 without carriers — over a bright wallpaper the whole controls column washed out and its 10-11px labels became unreadable. Any NEW page must be added to both carrier lists in `material.css` at build time, not retrofitted.
 Each step independently shippable; risk per step: low. Verify each page on bright, dark, and video wallpapers; count live backdrop elements ≤8.
 
 **Phase 3 — halo & forced-white retirement.** Prune `base.css:199-250` down to the keep list (§2b); delete dead selectors (`setting-row-label`, `setting-row-description`, `settings-section-label`, `audio-status-line`). Add `.home-hero-*` halo. Risk: low; regressions visible immediately on a white-wallpaper sweep of every page.
