@@ -304,6 +304,89 @@ def test_summarize_command_error_empty_lines_uses_exit_code():
 
 
 # ---------------------------------------------------------------------------
+# install_setup — the run must check its own work, not only plan it
+# ---------------------------------------------------------------------------
+
+
+def _patch_install_setup(mocker, *, numeric_states, installs=None):
+    """Wire install_setup up to fake commands and a scripted health check.
+
+    `numeric_states` is consumed one entry per check, so a test can say
+    "healthy before the run, broken after it, healthy once repaired".
+    """
+    m = _get_setup()
+    ran = []
+
+    mocker.patch("amv_audio.setup._fix_pth_file")
+    mocker.patch("amv_audio.setup._ensure_installer_for")
+    mocker.patch("amv_audio.setup._ensure_pip")
+    mocker.patch("amv_audio.setup._prune_stale_numeric_metadata")
+    mocker.patch("amv_audio.setup._prune_unused_package_dirs")
+    mocker.patch("amv_audio.setup.installer.prune_cache")
+    mocker.patch("amv_audio.setup.apply_success_mode")
+    mocker.patch(
+        "amv_audio.setup.collect_setup_plan",
+        return_value={"mode": "cpu", "rows": [], "issues": [], "installs": installs or [["fake-install"]],
+                      "success_mode": None, "gpu_name": None},
+    )
+    mocker.patch(
+        "amv_audio.setup._numeric_runtime_ready", side_effect=list(numeric_states)
+    )
+
+    def fake_stream(cmd, step, total, progress_callback):
+        ran.append(cmd)
+        return 0, []
+
+    mocker.patch("amv_audio.setup._run_command_streaming", side_effect=fake_stream)
+    return m, ran
+
+
+def test_a_step_that_breaks_numpy_is_repaired_before_the_switch_reports_success(mocker):
+    """Regression: the real GPU -> CPU switch shipped a broken audio engine.
+
+    The step list is worked out before anything is installed, so a step that
+    moves NumPy mid-run can never be repaired by that list. The run has to
+    check afterwards.
+    """
+    # Healthy at plan time is irrelevant here: the first call happens after the
+    # installs, and finds the damage. The second call confirms the repair.
+    m, ran = _patch_install_setup(mocker, numeric_states=[False, True])
+
+    result = m.install_setup("cpu", lambda *args: None)
+
+    assert result["ok"] is True
+    repair_steps = [cmd for cmd in ran if any("numpy==" in str(part) for part in cmd)]
+    assert repair_steps, "the run must restore the tested NumPy/Numba pair itself"
+    assert any("numba==0.65.1" in str(part) for part in repair_steps[0])
+
+
+def test_an_untouched_numeric_runtime_costs_no_extra_install(mocker):
+    m, ran = _patch_install_setup(mocker, numeric_states=[True])
+
+    m.install_setup("cpu", lambda *args: None)
+
+    assert ran == [["fake-install"]]
+
+
+def test_a_switch_whose_repair_does_not_take_fails_loudly(mocker):
+    """Better a visible error than a saved mode with a dead audio engine."""
+    m, _ran = _patch_install_setup(mocker, numeric_states=[False, False])
+
+    with pytest.raises(RuntimeError, match="cannot load"):
+        m.install_setup("cpu", lambda *args: None)
+
+
+def test_the_mode_is_not_saved_when_the_repair_fails(mocker):
+    m, _ran = _patch_install_setup(mocker, numeric_states=[False, False])
+    applied = mocker.patch("amv_audio.setup.apply_success_mode")
+
+    with pytest.raises(RuntimeError):
+        m.install_setup("cpu", lambda *args: None)
+
+    applied.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # apply_success_mode — config mutation
 # ---------------------------------------------------------------------------
 

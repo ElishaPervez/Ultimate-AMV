@@ -260,7 +260,10 @@ def _run_with_fallback(cmd, progress_callback, failure_event, failure_message):
 
 
 def _run_pip_install(args, progress_callback=None):
-    cmd = installer.install_cmd(args)
+    # Pinned even though this only installs what is missing: resolving one new
+    # package can still drag NumPy or PyTorch off the tested versions as a side
+    # effect, and the audio engine stops loading when that happens.
+    cmd = installer.install_cmd(args, constraints=installer.runtime_constraints_file())
     _ensure_installer(cmd, progress_callback)
     add_log("deps.repair.step", "Running dependency repair command", details={"command": cmd})
     if progress_callback:
@@ -507,12 +510,18 @@ def _install_torch(gpu, progress_callback=None, force=False):
     from .gpu import TORCH_CPU_INDEX, TORCH_CUDA_INDEX
 
     index_url = TORCH_CUDA_INDEX if gpu else TORCH_CPU_INDEX
+    # Scoped to the PyTorch packages: the unscoped form lets uv rewrite every
+    # package in their dependency chain, which is how an unrelated library
+    # ends up downgraded to whatever PyTorch's own download site happens to
+    # carry.
+    names = [package.split("==")[0] for package in TORCH_PACKAGES] if force else None
     _run_prepared_install(
         installer.install_cmd(
             TORCH_PACKAGES,
             index_url=index_url,
-            upgrade=force,
-            reinstall=force,
+            upgrade_packages=names,
+            reinstall_packages=names,
+            constraints=installer.runtime_constraints_file(),
         ),
         progress_callback,
     )
@@ -590,7 +599,12 @@ def _install_runtime(gpu, progress_callback=None):
     if _package_exists(opposite):
         _run_pip_uninstall([opposite], progress_callback)
     _run_prepared_install(
-        installer.install_cmd([wanted], upgrade=True, reinstall=True),
+        installer.install_cmd(
+            [wanted],
+            upgrade_packages=[wanted],
+            reinstall_packages=[wanted],
+            constraints=installer.runtime_constraints_file(),
+        ),
         progress_callback,
     )
 

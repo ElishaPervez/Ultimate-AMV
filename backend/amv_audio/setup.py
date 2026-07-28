@@ -5,7 +5,12 @@ import importlib.util
 
 from . import installer
 from .config import load_config, save_config
-from .gpu import check_nvidia_gpu, get_cpu_switch_cmds, get_gpu_switch_cmds
+from .gpu import (
+    check_nvidia_gpu,
+    get_cpu_switch_cmds,
+    get_gpu_switch_cmds,
+    get_numeric_runtime_repair_cmd,
+)
 from .dependencies import (
     AUDIO_RUNTIME_MODULES,
     _numeric_runtime_ready,
@@ -343,27 +348,7 @@ def install_setup(mode, progress_callback):
     for index, cmd in enumerate(installs, start=1):
         progress_callback(index, total, "running", " ".join(cmd))
         add_log("audio.setup.step", f"Running setup step {index}/{total}", details={"mode": mode, "command": cmd})
-        _ensure_installer_for(cmd, progress_callback)
-        returncode, output_lines = _run_command_streaming(cmd, index, total, progress_callback)
-
-        if returncode != 0:
-            # The fast installer is downloaded on demand, so on some machines
-            # it is absent, quarantined or broken while the bundled one works
-            # fine. Retry that step with the bundled installer rather than
-            # failing a setup that can still succeed.
-            fallback = installer.to_pip_cmd(cmd)
-            if fallback is not None:
-                add_log(
-                    "audio.setup.step.fallback",
-                    f"Step {index}/{total} retrying with the bundled installer",
-                    level="warning",
-                    details={"mode": mode, "error": _summarize_command_error(output_lines, returncode)},
-                )
-                progress_callback(index, total, "running", "Retrying with the bundled installer...")
-                _ensure_pip(progress_callback)
-                returncode, output_lines = _run_command_streaming(
-                    fallback, index, total, progress_callback
-                )
+        returncode, output_lines = _run_step(cmd, index, total, mode, progress_callback)
 
         if returncode != 0:
             error = _summarize_command_error(output_lines, returncode)
@@ -373,13 +358,110 @@ def install_setup(mode, progress_callback):
         progress_callback(index, total, "done", f"Step {index}/{total} complete")
         add_log("audio.setup.step.complete", f"Setup step {index}/{total} complete", details={"mode": mode})
 
+    _restore_numeric_runtime(mode, total, progress_callback)
     _prune_stale_numeric_metadata()
     _prune_unused_package_dirs()
     # Drop cache entries nothing points at any more. Silent by design: it only
     # removes what is unreferenced, so there is nothing for a user to decide.
     installer.prune_cache()
+
+    final_plan = collect_setup_plan(mode)
+    if final_plan["issues"]:
+        # The mode is still saved: the user asked for it, most of it worked,
+        # and the Settings panel offers the repair. Logging it means a switch
+        # that leaves something broken is findable afterwards instead of only
+        # visible in the moment.
+        add_log(
+            "audio.setup.incomplete",
+            "Setup finished with unresolved issues",
+            level="warning",
+            details={"mode": mode, "issues": final_plan["issues"]},
+        )
     apply_success_mode(mode)
-    return {"ok": True, "mode": mode, "plan": collect_setup_plan(mode)}
+    return {"ok": True, "mode": mode, "plan": final_plan}
+
+
+def _run_step(cmd, index, total, mode, progress_callback):
+    """Run one setup command, retrying through the bundled installer.
+
+    The fast installer is downloaded on demand, so on some machines it is
+    absent, quarantined or broken while the bundled one works fine. Retrying
+    keeps such a user on the slow install instead of failing a setup that can
+    still succeed.
+    """
+    _ensure_installer_for(cmd, progress_callback)
+    returncode, output_lines = _run_command_streaming(cmd, index, total, progress_callback)
+    if returncode == 0:
+        return returncode, output_lines
+
+    fallback = installer.to_pip_cmd(cmd)
+    if fallback is None:
+        return returncode, output_lines
+
+    add_log(
+        "audio.setup.step.fallback",
+        f"Step {index}/{total} retrying with the bundled installer",
+        level="warning",
+        details={"mode": mode, "error": _summarize_command_error(output_lines, returncode)},
+    )
+    progress_callback(index, total, "running", "Retrying with the bundled installer...")
+    _ensure_pip(progress_callback)
+    return _run_command_streaming(fallback, index, total, progress_callback)
+
+
+def _restore_numeric_runtime(mode, total, progress_callback):
+    """Put NumPy and Numba back on the tested pair if a step moved them.
+
+    The step list is decided before anything is installed, so a repair for
+    damage done *during* the run can never appear in it. An install can still
+    pull NumPy forward as a side effect of resolving something else, and Numba
+    then refuses to load, which stops audio separation. Without this check the
+    switch saves the new mode and reports success on an engine that cannot
+    start, and the user has to notice the repair prompt themselves.
+    """
+    if _numeric_runtime_ready():
+        return
+
+    add_log(
+        "audio.setup.numeric_runtime.repair",
+        "A setup step moved NumPy or Numba off the tested pair; restoring it",
+        level="warning",
+        details={"mode": mode},
+    )
+    progress_callback(total, total, "running", "Restoring the tested NumPy/Numba pair...")
+
+    cmd = get_numeric_runtime_repair_cmd()
+    returncode, output_lines = _run_step(cmd, total, total, mode, progress_callback)
+    if returncode != 0:
+        error = _summarize_command_error(output_lines, returncode)
+        progress_callback(total, total, "error", error)
+        add_log(
+            "audio.setup.numeric_runtime.error",
+            "Could not restore the NumPy/Numba pair",
+            level="error",
+            details={"mode": mode, "error": error},
+        )
+        raise RuntimeError(error)
+
+    if not _numeric_runtime_ready():
+        error = (
+            "Setup finished, but the audio engine's NumPy and Numba still cannot load "
+            "together. Close the app completely and run setup again."
+        )
+        progress_callback(total, total, "error", error)
+        add_log(
+            "audio.setup.numeric_runtime.error",
+            error,
+            level="error",
+            details={"mode": mode},
+        )
+        raise RuntimeError(error)
+
+    add_log(
+        "audio.setup.numeric_runtime.repaired",
+        "Restored the tested NumPy/Numba pair",
+        details={"mode": mode},
+    )
 
 
 def _run_command_streaming(cmd, step, total, progress_callback):

@@ -1,6 +1,6 @@
 import subprocess
 
-from .installer import install_cmd, torch_constraints_file, uninstall_cmd
+from .installer import install_cmd, runtime_constraints_file, uninstall_cmd
 from .runtime_versions import (
     NELUX_PACKAGE,
     NUMBA_PACKAGE,
@@ -50,17 +50,28 @@ TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 
 
+def _package_names(packages):
+    return [package.split("==")[0] for package in packages]
+
+
 def get_torch_install_cmd(gpu):
     # Reinstall + upgrade swaps a +cpu build for a +cu128 build (or the other
     # way) in one shot. The replacement is downloaded before the existing
     # install is touched, so a network failure mid-repair leaves the prior
     # working install in place instead of an empty hole the Settings panel
     # reports as "missing".
+    #
+    # Both are scoped to the three PyTorch packages. Left unscoped, uv reads
+    # them as applying to everything it resolves, so one mode switch rewrote
+    # all 14 packages in PyTorch's dependency chain and took their versions
+    # from PyTorch's own download site -- which quietly downgraded
+    # typing_extensions on the way past.
     return install_cmd(
         TORCH_PACKAGES,
         index_url=TORCH_CUDA_INDEX if gpu else TORCH_CPU_INDEX,
-        upgrade=True,
-        reinstall=True,
+        upgrade_packages=_package_names(TORCH_PACKAGES),
+        reinstall_packages=_package_names(TORCH_PACKAGES),
+        constraints=runtime_constraints_file(),
     )
 
 
@@ -73,10 +84,15 @@ def get_numeric_runtime_repair_cmd():
     # older version record behind. Forcing the reinstall is required because a
     # normal install trusts that stale record and reports the broken
     # environment as already satisfied.
+    #
+    # Deliberately the blunt form: this is the last-resort repair, and it has
+    # to rewrite the compiler layer Numba loads as well as the two packages
+    # named here. The pin file is what keeps the blunt form from overshooting.
     return install_cmd(
         [NUMPY_PACKAGE, NUMBA_PACKAGE],
         upgrade=True,
         reinstall=True,
+        constraints=runtime_constraints_file(),
     )
 
 
@@ -122,7 +138,7 @@ def get_gpu_switch_cmds(
                     *AUDIO_RUNTIME_PACKAGES,
                 ],
                 upgrade=True,
-                constraints=torch_constraints_file(),
+                constraints=runtime_constraints_file(),
             )
         )
     if force_reinstall_nelux:
@@ -155,7 +171,18 @@ def get_cpu_switch_cmds(
     if reinstall_torch:
         cmds.append(get_torch_install_cmd(False))
     if install_onnxruntime:
-        cmds.append(install_cmd(["onnxruntime"], upgrade=True))
+        # Scoped, and carrying the pin file. This is the step that killed the
+        # audio engine on a GPU -> CPU switch: told simply to "upgrade", uv
+        # also pulled NumPy to the newest release on the index, Numba cannot
+        # load against it, and audio separation was dead the moment the switch
+        # reported success.
+        cmds.append(
+            install_cmd(
+                ["onnxruntime"],
+                upgrade_packages=["onnxruntime"],
+                constraints=runtime_constraints_file(),
+            )
+        )
     if install_audio_separator:
         # CPU mode: install audio-separator and scenedetect. Constrained for
         # the same reason as the GPU path — see get_gpu_switch_cmds. CPU mode
@@ -170,7 +197,7 @@ def get_cpu_switch_cmds(
                     *AUDIO_RUNTIME_PACKAGES,
                 ],
                 upgrade=True,
-                constraints=torch_constraints_file(),
+                constraints=runtime_constraints_file(),
             )
         )
     if repair_numeric_runtime:

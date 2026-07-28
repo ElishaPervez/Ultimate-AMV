@@ -173,15 +173,71 @@ def test_constraints_survive_the_rewrite_to_pip(with_uv, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The PyTorch pin — the audio step must not drag PyTorch off its tested build
+# Scoped upgrades — uv applies a bare --upgrade to everything it resolves
 # ---------------------------------------------------------------------------
 
 
-def test_torch_constraints_file_lists_every_pinned_torch_package(tmp_path):
-    path = installer_mod.torch_constraints_file()
+def test_uv_upgrade_can_be_limited_to_named_packages(with_uv):
+    """Regression: a bare --upgrade let uv move packages nobody asked about.
+
+    Installing the CPU ONNX runtime with a bare --upgrade also pulled NumPy to
+    the newest release on the index. Numba cannot load against it, so audio
+    separation died the moment a GPU -> CPU switch reported success.
+    """
+    cmd = installer_mod.install_cmd(["onnxruntime"], upgrade_packages=["onnxruntime"])
+    assert "--upgrade" not in cmd, "the blanket form is what moved NumPy"
+    assert cmd[cmd.index("--upgrade-package") + 1] == "onnxruntime"
+
+
+def test_uv_reinstall_can_be_limited_to_named_packages(with_uv):
+    cmd = installer_mod.install_cmd(["torch"], reinstall_packages=["torch"])
+    assert "--reinstall" not in cmd
+    assert cmd[cmd.index("--reinstall-package") + 1] == "torch"
+
+
+def test_pip_needs_no_scoping_because_it_never_upgrades_eagerly(without_uv):
+    """pip only replaces a dependency the new requirement cannot live with."""
+    cmd = installer_mod.install_cmd(["onnxruntime"], upgrade_packages=["onnxruntime"])
+    assert "--upgrade" in cmd
+    assert "--upgrade-package" not in cmd
+
+
+def test_scoped_flags_survive_the_rewrite_to_pip(with_uv):
+    uv_cmd = installer_mod.install_cmd(
+        ["torch"], upgrade_packages=["torch"], reinstall_packages=["torch"]
+    )
+    pip_cmd = installer_mod.to_pip_cmd(uv_cmd)
+
+    assert "--upgrade" in pip_cmd
+    assert "--force-reinstall" in pip_cmd
+    # The package names that followed the uv-only switches must not survive as
+    # loose arguments, or pip would try to install "torch" twice.
+    assert pip_cmd.count("torch") == 1
+    assert "--upgrade-package" not in pip_cmd
+    assert "--reinstall-package" not in pip_cmd
+
+
+def test_blanket_and_scoped_upgrades_do_not_double_up_in_the_pip_rewrite(with_uv):
+    pip_cmd = installer_mod.to_pip_cmd(
+        installer_mod.install_cmd(["numpy"], upgrade=True, upgrade_packages=["numpy"])
+    )
+    assert pip_cmd.count("--upgrade") == 1
+
+
+# ---------------------------------------------------------------------------
+# The version pin — no install may move the tested PyTorch/NumPy/Numba set
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_constraints_file_pins_the_whole_tested_set(tmp_path):
+    path = installer_mod.runtime_constraints_file()
     body = path.read_text(encoding="utf-8")
     for package in installer_mod.TORCH_PACKAGES:
         assert package in body
+    # NumPy and Numba are pinned for the same reason PyTorch is: an install
+    # that resolves them as a side effect must not be able to move them.
+    assert installer_mod.NUMPY_PACKAGE in body
+    assert installer_mod.NUMBA_PACKAGE in body
 
 
 @pytest.mark.parametrize("gpu", [True, False])
@@ -214,6 +270,91 @@ def test_audio_step_is_constrained_so_it_cannot_move_torch(with_uv, gpu):
         assert "-c" in cmd, "the audio step must carry the PyTorch constraint"
         constraint_body = open(cmd[cmd.index("-c") + 1], encoding="utf-8").read()
         assert "torch==" in constraint_body
+
+
+def _all_switch_install_cmds():
+    """Every install command either mode switch can plan, all options on."""
+    plans = [
+        gpu_mod.get_gpu_switch_cmds(
+            reinstall_torch=True,
+            cleanup_cpu_runtime=True,
+            install_audio_separator=True,
+            force_reinstall_nelux=True,
+            repair_numeric_runtime=True,
+        ),
+        gpu_mod.get_cpu_switch_cmds(
+            reinstall_torch=True,
+            cleanup_gpu_runtime=True,
+            install_onnxruntime=True,
+            install_audio_separator=True,
+            repair_numeric_runtime=True,
+        ),
+    ]
+    return [cmd for plan in plans for cmd in plan if "install" in cmd]
+
+
+@pytest.mark.parametrize("uv", [True, False])
+def test_no_switch_step_can_move_numpy_or_numba(request, uv):
+    """The guard for the whole class of bug, not just the one that bit.
+
+    Every install a mode switch can run must either name the NumPy and Numba
+    versions itself or carry the pin file. One step that did neither -- the
+    CPU ONNX runtime install -- replaced NumPy with a release Numba refuses to
+    load against, and the switch reported success on a dead audio engine.
+    """
+    request.getfixturevalue("with_uv" if uv else "without_uv")
+
+    for cmd in _all_switch_install_cmds():
+        if "--no-deps" in cmd:
+            # Nothing else is resolved, so nothing else can be moved.
+            continue
+        assert "-c" in cmd, f"unpinned install with no constraint file: {' '.join(cmd)}"
+        body = open(cmd[cmd.index("-c") + 1], encoding="utf-8").read()
+        assert installer_mod.NUMPY_PACKAGE in body
+        assert installer_mod.NUMBA_PACKAGE in body
+
+
+@pytest.mark.parametrize("uv", [True, False])
+def test_no_switch_step_can_move_torch(request, uv):
+    """Same guard for PyTorch: the audio packages depend on it."""
+    request.getfixturevalue("with_uv" if uv else "without_uv")
+
+    for cmd in _all_switch_install_cmds():
+        joined = " ".join(cmd)
+        if all(package in cmd for package in gpu_mod.TORCH_PACKAGES):
+            continue
+        if "--no-deps" in cmd:
+            # Nothing is resolved, so nothing can be moved.
+            continue
+        assert "-c" in cmd, f"unpinned install with no constraint file: {joined}"
+        body = open(cmd[cmd.index("-c") + 1], encoding="utf-8").read()
+        for package in gpu_mod.TORCH_PACKAGES:
+            assert package in body
+
+
+def test_the_cpu_runtime_step_carries_the_pin(with_uv):
+    """The exact step that broke the audio engine on a GPU -> CPU switch."""
+    cmds = gpu_mod.get_cpu_switch_cmds(
+        reinstall_torch=False,
+        cleanup_gpu_runtime=False,
+        install_onnxruntime=True,
+        install_audio_separator=False,
+    )
+    assert len(cmds) == 1
+    step = cmds[0]
+    assert "--upgrade" not in step, "a blanket upgrade is what moved NumPy"
+    assert step[step.index("--upgrade-package") + 1] == "onnxruntime"
+    body = open(step[step.index("-c") + 1], encoding="utf-8").read()
+    assert installer_mod.NUMPY_PACKAGE in body
+
+
+def test_the_torch_swap_only_rewrites_the_torch_packages(with_uv):
+    """It used to rewrite all 14 packages in the chain and downgrade one."""
+    cmd = gpu_mod.get_torch_install_cmd(gpu=False)
+    assert "--reinstall" not in cmd
+    assert "--upgrade" not in cmd
+    scoped = {cmd[i + 1] for i, token in enumerate(cmd) if token == "--reinstall-package"}
+    assert scoped == {"torch", "torchvision", "torchaudio"}
 
 
 def test_switch_plans_still_pin_the_torch_versions(with_uv):

@@ -23,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .runtime_versions import TORCH_PACKAGES
+from .runtime_versions import NUMBA_PACKAGE, NUMPY_PACKAGE, TORCH_PACKAGES
 
 _UV_EXE = "uv.exe" if os.name == "nt" else "uv"
 
@@ -124,20 +124,28 @@ def subprocess_env():
     return env
 
 
-def torch_constraints_file():
-    """A constraints file pinning the PyTorch trio, written on demand.
+def runtime_constraints_file():
+    """A constraints file pinning every version no install is allowed to move.
 
-    Needed because the audio step installs from the public index with
-    --upgrade, and that pulls PyTorch forward to a generic build: no CUDA, and
-    a version the GPU clip engine refuses to load against. A constraint keeps
-    the pinned build in place. It does not force a CUDA build to be replaced
-    by a CPU one, because "==2.11.0" is satisfied by "2.11.0+cu128".
+    Hand this to every install command. Installs run with --upgrade, and uv
+    applies that to every package it resolves, not only the ones named on the
+    command line. Unpinned, installing something as unrelated as the CPU ONNX
+    runtime pulls NumPy forward to the newest release on the index; Numba
+    refuses to load against it, and audio separation stops working the moment
+    a mode switch reports success.
+
+    PyTorch is pinned for the same reason: several audio packages depend on
+    it, and an unconstrained upgrade replaces the tested build with a generic
+    one that has no CUDA in it and a version the GPU clip engine cannot load
+    against. It does not force a CUDA build to be replaced by a CPU one,
+    because "==2.11.0" is satisfied by "2.11.0+cu128".
 
     Deterministic name so repeated runs overwrite one file instead of leaving
     a trail of them.
     """
-    path = Path(tempfile.gettempdir()) / "ultimate-amv-torch-pin.txt"
-    path.write_text("\n".join(TORCH_PACKAGES) + "\n", encoding="utf-8")
+    path = Path(tempfile.gettempdir()) / "ultimate-amv-runtime-pin.txt"
+    pins = [*TORCH_PACKAGES, NUMPY_PACKAGE, NUMBA_PACKAGE]
+    path.write_text("\n".join(pins) + "\n", encoding="utf-8")
     return path
 
 
@@ -147,12 +155,23 @@ def install_cmd(
     index_url=None,
     upgrade=False,
     reinstall=False,
+    upgrade_packages=None,
+    reinstall_packages=None,
     no_deps=False,
     constraints=None,
     force_pip=False,
 ):
-    """Build an install command for whichever installer is active."""
+    """Build an install command for whichever installer is active.
+
+    `upgrade`/`reinstall` are the blunt forms: with uv they apply to every
+    package in the resolution, so they can move libraries nobody asked about.
+    `upgrade_packages`/`reinstall_packages` name exactly which packages may be
+    moved and leave everything else where it is. Prefer the scoped forms
+    whenever the command exists to change specific packages.
+    """
     packages = list(packages)
+    upgrade_packages = list(upgrade_packages or [])
+    reinstall_packages = list(reinstall_packages or [])
     use_uv = not force_pip and active_installer() == "uv"
 
     if use_uv:
@@ -167,17 +186,24 @@ def install_cmd(
         ]
         if upgrade:
             cmd.append("--upgrade")
+        for name in upgrade_packages:
+            cmd.extend(["--upgrade-package", name])
         if reinstall:
             # uv's --reinstall is the equivalent of pip's --force-reinstall:
             # it replaces the files even when the recorded version already
             # matches, which is the whole point when a bad update left the
             # records and the files disagreeing.
             cmd.append("--reinstall")
+        for name in reinstall_packages:
+            cmd.extend(["--reinstall-package", name])
     else:
         cmd = [sys.executable, "-I", "-m", "pip", "install"]
-        if upgrade:
+        if upgrade or upgrade_packages:
+            # pip needs no scoping here: it only replaces a dependency that
+            # the new requirement cannot live with, so an upgrade of one
+            # package already leaves the rest of the environment alone.
             cmd.append("--upgrade")
-        if reinstall:
+        if reinstall or reinstall_packages:
             cmd.append("--force-reinstall")
 
     if no_deps:
@@ -236,17 +262,30 @@ def to_pip_cmd(cmd):
         out.append("-y")
 
     skip_next = False
-    for index, token in enumerate(rest):
+    for token in rest:
         if skip_next:
             skip_next = False
             continue
-        if token in {"--python"}:
+        if token == "--python":
             skip_next = True
             continue
         if token in {"--no-config", "--no-progress"}:
             continue
-        if token == "--reinstall":
-            out.append("--force-reinstall")
+        if token in {"--upgrade", "--upgrade-package"}:
+            # pip has no per-package upgrade switch and does not need one: its
+            # upgrade only touches a dependency the new requirement cannot
+            # live with. Drop the package name that follows the scoped form.
+            skip_next = token == "--upgrade-package"
+            if "--upgrade" not in out:
+                out.append("--upgrade")
+            continue
+        if token in {"--reinstall", "--reinstall-package"}:
+            # pip cannot scope a forced reinstall -- it rewrites the
+            # dependencies too. That is what it always did before uv existed,
+            # so the fallback is no worse than the old behaviour.
+            skip_next = token == "--reinstall-package"
+            if "--force-reinstall" not in out:
+                out.append("--force-reinstall")
             continue
         out.append(token)
     return out
