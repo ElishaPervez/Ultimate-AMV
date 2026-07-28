@@ -188,30 +188,43 @@ def _audio_runtime_missing(module_name, package_name):
 
 
 def _stream_command(cmd, progress_callback):
-    """Run one installer command, streaming its output into the log and UI."""
+    """Run one installer command, streaming its output into the log and UI.
+
+    A command that cannot start at all has to come back as a failed exit code
+    rather than an exception. The retry that follows only looks at the exit
+    code, and the case it exists for -- antivirus removing the downloaded
+    installer between choosing it and running it -- shows up exactly here, as
+    a file that is suddenly not there.
+    """
     append_terminal_log(f"$ {' '.join(cmd)}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace",
-        env=installer.subprocess_env(),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
     output_lines = []
-    assert process.stdout is not None
-    for raw_line in process.stdout:
-        line = raw_line.rstrip()
-        if not line:
-            continue
-        output_lines.append(line)
-        append_terminal_log(line)
-        if progress_callback:
-            progress_callback("dependency-repair", -1, line)
-    return process.wait(timeout=1200), output_lines
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=installer.subprocess_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
+            append_terminal_log(line)
+            if progress_callback:
+                progress_callback("dependency-repair", -1, line)
+        return process.wait(timeout=1200), output_lines
+    except (OSError, subprocess.SubprocessError) as error:
+        message = f"error: could not run the installer: {error}"
+        output_lines.append(message)
+        append_terminal_log(message)
+        return 1, output_lines
 
 
 def _run_with_fallback(cmd, progress_callback, failure_event, failure_message):
@@ -338,9 +351,6 @@ def _ensure_pip(progress_callback=None):
     finally:
         os.unlink(tmp.name)
 
-
-def _summarize_command_error(output_lines, code):
-    return installer.summarize_failure(output_lines, code)
 
 
 def _numeric_runtime_probe_error():
@@ -494,7 +504,9 @@ def _torch_import_error():
 
 
 def _install_torch(gpu, progress_callback=None, force=False):
-    index_url = "https://download.pytorch.org/whl/cu128" if gpu else "https://download.pytorch.org/whl/cpu"
+    from .gpu import TORCH_CPU_INDEX, TORCH_CUDA_INDEX
+
+    index_url = TORCH_CUDA_INDEX if gpu else TORCH_CPU_INDEX
     _run_prepared_install(
         installer.install_cmd(
             TORCH_PACKAGES,
@@ -562,16 +574,25 @@ def _runtime_ready(gpu):
 
 
 def _install_runtime(gpu, progress_callback=None):
-    # onnxruntime and onnxruntime-gpu ship the same module directory, so
-    # installing one next to the other leaves two dists claiming the same
-    # files and the loser's metadata lying about what is on disk. Remove
-    # whatever runtime dists exist before installing the wanted one.
-    installed = [
-        name for name in ("onnxruntime", "onnxruntime-gpu") if _package_exists(name)
-    ]
-    if installed:
-        _run_pip_uninstall(installed, progress_callback)
-    _run_pip_install(["onnxruntime-gpu" if gpu else "onnxruntime"], progress_callback)
+    # The CPU and GPU ONNX runtimes ship the same module directory, so having
+    # both installed leaves two records claiming the same files and the loser
+    # describing something that is not on disk. Only the unwanted one is
+    # removed: removing the wanted one first would mean a failed download
+    # leaves the user with no runtime at all, which is the situation the
+    # install-over rule exists to prevent.
+    #
+    # The wanted one is then reinstalled outright rather than installed,
+    # because removing its twin can take shared files with it while leaving
+    # its record intact -- and a plain install trusts that record and does
+    # nothing.
+    wanted = "onnxruntime-gpu" if gpu else "onnxruntime"
+    opposite = "onnxruntime" if gpu else "onnxruntime-gpu"
+    if _package_exists(opposite):
+        _run_pip_uninstall([opposite], progress_callback)
+    _run_prepared_install(
+        installer.install_cmd([wanted], upgrade=True, reinstall=True),
+        progress_callback,
+    )
 
 
 def missing_feature_dependencies(feature, gpu=False):
@@ -694,7 +715,7 @@ def repair_missing_module(module_name, gpu=False, progress_callback=None):
     if module_name == "torch":
         _install_torch(gpu, progress_callback, force=_module_exists("torch"))
     elif module_name == "onnxruntime":
-        _install_runtime(gpu, progress_callback, force=_module_exists("onnxruntime"))
+        _install_runtime(gpu, progress_callback)
     else:
         _run_pip_install([package_name], progress_callback)
     return True

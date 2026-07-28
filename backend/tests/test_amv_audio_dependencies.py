@@ -224,29 +224,44 @@ def test_repair_missing_module_rembg_cpu_installs_plain_package(mocker):
 # ---------------------------------------------------------------------------
 
 
-def test_install_runtime_uninstalls_existing_dists_first(mocker):
-    """Both runtime dists ship the same module path; installing one over the
-    other corrupts pip's view of what is on disk. The repair must wipe both
-    before installing the wanted variant."""
+def test_install_runtime_removes_only_the_opposite_variant(mocker):
+    """Both runtime variants ship the same module path, so the unwanted one
+    has to go before the wanted one is installed. The wanted one must NOT be
+    removed first: a download that fails after that would leave the user with
+    no runtime at all, which is exactly what install-over prevents."""
     mock_uninstall = mocker.patch("amv_audio.dependencies._run_pip_uninstall")
-    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mock_install = mocker.patch("amv_audio.dependencies._run_prepared_install")
     mocker.patch("amv_audio.dependencies._package_exists", return_value=True)
 
     deps_mod._install_runtime(gpu=True)
 
-    assert mock_uninstall.call_args[0][0] == ["onnxruntime", "onnxruntime-gpu"]
-    assert mock_pip.call_args[0][0] == ["onnxruntime-gpu"]
+    assert mock_uninstall.call_args[0][0] == ["onnxruntime"]
+    cmd = mock_install.call_args[0][0]
+    assert "onnxruntime-gpu" in cmd
+    # Removing the twin can take shared files with it while leaving the
+    # wanted variant's record intact, and a plain install trusts that record.
+    assert "--force-reinstall" in cmd or "--reinstall" in cmd
 
 
 def test_install_runtime_skips_uninstall_when_nothing_installed(mocker):
     mock_uninstall = mocker.patch("amv_audio.dependencies._run_pip_uninstall")
-    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+    mock_install = mocker.patch("amv_audio.dependencies._run_prepared_install")
     mocker.patch("amv_audio.dependencies._package_exists", return_value=False)
 
     deps_mod._install_runtime(gpu=False)
 
     mock_uninstall.assert_not_called()
-    assert mock_pip.call_args[0][0] == ["onnxruntime"]
+    assert "onnxruntime" in mock_install.call_args[0][0]
+
+
+def test_repair_missing_onnxruntime_module_does_not_crash(mocker):
+    """Regression: this path passed an argument the function never accepted,
+    so asking it to repair ONNX Runtime raised instead of repairing."""
+    mocker.patch("amv_audio.dependencies._module_exists", return_value=False)
+    mock_runtime = mocker.patch("amv_audio.dependencies._install_runtime")
+
+    assert deps_mod.repair_missing_module("onnxruntime", gpu=True) is True
+    mock_runtime.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

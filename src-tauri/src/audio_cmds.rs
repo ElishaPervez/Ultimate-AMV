@@ -80,29 +80,52 @@ async fn ensure_fast_installer(app: &tauri::AppHandle, window: &tauri::Window) {
         return;
     }
 
-    let _ = window.emit(
-        "audio-setup-progress",
-        json!({
-            "step": 0,
-            "total": 0,
-            "status": "running",
-            "message": "Downloading the package installer (26 MB, first run only)...",
-        }),
-    );
+    // Field names have to match AudioSetupProgress in src/types/audio.ts. The
+    // panels read `state` and call .toUpperCase() on it, so a payload missing
+    // it takes the whole install screen down.
+    let notify = |message: &str| {
+        let _ = window.emit(
+            "audio-setup-progress",
+            json!({
+                "type": "setup-progress",
+                "step": 0,
+                "total": 0,
+                "state": "running",
+                "message": message,
+            }),
+        );
+    };
 
-    if let Err(error) = crate::tools::install_named(
+    notify("Downloading the package installer (26 MB, first run only)...");
+
+    // Bounded on purpose. A proxy or antivirus web shield that black-holes the
+    // connection rather than refusing it would otherwise leave the wizard
+    // waiting forever on a step that is optional by design.
+    let fetch = crate::tools::install_named(
         app,
         window,
         &[crate::tools::UV_TOOL],
         "audio-setup-tools-progress",
-    )
-    .await
-    {
-        log_info(
-            "audio.setup.installer.unavailable",
-            "Fast installer could not be fetched; setup will use the bundled one",
-            json!({ "error": error }),
-        );
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(300), fetch).await {
+        Ok(Ok(())) => notify("Package installer ready."),
+        Ok(Err(error)) => {
+            log_info(
+                "audio.setup.installer.unavailable",
+                "Fast installer could not be fetched; setup will use the bundled one",
+                json!({ "error": error }),
+            );
+            notify("Continuing with the bundled installer.");
+        }
+        Err(_) => {
+            crate::tools::cancel_active_install();
+            log_info(
+                "audio.setup.installer.timeout",
+                "Fast installer download timed out; setup will use the bundled one",
+                json!({ "timeout_secs": 300 }),
+            );
+            notify("Installer download timed out. Continuing with the bundled installer.");
+        }
     }
 }
 

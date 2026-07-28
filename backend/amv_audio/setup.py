@@ -383,28 +383,42 @@ def install_setup(mode, progress_callback):
 
 
 def _run_command_streaming(cmd, step, total, progress_callback):
+    """Run one setup step, streaming its output into the log and the wizard.
+
+    A step that cannot start at all comes back as a failed exit code, not an
+    exception, so the retry below can take over. Antivirus removing the
+    downloaded installer between the moment it was chosen and the moment it
+    runs lands here as a file that is suddenly missing, and that is precisely
+    the case the retry exists for.
+    """
     append_terminal_log(f"$ {' '.join(cmd)}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace",
-        env=installer.subprocess_env(),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
     output_lines = []
-    assert process.stdout is not None
-    for raw_line in process.stdout:
-        line = raw_line.rstrip()
-        if not line:
-            continue
-        output_lines.append(line)
-        append_terminal_log(line)
-        progress_callback(step, total, "running", line)
-    return process.wait(timeout=1200), output_lines
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=installer.subprocess_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
+            append_terminal_log(line)
+            progress_callback(step, total, "running", line)
+        return process.wait(timeout=1200), output_lines
+    except (OSError, subprocess.SubprocessError) as error:
+        message = f"error: could not run the installer: {error}"
+        output_lines.append(message)
+        append_terminal_log(message)
+        return 1, output_lines
 
 
 def _summarize_command_error(output_lines, code):

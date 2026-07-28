@@ -86,6 +86,7 @@ def uv_available(refresh=False):
             [str(path), "--version", "--no-config"],
             capture_output=True,
             timeout=20,
+            env=subprocess_env(),
             creationflags=_NO_WINDOW,
         )
         ok = result.returncode == 0

@@ -86,8 +86,10 @@ pub struct ToolsStatus {
 /// rather than a broken one.
 ///
 /// Pinned to a permanent tagged release. A rotating build URL gets deleted
-/// upstream and starts 404ing. The same version is pinned in bundle-deps.ps1,
-/// manager.bat and .github/workflows/release.yml — bump them together.
+/// upstream and starts 404ing. The version, checksum and size are pinned in
+/// exactly two places — tools.json and bundle-deps.ps1 — and must be bumped
+/// together. Nothing else hardcodes a version: manager.bat and the release
+/// workflow use whichever copy is already on the machine.
 pub(crate) const UV_TOOL: &str = "uv";
 
 static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
@@ -231,8 +233,14 @@ async fn download_with_progress_to(
     url: &str,
     dest: &Path,
 ) -> Result<(), String> {
+    // Timeouts are the difference between "this download failed" and a window
+    // that sits there forever. A proxy or antivirus web shield that drops
+    // packets instead of refusing the connection never completes the
+    // handshake and never errors, so without these the whole gate wedges.
     let client = reqwest::Client::builder()
         .user_agent("UltimateAMV-Tools/1.0")
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|error| format!("Could not build HTTP client: {error}"))?;
 
@@ -484,10 +492,25 @@ fn extract_zip(
                     .map_err(|error| format!("Could not create dir {}: {error}", parent.display()))?;
             }
 
-            let mut out = File::create(&dest)
-                .map_err(|error| format!("Could not create {}: {error}", dest.display()))?;
-            io::copy(&mut entry, &mut out)
-                .map_err(|error| format!("Could not extract {}: {error}", dest.display()))?;
+            // Write beside the target and move it into place, so a copy that
+            // dies partway (disk full, the process killed) cannot leave a
+            // truncated file behind. The presence checks only ask whether the
+            // file exists, so a half-written binary would never be replaced
+            // and the user would silently keep the degraded path forever.
+            let staging = dest.with_extension("partial");
+            let mut out = File::create(&staging)
+                .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
+            io::copy(&mut entry, &mut out).map_err(|error| {
+                let _ = fs::remove_file(&staging);
+                format!("Could not extract {}: {error}", dest.display())
+            })?;
+            out.flush().ok();
+            drop(out);
+            let _ = fs::remove_file(&dest);
+            fs::rename(&staging, &dest).map_err(|error| {
+                let _ = fs::remove_file(&staging);
+                format!("Could not install {}: {error}", dest.display())
+            })?;
             matched = true;
 
             if rule.to.is_some() {
