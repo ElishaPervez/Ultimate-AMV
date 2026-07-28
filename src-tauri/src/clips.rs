@@ -17,7 +17,7 @@ use crate::{
     app_root, apply_python_env, apply_python_env_async, canonical_input_path, clear_child_pid,
     clip_cli_path, cmd, content_fingerprint, emit_conversion_progress, ensure_tool, ffmpeg_listing,
     find_tool, kill_child_pid, log_error, log_info, log_warn, probe_duration,
-    probe_has_audio_stream, probe_media_summary, python_exe, run_ffmpeg_with_progress,
+    probe_has_audio_stream, probe_media_summary, python_exe_checked, run_ffmpeg_with_progress,
     sanitize_path_segment,
     serialize_clip_preview_done, short_stable_id, store_child_pid, truncate_log_text,
     append_app_log, MediaSummary, CLIP_CHILD_PID, CLIP_SERVER, PROXY_BUILD_LOCK, PROXY_CHILD_PID,
@@ -2331,7 +2331,7 @@ pub(crate) async fn warmup_clip_server(app: tauri::AppHandle) -> Result<(), Stri
     }
 
     let root = app_root()?;
-    let mut command = AsyncCommand::new(python_exe(&root));
+    let mut command = AsyncCommand::new(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(clip_cli_path(&root))
@@ -2908,7 +2908,7 @@ fn run_streaming_clip_cli(window: tauri::Window, args: Vec<String>) -> Result<St
         "Starting one-shot clip bridge",
         json!({ "args": &args }),
     );
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(clip_cli_path(&root))
