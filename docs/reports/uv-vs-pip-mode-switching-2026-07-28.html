@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Switching the app from pip to uv — measured on your machine</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2230; --line:#2a3140;
+    --ink:#e7ecf3; --dim:#9aa7b8; --dim2:#6f7d90;
+    --good:#37d399; --bad:#ff6b6b; --warn:#ffc14d; --acc:#6aa9ff; --acc2:#b98cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 28px 90px}
+  h1{font-size:34px;line-height:1.2;margin:0 0 8px;letter-spacing:-.02em}
+  h2{font-size:23px;margin:52px 0 14px;letter-spacing:-.01em;
+     padding-bottom:9px;border-bottom:1px solid var(--line)}
+  h3{font-size:17px;margin:26px 0 8px}
+  p{margin:10px 0}
+  .sub{color:var(--dim);font-size:16px;margin:0 0 26px}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+    padding:3px 9px;border-radius:99px;font-weight:700;vertical-align:middle}
+  .t-ok{background:rgba(55,211,153,.15);color:var(--good);border:1px solid rgba(55,211,153,.35)}
+  .t-warn{background:rgba(255,193,77,.14);color:var(--warn);border:1px solid rgba(255,193,77,.35)}
+  .t-bad{background:rgba(255,107,107,.14);color:var(--bad);border:1px solid rgba(255,107,107,.35)}
+  .t-info{background:rgba(106,169,255,.14);color:var(--acc);border:1px solid rgba(106,169,255,.35)}
+
+  .verdict{background:linear-gradient(135deg,#132a20,#14202b);
+    border:1px solid rgba(55,211,153,.35);border-radius:16px;padding:26px 28px;margin:26px 0 10px}
+  .verdict .big{font-size:27px;font-weight:700;letter-spacing:-.01em;margin:0 0 6px}
+  .verdict p{color:#cfe3d9;margin:8px 0 0}
+
+  .grid{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .card h3{margin-top:0}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;text-align:center}
+  .stat .n{font-size:32px;font-weight:800;letter-spacing:-.02em;line-height:1.1}
+  .stat .l{color:var(--dim);font-size:13px;margin-top:5px}
+
+  /* bar chart */
+  .bars{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 26px;margin:18px 0}
+  .row{display:grid;grid-template-columns:230px 1fr 92px;align-items:center;gap:14px;margin:14px 0}
+  .row .lab{font-size:14px;color:var(--dim)}
+  .row .lab b{display:block;color:var(--ink);font-size:15px;font-weight:600}
+  .track{background:#0b0e13;border-radius:8px;height:30px;overflow:hidden;border:1px solid #232a36}
+  .fill{height:100%;border-radius:7px 0 0 7px;display:block}
+  .f-pip{background:linear-gradient(90deg,#ff6b6b,#ff9a6b)}
+  .f-uv{background:linear-gradient(90deg,#37d399,#6aa9ff)}
+  .row .val{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;font-size:16px}
+
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:600}
+  tr:last-child td{border-bottom:none}
+  code{background:#0b0e13;border:1px solid #232a36;border-radius:5px;padding:1.5px 6px;
+    font:13px/1.5 "Cascadia Code",Consolas,monospace;color:#c6d4e6}
+  .path{display:block;background:#0b0e13;border:1px solid #232a36;border-left:3px solid var(--acc);
+    border-radius:6px;padding:10px 13px;margin:12px 0;
+    font:13px/1.6 "Cascadia Code",Consolas,monospace;color:#c6d4e6;word-break:break-all}
+
+  .flow{display:flex;align-items:stretch;gap:0;margin:18px 0;flex-wrap:wrap}
+  .step{flex:1;min-width:130px;background:var(--panel2);border:1px solid var(--line);
+    padding:14px 15px;font-size:13.5px;position:relative}
+  .step:first-child{border-radius:11px 0 0 11px}
+  .step:last-child{border-radius:0 11px 11px 0}
+  .step .t{font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim2);margin-bottom:6px}
+  .step .c{color:var(--ink)}
+  .step .time{margin-top:8px;font-weight:700;font-size:13px}
+  .slow{color:var(--bad)} .fast{color:var(--good)}
+
+  ul{margin:9px 0;padding-left:22px} li{margin:6px 0}
+  .risk{border-left:3px solid var(--line);padding:2px 0 2px 16px;margin:20px 0}
+  .risk.ok{border-color:var(--good)} .risk.warn{border-color:var(--warn)} .risk.bad{border-color:var(--bad)}
+  .risk h3{margin:0 0 4px;font-size:16.5px}
+  .risk .verd{font-size:13px;color:var(--dim);margin:0 0 8px}
+
+  .note{background:rgba(106,169,255,.07);border:1px solid rgba(106,169,255,.28);
+    border-radius:11px;padding:16px 18px;margin:18px 0}
+  .note.warnbox{background:rgba(255,193,77,.07);border-color:rgba(255,193,77,.3)}
+  .note b{color:var(--ink)}
+
+  .steps{counter-reset:s;list-style:none;padding:0;margin:16px 0}
+  .steps li{counter-increment:s;position:relative;padding:14px 16px 14px 56px;
+    background:var(--panel);border:1px solid var(--line);border-radius:11px;margin:10px 0}
+  .steps li::before{content:counter(s);position:absolute;left:16px;top:14px;
+    width:26px;height:26px;border-radius:99px;background:var(--acc);color:#04101f;
+    font-weight:800;font-size:14px;display:grid;place-items:center}
+  .steps b{display:block;margin-bottom:3px}
+  .muted{color:var(--dim);font-size:14px}
+  hr{border:none;border-top:1px solid var(--line);margin:34px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Can the app use uv instead of pip?</h1>
+<p class="sub">Tested for real on your machine today, against a copy of the app's own bundled Python — not estimated.</p>
+
+<div class="verdict">
+  <div class="big">Yes — and the switching pain you described mostly disappears.</div>
+  <p>Flipping between CPU mode and GPU mode currently spends about <b>82 seconds</b> just rewriting PyTorch onto disk, every single time, even when you've already installed that exact version before. With uv the same swap took <b>5.7 seconds</b>. That's the second and every later switch — the first one still has to download.</p>
+  <p>The change touches four Python files, one setup script, one helper batch file, one build workflow, and a handful of tests. Nothing about how the app finds or runs Python changes.</p>
+</div>
+
+<div class="grid g3" style="margin-top:18px">
+  <div class="stat"><div class="n" style="color:var(--good)">14×</div><div class="l">faster on a repeat mode switch</div></div>
+  <div class="stat"><div class="n" style="color:var(--acc)">2×</div><div class="l">faster even on a first-time install</div></div>
+  <div class="stat"><div class="n" style="color:var(--good)">+20 MB</div><div class="l">extra disk for a user who never switches modes</div></div>
+</div>
+
+<h2>What I measured</h2>
+<p>I made a throwaway copy of the app's bundled Python in a temp folder, then installed the exact PyTorch version your app pins (2.11.0) from the exact same PyTorch download site the app uses. Same package, same source, same Python — only the installer tool changed.</p>
+
+<div class="bars">
+  <div class="row">
+    <div class="lab"><b>pip — first install</b>downloads + unpacks</div>
+    <div class="track"><span class="fill f-pip" style="width:100%"></span></div>
+    <div class="val slow">92s</div>
+  </div>
+  <div class="row">
+    <div class="lab"><b>pip — doing it again</b>this is your mode switch today</div>
+    <div class="track"><span class="fill f-pip" style="width:89%"></span></div>
+    <div class="val slow">82s</div>
+  </div>
+  <div class="row">
+    <div class="lab"><b>uv — first install</b>downloads + unpacks</div>
+    <div class="track"><span class="fill f-uv" style="width:46%"></span></div>
+    <div class="val fast">42s</div>
+  </div>
+  <div class="row">
+    <div class="lab"><b>uv — doing it again</b>this is your mode switch after</div>
+    <div class="track"><span class="fill f-uv" style="width:6.2%"></span></div>
+    <div class="val fast">5.7s</div>
+  </div>
+  <p class="muted" style="margin-top:16px">PyTorch's CPU build is roughly 500 MB unpacked. The CUDA build is several times bigger, so the gap on a real GPU switch is <b>larger</b> than what you see here, not smaller.</p>
+</div>
+
+<p>After the uv install I checked that the app's Python could still load PyTorch and that it reported the right build — it did (<code>2.11.0+cpu</code>). I also checked that pip can still see and describe packages that uv installed. It can. The two tools write the same records, so they can coexist.</p>
+
+<h2>Why it's faster — the actual reason</h2>
+<p>It is not a faster download. It's that pip throws away its work and uv doesn't.</p>
+
+<h3 style="color:var(--bad)">Today (pip) — every switch</h3>
+<div class="flow">
+  <div class="step"><div class="t">1 · Fetch</div><div class="c">Pulls the package archive. pip does keep the compressed archive, so this part is quick the second time.</div><div class="time fast">fast</div></div>
+  <div class="step"><div class="t">2 · Unpack</div><div class="c">Unzips ~500 MB of files and writes every one of them into the app's Python folder. <b>Redone from scratch every time.</b></div><div class="time slow">the 80 seconds</div></div>
+  <div class="step"><div class="t">3 · Discard</div><div class="c">When you switch back, all those unpacked files are deleted and step 2 happens all over again.</div><div class="time slow">wasted</div></div>
+</div>
+
+<h3 style="color:var(--good)">With uv</h3>
+<div class="flow">
+  <div class="step"><div class="t">1 · Fetch</div><div class="c">Same download, but done in parallel across packages.</div><div class="time fast">fast</div></div>
+  <div class="step"><div class="t">2 · Unpack once</div><div class="c">Unzips into its own storage area, <b>once, ever</b>, and keeps it there.</div><div class="time fast">one time</div></div>
+  <div class="step"><div class="t">3 · Point at it</div><div class="c">Instead of copying 500 MB into the app's Python folder, it creates pointers to the files it already unpacked. Windows treats them as real files.</div><div class="time fast">seconds</div></div>
+</div>
+
+<p>I confirmed those pointers are real: a 265 MB PyTorch file inside the test folder is the <em>same</em> file as the one in uv's storage, counted twice. It costs no extra disk, and Python loads it normally.</p>
+
+<div class="note">
+  <b>What that means when you switch modes.</b> The first time you go to GPU it downloads and unpacks the CUDA build. Switch to CPU, then back to GPU — the CUDA build is still sitting unpacked in uv's storage, so "switching back" is just repointing. Roughly six seconds instead of a minute and a half.
+</div>
+
+<h2>What actually changes in the app</h2>
+<p>All the install commands are built in one small cluster of files, and one function runs them. That's the whole surface.</p>
+
+<table>
+  <tr><th>File</th><th>What it does today</th><th>What changes</th></tr>
+  <tr>
+    <td><code>backend/amv_audio/gpu.py</code></td>
+    <td>Builds the five install/uninstall command lines for CPU mode and GPU mode</td>
+    <td>Swap the command it writes. Same packages, same download sites, different tool name and two renamed flags.</td>
+  </tr>
+  <tr>
+    <td><code>backend/amv_audio/dependencies.py</code></td>
+    <td>Runs installs for the automatic "you're missing something" repair, and streams output to the log</td>
+    <td>Same three helpers, pointed at uv. Output streaming, timeouts and error summarising stay as-is.</td>
+  </tr>
+  <tr>
+    <td><code>backend/amv_audio/setup.py</code></td>
+    <td>Checks whether a package is installed by asking pip; makes sure pip exists before installing</td>
+    <td>The "is it installed" check should stop asking pip at all and read Python's own records — that's faster and tool-neutral. The "make sure the installer exists" step points at uv.</td>
+  </tr>
+  <tr>
+    <td><code>manager.bat</code></td>
+    <td>Your fresh-user reset — eight uninstall/list commands</td>
+    <td>Same commands, uv spelling.</td>
+  </tr>
+  <tr>
+    <td><code>bundle-deps.ps1</code> + the release workflow</td>
+    <td>Prepares the shipped Python folder before packaging</td>
+    <td>Same, with uv. Also makes your release builds faster.</td>
+  </tr>
+  <tr>
+    <td>Tests</td>
+    <td>Three tests check that the repair command contains specific flag text</td>
+    <td>Update the expected text. No test logic changes.</td>
+  </tr>
+</table>
+
+<h2>What could break — and what I actually checked</h2>
+
+<div class="risk ok">
+  <h3>Could uv refuse to install into the app's stripped-down Python?</h3>
+  <p class="verd"><span class="tag t-ok">Tested — no problem</span></p>
+  <p>The app doesn't use a normal Python setup; it ships a minimal Python folder and treats that as the environment. Some tools reject that. uv installed into it on the first try, put the files exactly where the app expects them, and the app's Python imported them.</p>
+</div>
+
+<div class="risk ok">
+  <h3>Could uv reject your package list as unsatisfiable?</h3>
+  <p class="verd"><span class="tag t-ok">Tested — identical outcome to pip</span></p>
+  <p>This was my main worry: uv is stricter about conflicting requirements than pip, so a list pip tolerates can be refused outright. I ran both your GPU list and your CPU list — every package, exact same pins — through uv and through pip without installing, and compared. Both tools picked the same versions of everything. No refusals.</p>
+</div>
+
+<div class="risk bad">
+  <h3>Something is already wrong here, and it isn't uv's fault</h3>
+  <p class="verd"><span class="tag t-bad">Found while testing</span> <span class="tag t-info">Pre-existing</span></p>
+  <p>Your GPU setup runs two steps in order: first it installs the exact PyTorch build you pinned (2.11.0 with CUDA), then it installs the audio packages. That second step <b>replaces your pinned PyTorch with a generic 2.13.0 from the public package index</b> — no CUDA, wrong version. Both pip and uv do this, so it's happening today.</p>
+  <p>If it fires, the symptom is: setup finishes, then the settings screen immediately tells you PyTorch needs installing again, and the GPU clip engine can't load because it's built against 2.11 specifically. Your right-now installed state is correct (<code>2.11.0+cu128</code>), so either you haven't hit it or something re-fixes it — but the ordering makes it possible on any run.</p>
+  <p><b>Worth fixing separately</b>, either by pinning PyTorch in the audio step too, or by reinstalling the pinned build last. I did not change anything.</p>
+</div>
+
+<div class="risk ok">
+  <h3>Disk usage — I got this wrong at first, so here are the real numbers</h3>
+  <p class="verd"><span class="tag t-ok">Measured</span> <span class="tag t-info">Correction</span></p>
+  <p>My first read was that uv's kept-unpacked storage is a second copy of everything, costing several extra gigabytes. <b>It isn't.</b> Because the installed files and the stored files are the same files counted twice, they share the space.</p>
+  <table style="margin-top:10px">
+    <tr><th>Measured</th><th>Result</th></tr>
+    <tr><td>App's packages folder, on its own</td><td>509 MB</td></tr>
+    <tr><td>uv's storage, on its own</td><td>503 MB</td></tr>
+    <tr><td><b>Both together, actual disk consumed</b></td><td><b style="color:var(--good)">529 MB — not 1,012 MB</b></td></tr>
+  </table>
+  <p>So for anyone who installs one mode and stays there, uv's storage costs about <b>20 MB</b>, not 500. The only thing that genuinely takes extra room is the mode you're <em>not</em> currently using — the CPU PyTorch sitting there ready while you're in GPU mode. That's not overhead, that's the fast switch you're paying for, and it's the only reason it takes six seconds.</p>
+  <p>It's safe to delete at any time. Deleting it doesn't break an installed app; it just makes the next switch slow again.</p>
+</div>
+
+<div class="risk ok">
+  <h3>Shipping it to real users</h3>
+  <p class="verd"><span class="tag t-ok">Costs nothing if done this way</span></p>
+  <p>uv is a single 76 MB program (26 MB compressed). Putting it in the installer grows every download by 26 MB.</p>
+  <p><b>You already have a better route.</b> The app downloads FFmpeg and yt-dlp on demand into a per-user tools folder, driven by a list at
+  <span class="path">C:\projects (code)\27. Ultimate AMV script\tools.json</span>
+  That list already supports "fetch a zip, pull one file out of it, verify the checksum, and don't download it until it's needed" — which is precisely what uv needs. Adding uv there means <b>zero growth to the installer</b>, and it only downloads the first time someone opens setup.</p>
+</div>
+
+<h2>Should it ship, or is it just a dev tool?</h2>
+<p>It should ship. But it should not <em>replace</em> pip — it should sit in front of it.</p>
+
+<div class="grid g2">
+  <div class="card">
+    <h3 style="color:var(--good)">What a real user gets</h3>
+    <ul>
+      <li><b>First-run setup roughly halves.</b> That run downloads and unpacks several gigabytes — PyTorch, the audio stack, a graphics runtime. It's the single most painful moment in the whole app, and it's the one moment every user hits.</li>
+      <li><b>Costs them about 20 MB of disk</b>, not gigabytes.</li>
+      <li><b>Nothing extra to download at install time</b>, if it goes in the tools list.</li>
+      <li><b>It doesn't need a working Python to run.</b> Today, if the app's Python installation gets damaged, the repair path is to download a pip installer and run it <em>with that same damaged Python</em>. uv is a standalone program, so it can repair an environment that can't currently repair itself.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 style="color:var(--warn)">Why pip still stays in the box</h3>
+    <ul>
+      <li>pip is <b>13 MB</b> of the shipped Python folder. Removing it saves nothing worth having.</li>
+      <li>uv arrives by download. Downloads get blocked — corporate networks, overzealous antivirus, GitHub being unreachable. If that's the only installer, a blocked download means <b>setup simply cannot proceed</b>, with no way out.</li>
+      <li>With pip still present, that same user gets the slow path instead of a dead end, and you get a log line telling you it happened.</li>
+      <li>It also means you can roll this out without a hard cutover — the two tools read and write the same records, so a half-migrated machine is still a working machine.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="flow" style="margin-top:22px">
+  <div class="step"><div class="t">User opens setup</div><div class="c">App looks for uv in the tools folder</div></div>
+  <div class="step"><div class="t">Not there?</div><div class="c">Download it once — 26 MB, checksum-verified, same path FFmpeg already uses</div></div>
+  <div class="step"><div class="t">Install with uv</div><div class="c">Roughly twice as fast on a fresh machine, ~14× on a repeat switch</div><div class="time fast">normal path</div></div>
+  <div class="step" style="background:rgba(255,193,77,.08);border-color:rgba(255,193,77,.3)"><div class="t">uv missing or fails</div><div class="c">Silently fall back to the current pip command and log it. User sees a slow setup, not a broken one.</div><div class="time" style="color:var(--warn)">safety net</div></div>
+</div>
+
+<div class="note warnbox">
+  <b>One thing to decide alongside it.</b> Over months, uv's storage accumulates versions nobody uses any more — an old PyTorch from three releases ago stays on disk forever. uv can drop exactly the unused ones on command. That should run quietly after a successful setup, with nothing shown to the user and nothing they still need ever touched.
+</div>
+
+<div class="risk warn">
+  <h3>uv reads its own settings files; pip did not</h3>
+  <p class="verd"><span class="tag t-warn">Guard against it</span></p>
+  <p>Your rule is that the app never picks anything up from the wider system — it only ever uses its own bundled pieces. Today that's enforced by a flag that seals pip off. uv has its own settings files and environment variables that could redirect where packages come from on a machine that happens to have them. There's a flag (<code>--no-config</code>) that seals it the same way; it just has to be on every command from day one.</p>
+</div>
+
+<div class="risk ok">
+  <h3>Does a failed download leave you with nothing?</h3>
+  <p class="verd"><span class="tag t-ok">Expected safe</span> <span class="tag t-info">One test I'd still run</span></p>
+  <p>You deliberately install-over rather than remove-then-install, so a network drop mid-switch leaves the previous working version in place instead of an empty hole. uv downloads and unpacks everything before it touches the installed folder, so this should hold or improve. I did not simulate a mid-install network failure — it's worth one deliberate test before you trust it in a release.</p>
+</div>
+
+<div class="risk ok">
+  <h3>Do the two tools fight if both are used?</h3>
+  <p class="verd"><span class="tag t-ok">Tested — they coexist</span></p>
+  <p>Packages installed by uv are fully visible to pip and vice versa. So you can move over gradually and keep pip as a fallback path rather than doing a hard cutover.</p>
+</div>
+
+<h2>What I'd recommend</h2>
+
+<ol class="steps">
+  <li><b>Fetch uv the same way you fetch FFmpeg</b>
+  <span class="muted">Add it to the tools list, marked as "only download when needed". Installer size unchanged, users only pay for it when they open setup.</span></li>
+
+  <li><b>Route every install through one place</b>
+  <span class="muted">Right now the command text is spelled out in five separate spots. Funnel them through a single builder that decides uv-or-pip. That is what makes the fallback possible and makes the change small.</span></li>
+
+  <li><b>Keep pip as an automatic fallback, not a permanent second path</b>
+  <span class="muted">If uv is missing or fails to start, fall back to the current pip command and log it. Users never see a hard failure; you get a signal if uv ever misbehaves in the wild.</span></li>
+
+  <li><b>Stop asking pip whether a package is installed</b>
+  <span class="muted">Six of these checks run every time the setup screen opens, each starting a fresh Python process. Reading Python's own package records instead is instant and works no matter which tool installed it.</span></li>
+
+  <li><b>Fix the PyTorch-gets-replaced problem separately, first</b>
+  <span class="muted">It's independent of this change and it is the kind of thing that would get blamed on uv if it surfaced right after the switch.</span></li>
+
+  <li><b>Then measure a real GPU↔CPU round trip</b>
+  <span class="muted">My numbers are the CPU PyTorch build in isolation. The full switch also moves the audio stack and the two graphics runtimes. Same mechanism applies, but I'd rather show you the real number than promise one.</span></li>
+</ol>
+
+<hr>
+
+<h2>Housekeeping from this test</h2>
+<p>Two things are on your disk from what I ran, both safe to delete:</p>
+<span class="path">C:\Users\PC\AppData\Local\Temp\uvtest\  — the throwaway Python copy and the uv program I downloaded (~1.5 GB)</span>
+<span class="path">C:\Users\PC\AppData\Local\uv\cache\  — uv's unpacked-package storage. Reports as 503 MB but shares almost all of it with the test folder above, so deleting the test folder is what actually frees the space. Worth keeping if we go ahead; it's the thing that makes switches fast.</span>
+<p class="muted">Nothing in the project folder was modified. The app's real Python environment was only read from, never written to — it still holds <code>torch 2.11.0+cu128</code> and <code>nelux 0.11.0</code>, unchanged.</p>
+
+</div>
+</body>
+</html>
