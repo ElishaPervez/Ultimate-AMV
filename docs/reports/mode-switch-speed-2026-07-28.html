@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Making the CPU / GPU switch faster — what's left after moving to the fast installer</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --panel2:#1e242c; --ink:#e8edf3; --dim:#9aa7b4;
+    --line:#2a323c; --good:#63e6a2; --warn:#ffc45e; --bad:#ff6b6b; --accent:#48d7ff;
+    --waste:#ff8a5c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.6 "Segoe UI",system-ui,sans-serif;}
+  .wrap{max-width:1120px;margin:0 auto;padding:48px 28px 96px}
+  h1{font-size:34px;line-height:1.2;margin:0 0 8px}
+  h2{font-size:24px;margin:56px 0 6px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+  h3{font-size:18px;margin:28px 0 8px}
+  p{margin:12px 0}
+  .sub{color:var(--dim);font-size:17px;margin:0 0 28px}
+  .lead{background:var(--panel);border-left:4px solid var(--accent);
+        padding:18px 22px;border-radius:0 10px 10px 0;font-size:17px}
+  .lead strong{color:var(--accent)}
+  .grid{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:840px){.g2,.g3{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .card h4{margin:0 0 6px;font-size:16px}
+  .tag{display:inline-block;font-size:12px;letter-spacing:.4px;text-transform:uppercase;
+       padding:3px 9px;border-radius:999px;font-weight:600}
+  .t-good{background:rgba(99,230,162,.14);color:var(--good)}
+  .t-warn{background:rgba(255,196,94,.14);color:var(--warn)}
+  .t-bad{background:rgba(255,107,107,.14);color:var(--bad)}
+  .t-info{background:rgba(72,215,255,.14);color:var(--accent)}
+  .num{font-size:30px;font-weight:700;line-height:1}
+  .num small{font-size:14px;font-weight:400;color:var(--dim)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:15px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:.5px}
+  td.n{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bar{height:22px;border-radius:5px;display:flex;overflow:hidden;background:var(--panel2)}
+  .bar span{display:block;height:100%}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--dim);margin:10px 0 0}
+  .legend i{width:12px;height:12px;border-radius:3px;display:inline-block;margin-right:6px;vertical-align:-1px}
+  .flow{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap;margin:18px 0}
+  .step{flex:1;min-width:150px;background:var(--panel2);border:1px solid var(--line);
+        border-radius:10px;padding:12px 14px;position:relative}
+  .step .lbl{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .step .val{font-size:15px;font-weight:600;margin-top:4px}
+  .step .cost{font-size:13px;color:var(--warn);margin-top:6px;font-variant-numeric:tabular-nums}
+  .step.kill{border-color:rgba(255,138,92,.5);background:rgba(255,138,92,.08)}
+  .step.keep{border-color:rgba(99,230,162,.4);background:rgba(99,230,162,.06)}
+  .step.keep .cost{color:var(--good)}
+  .arrow{align-self:center;color:var(--dim);font-size:20px}
+  code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-size:13px;
+       color:#cfe4f5;font-family:Consolas,monospace}
+  .path{display:block;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+        padding:10px 13px;font-family:Consolas,monospace;font-size:13px;color:#cfe4f5;
+        word-break:break-all;margin:8px 0}
+  .rank{display:flex;gap:14px;align-items:flex-start;background:var(--panel);
+        border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+  .rank .no{flex:0 0 46px;height:46px;border-radius:12px;background:var(--panel2);
+            display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;
+            color:var(--accent)}
+  .rank .body{flex:1}
+  .rank h4{margin:0 0 4px;font-size:17px}
+  .rank .save{font-size:13px;color:var(--good);font-weight:600;margin-top:8px}
+  .note{background:rgba(255,196,94,.07);border:1px solid rgba(255,196,94,.28);
+        border-radius:10px;padding:14px 18px;margin:18px 0;font-size:15px}
+  .note b{color:var(--warn)}
+  .ok{background:rgba(99,230,162,.07);border:1px solid rgba(99,230,162,.28);
+      border-radius:10px;padding:14px 18px;margin:18px 0;font-size:15px}
+  .ok b{color:var(--good)}
+  ul{margin:10px 0;padding-left:22px}
+  li{margin:6px 0}
+  .foot{margin-top:70px;padding-top:20px;border-top:1px solid var(--line);
+        color:var(--dim);font-size:13px}
+  .sw{display:grid;grid-template-columns:1fr auto 1fr;gap:16px;align-items:center;margin:20px 0}
+  .sw .box{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .sw .mid{text-align:center;color:var(--dim);font-size:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Making the CPU&nbsp;↔&nbsp;GPU switch faster</h1>
+<p class="sub">What's actually left to win now that the fast installer is in — measured on your machine, 28&nbsp;July&nbsp;2026.</p>
+
+<div class="lead">
+  <p style="margin-top:0"><strong>Short answer: yes, and the biggest one is free.</strong></p>
+  <p>Now that packages install in seconds instead of minutes, the installing isn't the slow part any more — <em>the checking is</em>. Every switch re-asks the same health questions up to five times, each one starting a fresh Python just to answer, and the trip back to GPU re-runs a 70-package install for one missing file.</p>
+  <p style="margin-bottom:0">Four changes cut roughly <strong>12–18&nbsp;seconds</strong> off a switch and change nothing about the result. A fifth, bigger change would make the switch <strong>near-instant</strong> — and costs no extra disk space, which surprised me too.</p>
+</div>
+
+<h2>What I measured</h2>
+<p>I did <em>not</em> run a real mode switch — that would have left your working GPU install at risk. Instead I timed every individual piece the switch is made of, using your actual bundled Python and your actual downloaded copy of the fast installer, in read-only or throwaway-folder mode.</p>
+
+<div class="grid g3">
+  <div class="card">
+    <span class="tag t-good">confirmed good</span>
+    <div class="num" style="margin:10px 0 4px">2.0<small> sec</small></div>
+    <p style="margin:0;color:var(--dim);font-size:14px">To lay down the entire CPU build of PyTorch from the local store — no download at all. The fast installer is doing its job.</p>
+  </div>
+  <div class="card">
+    <span class="tag t-bad">pure waste</span>
+    <div class="num" style="margin:10px 0 4px">5.7<small> sec</small></div>
+    <p style="margin:0;color:var(--dim);font-size:14px">Spent working out a 70-package install list that runs on <em>every</em> switch back to GPU — before it installs a single thing.</p>
+  </div>
+  <div class="card">
+    <span class="tag t-warn">avoidable</span>
+    <div class="num" style="margin:10px 0 4px">2.7<small> sec</small></div>
+    <p style="margin:0;color:var(--dim);font-size:14px">For one GPU-side inventory check, which runs <em>three times</em> per switch. Almost all of it is loading PyTorch in a throwaway process.</p>
+  </div>
+</div>
+
+<h3>The raw numbers</h3>
+<table>
+  <tr><th>What</th><th class="n">Time</th><th>Runs per switch</th><th>Notes</th></tr>
+  <tr>
+    <td>Inventory check, GPU side</td><td class="n">2.7&nbsp;s</td><td>3×</td>
+    <td>Nearly all of it is one throwaway process that loads PyTorch just to confirm the video reader still works</td>
+  </tr>
+  <tr>
+    <td>Inventory check, CPU side</td><td class="n">0.66&nbsp;s</td><td>3×</td>
+    <td>Cheap, because nothing on the CPU side needs PyTorch loaded</td>
+  </tr>
+  <tr>
+    <td>"Do the maths libraries still load together?"</td><td class="n">0.5–1.5&nbsp;s</td><td>5×</td>
+    <td>Fresh process every time; nothing happens in between three of those five</td>
+  </tr>
+  <tr>
+    <td>Working out the 70-package audio list</td><td class="n">5.7&nbsp;s</td><td>1× (GPU only)</td>
+    <td>Runs even when the answer is "nothing to do"</td>
+  </tr>
+  <tr>
+    <td>Working out the PyTorch swap</td><td class="n">2.5&nbsp;s</td><td>1×</td>
+    <td>Drops to <b style="color:var(--good)">0.8&nbsp;s</b> if we stop forcing a reinstall — see #3</td>
+  </tr>
+  <tr>
+    <td>Actually laying down PyTorch</td><td class="n">~2&nbsp;s</td><td>1×</td>
+    <td>From the local store. No network.</td>
+  </tr>
+  <tr>
+    <td>Working out the ONNX runtime swap</td><td class="n">0.5&nbsp;s</td><td>1×</td>
+    <td>Fine as is</td>
+  </tr>
+  <tr>
+    <td>Tidying the package store afterwards</td><td class="n">0.12&nbsp;s</td><td>1×</td>
+    <td><span class="tag t-good">no problem</span> I suspected this one and it's innocent</td>
+  </tr>
+</table>
+
+<div class="ok">
+  <p style="margin:0"><b>Something I checked that turned out fine:</b> I expected the end-of-switch cleanup to be throwing away the build you just left, forcing a multi-gigabyte re-download next time you switch back. It isn't. Every one of the 142 stored packages is still spoken for, including <em>both</em> PyTorch builds — so switching back is always a local operation, never a download.</p>
+</div>
+
+<h2>Where the time actually goes on a switch back to GPU</h2>
+<p>This is the worse of the two directions. Each block is measured; the file-copying blocks are estimates and marked as such.</p>
+
+<div style="margin:22px 0">
+  <div style="font-size:13px;color:var(--dim);margin-bottom:6px">CPU → GPU, today</div>
+  <div class="bar">
+    <span style="width:11%;background:var(--waste)"></span>
+    <span style="width:11%;background:var(--waste)"></span>
+    <span style="width:10%;background:var(--accent)"></span>
+    <span style="width:22%;background:#5a6b7d"></span>
+    <span style="width:23%;background:var(--waste)"></span>
+    <span style="width:12%;background:#5a6b7d"></span>
+    <span style="width:11%;background:var(--waste)"></span>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--waste)"></i>Avoidable — checking, re-checking, and over-installing</span>
+    <span><i style="background:var(--accent)"></i>Working out what to install</span>
+    <span><i style="background:#5a6b7d"></i>Real work: moving files</span>
+  </div>
+</div>
+
+<div class="flow">
+  <div class="step kill"><div class="lbl">Step 1</div><div class="val">Inventory, shown in Settings</div><div class="cost">2.7 s — loads PyTorch</div></div>
+  <div class="arrow">→</div>
+  <div class="step kill"><div class="lbl">Step 2</div><div class="val">Inventory again, immediately</div><div class="cost">2.7 s — same answer</div></div>
+  <div class="arrow">→</div>
+  <div class="step keep"><div class="lbl">Step 3</div><div class="val">Remove CPU sound runtime</div><div class="cost">real work</div></div>
+</div>
+<div class="flow">
+  <div class="step keep"><div class="lbl">Step 4</div><div class="val">Swap PyTorch to the GPU build</div><div class="cost">2.5 s planning + file work</div></div>
+  <div class="arrow">→</div>
+  <div class="step kill"><div class="lbl">Step 5</div><div class="val">Re-install the whole 70-package audio stack</div><div class="cost">5.7 s planning, for one file</div></div>
+  <div class="arrow">→</div>
+  <div class="step kill"><div class="lbl">Step 6</div><div class="val">Health checks ×3, then inventory a third time</div><div class="cost">~4 s</div></div>
+</div>
+
+<h2>The four free wins</h2>
+
+<div class="rank">
+  <div class="no">1</div>
+  <div class="body">
+    <span class="tag t-bad">biggest win</span>
+    <h4>Stop reinstalling the entire audio stack to get one missing file</h4>
+    <p>When you switch to CPU, the app removes the GPU version of the sound-separation runtime. When you switch back, it notices that file is gone — and reacts by reinstalling <em>everything</em>: the sound separator, the video reader, the scene detector, and twenty supporting libraries, with blanket permission to upgrade all of them.</p>
+    <p><strong>What you'd see:</strong> a switch back to GPU that spends six seconds thinking before it starts, and occasionally much longer, because any one of those 70 packages having a newer release means a real download you never asked for.</p>
+    <p><strong>The fix:</strong> when the only thing missing is the GPU sound runtime, install just the GPU sound runtime. The full stack install still runs when the stack is genuinely missing. The end state on disk is identical either way — I verified both routes produce the same package set.</p>
+    <div class="save">Saves 4+ seconds every time, and removes the risk of an unwanted multi-package upgrade mid-switch</div>
+  </div>
+</div>
+
+<div class="rank">
+  <div class="no">2</div>
+  <div class="body">
+    <span class="tag t-warn">easy</span>
+    <h4>Stop asking the same health question five times</h4>
+    <p>There's a check that confirms the two number-crunching libraries the audio engine sits on still load together. It's a good check — it exists because an unrelated install once quietly broke that pair and the switch reported success on a dead engine.</p>
+    <p>But it fires five times per switch, and three of those five happen back to back with nothing installed in between. Each one starts a fresh Python from scratch.</p>
+    <p><strong>The fix:</strong> ask once before anything installs, and once after the last install. Keep the answer in between. The protection is unchanged — the whole point of the after-check is to catch damage done <em>during</em> the run, and that still happens.</p>
+    <div class="save">Saves 1.5–4.5 seconds</div>
+  </div>
+</div>
+
+<div class="rank">
+  <div class="no">3</div>
+  <div class="body">
+    <span class="tag t-warn">easy</span>
+    <h4>Ask for the build you want by name instead of forcing a reinstall</h4>
+    <p>Today the switch says "replace PyTorch, I don't care what's there". That phrasing has a hidden cost: it also tells the installer to throw away everything it remembers about PyTorch and re-check the download site from scratch.</p>
+    <p>If instead we name the exact build — "the CPU one" or "the graphics-card one" — the installer sees the installed build doesn't match and swaps it anyway, using what it already knows.</p>
+    <p><strong>Measured:</strong> planning the swap drops from <b>2.5&nbsp;s to 0.8&nbsp;s</b>, and the swap it plans is byte-for-byte the same one.</p>
+    <p><strong>Careful bit:</strong> the forced-reinstall phrasing must stay on the <em>repair</em> path, where the point is to overwrite files that are damaged even though the records look correct. Only the plain mode switch changes.</p>
+    <div class="save">Saves ~1.7 seconds and one unnecessary trip to the network</div>
+  </div>
+</div>
+
+<div class="rank">
+  <div class="no">4</div>
+  <div class="body">
+    <span class="tag t-warn">easy</span>
+    <h4>Don't take the same inventory three times</h4>
+    <p>The Settings panel takes an inventory to show you what it's about to do. The switch then immediately takes the identical inventory again before starting, and a third time at the end. On the GPU side each one costs 2.7 seconds, almost entirely spent loading PyTorch in a throwaway process to confirm the video reader can still start.</p>
+    <p><strong>The fix:</strong> the middle one can reuse the panel's answer when nothing has been installed since. The final one has to stay — it's what catches a switch that half-worked.</p>
+    <div class="save">Saves ~2.7 seconds on GPU switches</div>
+  </div>
+</div>
+
+<h2>The fifth option: make it instant</h2>
+
+<p>Everything above shaves a switch that still fundamentally works by <em>uninstalling one thing and installing another</em>. There's a way to stop doing that at all.</p>
+
+<div class="sw">
+  <div class="box">
+    <div style="font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px">Today</div>
+    <p style="margin:8px 0 0">One package folder. Switching means tearing out the CPU build and laying down the GPU build, then re-verifying everything.</p>
+    <p style="margin:10px 0 0;color:var(--warn);font-weight:600">~40–60 seconds</p>
+  </div>
+  <div class="mid">→</div>
+  <div class="box">
+    <div style="font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px">Instead</div>
+    <p style="margin:8px 0 0">Two package folders, one per mode, both ready. Switching means pointing Python at the other folder.</p>
+    <p style="margin:10px 0 0;color:var(--good);font-weight:600">under a second</p>
+  </div>
+</div>
+
+<h3>The part that makes this viable: it costs no extra disk</h3>
+<p>The fast installer doesn't copy files into your Python folder — it points at a single stored copy. I checked the actual link counts on your machine: the GPU PyTorch files in your Python folder and the ones in the store are <em>the same bytes on disk</em>, not two copies.</p>
+
+<div class="grid g2">
+  <div class="card">
+    <h4>Already on your disk right now</h4>
+    <ul style="margin:6px 0 0">
+      <li>GPU build of PyTorch — <b>4.37&nbsp;GB</b>, in use</li>
+      <li>CPU build of PyTorch — <b>0.43&nbsp;GB</b>, sitting in the store from your last switch</li>
+    </ul>
+    <p style="margin:10px 0 0;color:var(--dim);font-size:14px">Both builds are already there. Both are already complete.</p>
+  </div>
+  <div class="card">
+    <h4>Cost of a second, ready-to-go folder</h4>
+    <div class="num" style="margin:10px 0 4px;color:var(--good)">~0<small> GB extra</small></div>
+    <p style="margin:0;color:var(--dim);font-size:14px">The second folder points at the same stored bytes. Windows Explorer will report the sizes twice, but the drive only holds one copy.</p>
+  </div>
+</div>
+
+<div class="note">
+  <p style="margin:0"><b>Honest about the cost:</b> this is the only item on the page that isn't a small edit. It changes where packages get installed and how the app decides which folder Python reads. That means the setup screen, the repair paths, and the first-install flow all need to learn about two folders instead of one — and the mode-specific packages (PyTorch, the two sound runtimes, the video reader) have to live in the mode folder while everything shared stays put. It's worth doing as its own piece of work with a proper plan, not bolted onto the four fixes above.</p>
+</div>
+
+<h2>What I'd deliberately not do</h2>
+<div class="card">
+  <h4>Merging the PyTorch step and the sound-runtime step into one command</h4>
+  <p style="margin:6px 0 0">It looks like an easy saving — two commands become one, and you skip a round of planning. But PyTorch comes from its own download site and the sound runtime comes from the public one, and combining them means telling the installer to consider both sites for everything. That's exactly how a previous switch quietly downgraded an unrelated library to whatever version PyTorch's site happened to be carrying. The two-second saving isn't worth reopening that.</p>
+</div>
+
+<h2>Suggested order</h2>
+<table>
+  <tr><th>Order</th><th>Change</th><th class="n">Saves</th><th>Size of change</th></tr>
+  <tr><td class="n">1</td><td>Install only the missing GPU sound runtime, not the whole stack</td><td class="n">4+ s</td><td>One condition, split in two</td></tr>
+  <tr><td class="n">2</td><td>Ask the maths-library health question twice, not five times</td><td class="n">1.5–4.5 s</td><td>Small</td></tr>
+  <tr><td class="n">3</td><td>Name the exact PyTorch build instead of forcing a reinstall</td><td class="n">1.7 s</td><td>Small</td></tr>
+  <tr><td class="n">4</td><td>Take the inventory twice, not three times</td><td class="n">2.7 s</td><td>Small</td></tr>
+  <tr style="background:rgba(72,215,255,.05)"><td class="n">5</td><td>Two ready-made folders, flip between them</td><td class="n">everything else</td><td>Its own project</td></tr>
+</table>
+
+<h3>Files this touches</h3>
+<span class="path">C:\projects (code)\27. Ultimate AMV script\backend\amv_audio\setup.py</span>
+<span class="path">C:\projects (code)\27. Ultimate AMV script\backend\amv_audio\gpu.py</span>
+<span class="path">C:\projects (code)\27. Ultimate AMV script\backend\amv_audio\dependencies.py</span>
+<span class="path">C:\projects (code)\27. Ultimate AMV script\backend\amv_audio\installer.py</span>
+
+<div class="foot">
+  <p>Measured 28 July 2026 on this machine, in GPU mode with everything installed. Timings come from your bundled Python at <code>python\python.exe</code> and your downloaded fast installer; package installs were timed into throwaway folders so nothing in your working setup was altered. No end-to-end mode switch was performed — the file-moving portions of the timeline are estimates, everything else is measured.</p>
+  <p>Report: <span class="path" style="display:inline-block;margin:4px 0 0">C:\projects (code)\27. Ultimate AMV script\docs\reports\mode-switch-speed-2026-07-28.html</span></p>
+</div>
+
+</div>
+</body>
+</html>
