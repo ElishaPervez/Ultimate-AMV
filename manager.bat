@@ -8,6 +8,23 @@ set "APP_STATE=%APPDATA%\com.elishapervez.ultimateamv"
 
 set "HW_PACKAGES=torch torchvision torchaudio audio-separator onnxruntime onnxruntime-gpu transnetv2-pytorch scenedetect opencv-python nelux pandas scipy scikit-learn sympy numba llvmlite networkx"
 
+rem The app fetches uv into its tools folder the first time setup runs. Reuse it
+rem when it is there - removing and reinstalling PyTorch through uv takes seconds
+rem instead of minutes. When it is not there, pip does the same job slowly, so
+rem this tool keeps working on a machine that has never opened setup.
+set "UV=%LOCALAPPDATA%\com.elishapervez.ultimateamv\tools\uv.exe"
+if exist "!UV!" (
+    set "UNINSTALL_ROOT="!UV!" pip uninstall --python "!PYTHON!" --no-config"
+    set "UNINSTALL_DEV="!UV!" pip uninstall --python "!DEV_PYTHON!" --no-config"
+    set "SHOW_ROOT="!UV!" pip show --python "!PYTHON!" --no-config"
+    set "SHOW_DEV="!UV!" pip show --python "!DEV_PYTHON!" --no-config"
+) else (
+    set "UNINSTALL_ROOT="!PYTHON!" -I -m pip uninstall -y"
+    set "UNINSTALL_DEV="!DEV_PYTHON!" -I -m pip uninstall -y"
+    set "SHOW_ROOT="!PYTHON!" -I -m pip show"
+    set "SHOW_DEV="!DEV_PYTHON!" -I -m pip show"
+)
+
 if not exist "!PYTHON!" goto python_missing
 goto menu
 
@@ -70,11 +87,11 @@ goto menu
 echo.
 echo Uninstalling PyTorch packages...
 echo Root bundled Python:
-"!PYTHON!" -I -m pip uninstall -y torch torchvision torchaudio
+!UNINSTALL_ROOT! torch torchvision torchaudio
 if exist "!DEV_PYTHON!" (
     echo.
     echo Dev target Python:
-    "!DEV_PYTHON!" -I -m pip uninstall -y torch torchvision torchaudio
+    !UNINSTALL_DEV! torch torchvision torchaudio
 )
 goto done
 
@@ -82,11 +99,11 @@ goto done
 echo.
 echo Uninstalling audio-separator...
 echo Root bundled Python:
-"!PYTHON!" -I -m pip uninstall -y audio-separator
+!UNINSTALL_ROOT! audio-separator
 if exist "!DEV_PYTHON!" (
     echo.
     echo Dev target Python:
-    "!DEV_PYTHON!" -I -m pip uninstall -y audio-separator
+    !UNINSTALL_DEV! audio-separator
 )
 goto done
 
@@ -94,11 +111,11 @@ goto done
 echo.
 echo Uninstalling ONNX Runtime variants...
 echo Root bundled Python:
-"!PYTHON!" -I -m pip uninstall -y onnxruntime onnxruntime-gpu
+!UNINSTALL_ROOT! onnxruntime onnxruntime-gpu
 if exist "!DEV_PYTHON!" (
     echo.
     echo Dev target Python:
-    "!DEV_PYTHON!" -I -m pip uninstall -y onnxruntime onnxruntime-gpu
+    !UNINSTALL_DEV! onnxruntime onnxruntime-gpu
 )
 goto done
 
@@ -106,11 +123,11 @@ goto done
 echo.
 echo Uninstalling all hardware-dependent packages...
 echo Root bundled Python:
-"!PYTHON!" -I -m pip uninstall -y !HW_PACKAGES!
+!UNINSTALL_ROOT! !HW_PACKAGES!
 if exist "!DEV_PYTHON!" (
     echo.
     echo Dev target Python:
-    "!DEV_PYTHON!" -I -m pip uninstall -y !HW_PACKAGES!
+    !UNINSTALL_DEV! !HW_PACKAGES!
 )
 goto done
 
@@ -127,7 +144,7 @@ goto done
 echo.
 echo Full fresh-user reset...
 echo Root bundled Python:
-"!PYTHON!" -I -m pip uninstall -y !HW_PACKAGES!
+!UNINSTALL_ROOT! !HW_PACKAGES!
 call :clear_app_state
 call :sync_dev_python
 if errorlevel 1 goto done
@@ -141,12 +158,12 @@ echo.
 echo Hardware-dependent package status:
 echo.
 echo Root bundled Python:
-"!PYTHON!" -I -m pip show !HW_PACKAGES! 2>nul | findstr /B /C:"Name:" /C:"Version:"
+!SHOW_ROOT! !HW_PACKAGES! 2>nul | findstr /B /C:"Name:" /C:"Version:"
 if errorlevel 1 echo   None installed.
 echo.
 if exist "!DEV_PYTHON!" (
     echo Dev target Python:
-    "!DEV_PYTHON!" -I -m pip show !HW_PACKAGES! 2>nul | findstr /B /C:"Name:" /C:"Version:"
+    !SHOW_DEV! !HW_PACKAGES! 2>nul | findstr /B /C:"Name:" /C:"Version:"
     if errorlevel 1 echo   None installed.
 ) else (
     echo Dev target Python:

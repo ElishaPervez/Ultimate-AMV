@@ -48,8 +48,47 @@ Write-Host "Upgrading pip..."
 & $python -I -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { Write-Error "pip self-upgrade failed (exit $LASTEXITCODE)" }
 
+# uv installs the same packages several times faster and is what the app itself
+# uses at runtime. Fetch it into the tools cache the app already reads from, so
+# a dev checkout and a real install behave identically. Version, checksum and
+# size are pinned to match tools.json - bump them together.
+$uvVersion = "0.11.32"
+$uvSha256  = "acfde570451cfdb8689fa159a138ee805ba4e241c466432750302c86254b0984"
+$toolsDir  = Join-Path $env:LOCALAPPDATA "com.elishapervez.ultimateamv\tools"
+$uvExe     = Join-Path $toolsDir "uv.exe"
+
+if (-not (Test-Path $uvExe)) {
+    Write-Host "Fetching uv $uvVersion..."
+    $uvZip = Join-Path $env:TEMP "uv-$uvVersion.zip"
+    try {
+        Invoke-WebRequest -Uri "https://github.com/astral-sh/uv/releases/download/$uvVersion/uv-x86_64-pc-windows-msvc.zip" -OutFile $uvZip
+        $actual = (Get-FileHash -Path $uvZip -Algorithm SHA256).Hash
+        if ($actual -ne $uvSha256.ToUpper()) {
+            throw "checksum mismatch (expected $uvSha256, got $actual)"
+        }
+        New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+        $staging = Join-Path $env:TEMP "uv-$uvVersion-extract"
+        Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Archive -Path $uvZip -DestinationPath $staging -Force
+        Copy-Item (Join-Path $staging "uv.exe") $uvExe -Force
+        Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        # Never fatal. A blocked download costs a slower bundle step, not a
+        # broken checkout - the pip path below still works.
+        Write-Host "Could not fetch uv ($_). Falling back to pip."
+    } finally {
+        Remove-Item $uvZip -Force -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Host "uv already present at $uvExe"
+}
+
 Write-Host "Installing overlapping core dependencies..."
-& $python -I -m pip install "numpy==2.4.4" pydub pillow tqdm typing_extensions
+if (Test-Path $uvExe) {
+    & $uvExe pip install --python $python --no-config "numpy==2.4.4" pydub pillow tqdm typing_extensions
+} else {
+    & $python -I -m pip install "numpy==2.4.4" pydub pillow tqdm typing_extensions
+}
 if ($LASTEXITCODE -ne 0) { Write-Error "dependency install failed (exit $LASTEXITCODE)" }
 
 & $python -I -c "import numpy; assert numpy.__version__ == '2.4.4', f'Expected NumPy 2.4.4, loaded {numpy.__version__}'"
