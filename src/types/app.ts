@@ -8,6 +8,7 @@ export type SectionId =
   | "audio-conversion"
   | "bg-removal"
   | "interpolation"
+  | "dead-frames"
   | "logs"
   | "settings";
 

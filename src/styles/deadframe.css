@@ -1,0 +1,441 @@
+/* ============================================================
+   DEAD FRAME REMOVER
+   ============================================================
+   Sibling of interpolate.css. The queue pane, format picker and
+   result banners are shared with Frame Interpolation (the
+   `.interpolate-*` classes the panel reuses verbatim); everything
+   prefixed `.deadframe-*` is this panel's own geometry.
+
+   The panel is its own inline-size container, so every breakpoint
+   below reacts to the width the panel ACTUALLY has. The sidebar
+   collapsing is a ~180px swing, and viewport media queries would
+   miss it entirely.
+   ============================================================ */
+
+.deadframe-panel {
+  gap: 20px;
+  container-type: inline-size;
+  container-name: deadframe;
+}
+
+.deadframe-hero {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.deadframe-hero h2 {
+  font-size: clamp(30px, 3.9vw, 52px);
+  letter-spacing: -0.035em;
+}
+
+.deadframe-hero p {
+  max-width: 720px;
+}
+
+/* ---- Layout ------------------------------------------------ */
+
+.deadframe-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.72fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.deadframe-main {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+/* ---- Queue rows -------------------------------------------- */
+/* The copy block is a button here (it selects which clip the two
+   players show), so it has to shed the default button chrome and
+   keep the grid the shared row markup expects. */
+
+.deadframe-queue-select {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.deadframe-queue-item.is-selected {
+  border-color: rgb(var(--theme-accent-rgb) / 0.42);
+  background: rgb(var(--theme-accent-rgb) / 0.09);
+}
+
+.deadframe-queue-item.is-selected .interpolate-queue-copy strong {
+  color: #f2fbff;
+}
+
+.deadframe-queue-item.is-measuring .interpolate-queue-state {
+  color: rgb(var(--theme-accent-rgb));
+}
+
+/* ---- Players ----------------------------------------------- */
+/* Two independent players. They are deliberately NOT synchronised:
+   the de-duplicated clip is genuinely shorter, so there is no shared
+   timeline to scrub. */
+
+.deadframe-players {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.deadframe-player {
+  min-width: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.deadframe-player figcaption {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.deadframe-player figcaption strong {
+  color: #e4edf3;
+  font-size: 12px;
+}
+
+.deadframe-player figcaption span {
+  overflow: hidden;
+  color: #90a4b0;
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deadframe-player video,
+.deadframe-player-empty {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: min(34vh, 300px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(3, 6, 9, 0.72);
+}
+
+.deadframe-player video {
+  display: block;
+  object-fit: contain;
+}
+
+.deadframe-player-empty {
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: #8ea0ac;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* ---- Control grid ------------------------------------------ */
+/* Left stack = the dial and the file rules; right column = the
+   encoding card, which is the tallest of the three. */
+
+.deadframe-controls {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.deadframe-dial,
+.deadframe-output,
+.deadframe-encoding {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 12px;
+  background: rgba(8, 13, 18, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.deadframe-dial {
+  grid-column: 1;
+  grid-row: 1;
+  display: grid;
+  gap: 9px;
+  padding: 14px 16px 15px;
+  align-content: start;
+}
+
+.deadframe-encoding {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.deadframe-output {
+  grid-column: 1;
+  grid-row: 2;
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px 15px;
+  align-content: start;
+}
+
+/* ---- Sensitivity dial -------------------------------------- */
+
+.deadframe-dial-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.deadframe-dial-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.deadframe-dial-head > strong {
+  min-width: 42px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: rgba(2, 6, 9, 0.52);
+  color: #f4fbff;
+  font-size: 17px;
+  font-weight: 880;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.deadframe-dial-help {
+  color: #a0b2be;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.deadframe-dial-count {
+  margin: 0;
+  color: #cfdce4;
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.deadframe-dial-note {
+  margin: 0;
+  color: #f0cf94;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+/* ---- Output rules ------------------------------------------ */
+
+.deadframe-output-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 168px);
+  align-items: center;
+  gap: 12px;
+}
+
+.deadframe-output-row .conversion-segment button {
+  min-height: 30px;
+  font-size: 11.5px;
+}
+
+.deadframe-suffix {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  color: #eef5fa;
+  background: rgba(2, 6, 9, 0.52);
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 12px;
+  outline: none;
+}
+
+.deadframe-suffix:focus {
+  border-color: rgb(var(--theme-accent-rgb) / 0.5);
+}
+
+.deadframe-suffix:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.deadframe-output-note {
+  margin: 0;
+  color: #a0b2be;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* ---- Progress ---------------------------------------------- */
+
+.deadframe-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.deadframe-progress-heading {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.deadframe-progress-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.deadframe-progress-heading strong,
+.deadframe-progress-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deadframe-progress-heading > div strong {
+  color: #edf6fb;
+  font-size: 12px;
+}
+
+.deadframe-progress-heading span {
+  color: #9cafba;
+  font-size: 10px;
+}
+
+.deadframe-progress-heading > strong:last-child {
+  color: #cfdce4;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.deadframe-progress .conversion-run-btn {
+  width: 100%;
+}
+
+/* ---- Bottom bar -------------------------------------------- */
+/* The gate line is the whole safety story of this panel, so it sits
+   next to the buttons rather than above the fold. */
+
+.deadframe-bottom-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.deadframe-gate {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  color: #9cafba;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.deadframe-gate::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.deadframe-gate.is-open {
+  border-color: rgba(75, 224, 167, 0.36);
+  color: #8ff0cb;
+  background: rgba(75, 224, 167, 0.12);
+}
+
+.deadframe-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.deadframe-preview-btn {
+  grid-column: auto;
+  min-height: 40px;
+  padding: 0 16px;
+}
+
+.deadframe-export {
+  min-height: 40px;
+  padding: 0 18px;
+}
+
+/* ---- Narrow panel ------------------------------------------ */
+/* Below ~1080px of PANEL width the queue and the stage stop fitting
+   side by side; the two players go one above the other before the
+   frames get too small to judge a duplicate by eye. */
+
+@container deadframe (max-width: 1080px) {
+  .deadframe-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deadframe-layout .interpolate-queue-pane {
+    min-height: 0;
+  }
+
+  .deadframe-layout .interpolate-empty {
+    min-height: 190px;
+  }
+
+  .deadframe-layout .interpolate-queue-list {
+    max-height: min(34vh, 320px);
+  }
+}
+
+@container deadframe (max-width: 860px) {
+  .deadframe-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deadframe-dial,
+  .deadframe-encoding,
+  .deadframe-output {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .deadframe-encoding .interpolate-encoding-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container deadframe (max-width: 680px) {
+  .deadframe-players {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deadframe-bottom-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .deadframe-actions .conversion-pick-btn,
+  .deadframe-actions .conversion-run-btn {
+    flex: 1 1 140px;
+  }
+}

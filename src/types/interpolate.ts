@@ -3,6 +3,7 @@ export type InterpolateFactor = 2 | 3 | 4;
 export type InterpolateNamingMode = "suffix" | "source-name";
 export type InterpolateRateIntent = "factor" | "target";
 export type InterpolateRateMode = "quality" | "vbr" | "cbr";
+export type InterpolateOutputFormat = "h264-mp4" | "hevc-mp4" | "h264-mkv" | "prores-mov";
 export type InterpolateQueueStatus = "queued" | "running" | "done" | "failed";
 
 export type InterpolateStatus = {

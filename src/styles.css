@@ -30,6 +30,7 @@
 @import "./styles/audio.css" layer(base);
 @import "./styles/new-audio.css" layer(base);
 @import "./styles/interpolate.css" layer(base);
+@import "./styles/deadframe.css" layer(base);
 @import "./styles/modals.css" layer(base);
 @import "./styles/components.css" layer(base);
 

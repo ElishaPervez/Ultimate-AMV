@@ -44,8 +44,35 @@ pub(crate) fn app_root() -> Result<PathBuf, String> {
     Ok(cwd)
 }
 
-pub(crate) fn python_exe(root: &Path) -> PathBuf {
+fn python_exe(root: &Path) -> PathBuf {
     root.join("python").join("python.exe")
+}
+
+/// Every Python-backed feature shells out to the bundled interpreter. When it
+/// is missing, the OS only offers "The system cannot find the file specified",
+/// which names nothing and leaves the user with a Retry button that can never
+/// succeed. Check first and say which file is gone and how to get it back.
+///
+/// Realistic ways a user ends up here: antivirus quarantining python.exe (a
+/// common false positive for embedded runtimes), an install or update that did
+/// not finish, or someone cleaning out the install folder.
+pub(crate) fn python_exe_checked(root: &Path) -> Result<PathBuf, String> {
+    let exe = python_exe(root);
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    log_error(
+        "python.missing",
+        "Bundled Python interpreter is missing",
+        json!({ "path": exe.display().to_string() }),
+    );
+    Err(format!(
+        "Ultimate AMV cannot find its own copy of Python. It should be at {}, \
+         but that file is not there. Antivirus software removing it, or an \
+         install or update that did not finish, are the usual causes. \
+         Reinstalling Ultimate AMV will put it back.",
+        exe.display()
+    ))
 }
 
 pub(crate) fn tools_dir_path(root: &Path) -> PathBuf {
@@ -138,6 +165,10 @@ pub(crate) fn interpolate_cli_path(root: &Path) -> PathBuf {
     root.join("backend").join("interpolate_cli.py")
 }
 
+pub(crate) fn deadframe_cli_path(root: &Path) -> PathBuf {
+    root.join("backend").join("deadframe_cli.py")
+}
+
 /// Returns a copy of the bridge `args` safe to write to the on-disk log.
 /// `set-config <key> <value>` carries a secret value when `<key>` is sensitive
 /// (e.g. `tsukyio_api_key`), so mask that argument before it reaches the log
@@ -174,7 +205,7 @@ pub(crate) fn run_audio_cli(args: &[&str]) -> Result<String, String> {
             json!({ "args": log_args }),
         );
     }
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(audio_cli_path(&root))
@@ -229,7 +260,7 @@ pub(crate) fn run_bgremove_cli(args: &[&str]) -> Result<String, String> {
         "Starting background removal bridge command",
         json!({ "args": args }),
     );
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(bgremove_cli_path(&root))
@@ -282,7 +313,7 @@ pub(crate) fn run_interpolate_cli(args: &[&str]) -> Result<String, String> {
         "Starting frame interpolation bridge command",
         json!({ "args": args }),
     );
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(interpolate_cli_path(&root))
@@ -328,9 +359,96 @@ pub(crate) fn run_interpolate_cli(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// One-shot capture-output bridge for the cheap dead-frame queries. Only
+/// `analyze` uses it; `preview` and `export` stream progress and go through
+/// deadframe_cmds::run_streaming_deadframe_cli instead.
+pub(crate) fn run_deadframe_cli(args: &[&str]) -> Result<String, String> {
+    let root = app_root()?;
+    log_info(
+        "deadframe.bridge.start",
+        "Starting dead-frame removal bridge command",
+        json!({ "args": args }),
+    );
+    let mut command = cmd(python_exe_checked(&root)?);
+    command
+        .arg("-I")
+        .arg(deadframe_cli_path(&root))
+        .args(args)
+        .current_dir(&root);
+    apply_python_env(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Python dead-frame removal bridge: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        log_info(
+            "deadframe.bridge.complete",
+            "Dead-frame removal bridge command completed",
+            json!({ "args": args }),
+        );
+        Ok(stdout)
+    } else if !stdout.is_empty() {
+        log_error(
+            "deadframe.bridge.error",
+            "Dead-frame removal bridge command failed",
+            json!({
+                "args": args,
+                "code": output.status.code(),
+                "stdout": truncate_log_text(&stdout),
+                "stderr": truncate_log_text(&stderr),
+            }),
+        );
+        Err(stdout)
+    } else {
+        log_error(
+            "deadframe.bridge.error",
+            "Dead-frame removal bridge command failed",
+            json!({
+                "args": args,
+                "code": output.status.code(),
+                "stderr": truncate_log_text(&stderr),
+            }),
+        );
+        Err(stderr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_python_names_the_file_and_the_way_out() {
+        let root = tempfile::tempdir().unwrap();
+        let error = python_exe_checked(root.path()).unwrap_err();
+        assert!(error.contains("python.exe"), "must name the missing file: {error}");
+        assert!(
+            error.to_lowercase().contains("reinstall"),
+            "must tell the user what to do: {error}"
+        );
+        // The bare OS text is what this replaces; it must not leak through.
+        assert!(!error.contains("os error"), "raw OS error leaked: {error}");
+    }
+
+    #[test]
+    fn present_python_is_returned_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("python");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("python.exe"), b"").unwrap();
+        assert_eq!(python_exe_checked(root.path()).unwrap(), dir.join("python.exe"));
+    }
+
+    #[test]
+    fn a_python_directory_does_not_count_as_the_interpreter() {
+        let root = tempfile::tempdir().unwrap();
+        // A folder named python.exe would satisfy a plain "does this path
+        // exist" check and then fail at spawn time with the opaque error.
+        std::fs::create_dir_all(root.path().join("python").join("python.exe")).unwrap();
+        assert!(python_exe_checked(root.path()).is_err());
+    }
 
     #[test]
     fn redacted_args_mask_secret_set_config_value() {

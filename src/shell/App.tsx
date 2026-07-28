@@ -17,6 +17,7 @@ import {
   Music2,
   PanelLeftClose,
   PanelLeftOpen,
+  Scissors,
   ScrollText,
   Settings,
   Sparkles,
@@ -42,6 +43,7 @@ import { UpdateToast } from "../features/settings/UpdateToast";
 import { VideoToVideoPanel } from "../features/video/VideoToVideoPanel";
 import { BgRemovePanel } from "../features/bgremove/BgRemovePanel";
 import { InterpolatePanel } from "../features/interpolate/InterpolatePanel";
+import { DeadFramePanel } from "../features/deadframe/DeadFramePanel";
 import { HomePanel } from "../features/home/HomePanel";
 import { TsukyioPanel } from "../features/tsukyio/TsukyioPanel";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -50,6 +52,8 @@ import { WindowChrome } from "./WindowChrome";
 import { OffsetSpike } from "../dev/OffsetSpike";
 /* DEV TOOLS: featherweight-preview tuning panel — bake values then delete */
 import { PreviewDevTools } from "../dev/PreviewDevTools";
+/* DEV TOOLS: verifies window-driven UI scaling — keep while resizing work is live */
+import { OverflowInspector } from "../dev/OverflowInspector";
 
 const DISCORD_INVITE_URL = "https://discord.gg/XuJrkeXKh6";
 const GITHUB_ISSUES_URL = "https://github.com/ElishaPervez/Ultimate-AMV/issues";
@@ -110,6 +114,7 @@ const RAIL_ENTRIES: RailEntry[] = (() => {
       { id: "clip-hunting", label: "Scene Splitter", Icon: Clapperboard },
       { id: "bg-removal", label: "BG Remover", Icon: Sparkles },
       { id: "interpolation", label: "Frame Interpolation", Icon: Gauge },
+      { id: "dead-frames", label: "Dead Frame Remover", Icon: Scissors },
       { id: "audio-conversion", label: "Audio Conversion", Icon: Music2 },
       { id: "video-conversion", label: "Video Conversion", Icon: Film },
     ],
@@ -208,6 +213,11 @@ const panelMeta: Record<SectionId, { kicker: string; title: string; stats: strin
     title: "Frame Interpolation",
     stats: ["RIFE", "Batch queue", "Audio sync"],
   },
+  "dead-frames": {
+    kicker: "Cadence",
+    title: "Dead Frame Remover",
+    stats: ["Duplicate detection", "Preview", "Batch export"],
+  },
   settings: {
     kicker: "Options",
     title: "Settings",
@@ -243,6 +253,8 @@ export function App() {
   const [spikeOpen, setSpikeOpen] = React.useState(false);
   /* DEV TOOLS: featherweight-preview tuning panel — bake values then delete */
   const [devToolsOpen, setDevToolsOpen] = React.useState(false);
+  /* DEV TOOLS: overflow inspector for the window-scaling sweep */
+  const [overflowOpen, setOverflowOpen] = React.useState(false);
   const toggleSidebar = React.useCallback(() => {
     setSidebarCollapsed((prev) => {
       const next = !prev;
@@ -284,6 +296,7 @@ export function App() {
   const isVideoConversion = active === "video-conversion";
   const isBgRemoval = active === "bg-removal";
   const isInterpolation = active === "interpolation";
+  const isDeadFrames = active === "dead-frames";
   const isLogs = active === "logs";
   const isSettings = active === "settings";
 
@@ -357,6 +370,8 @@ export function App() {
       ] as const)
       : isInterpolation
         ? ([{ id: "interpolation", label: "Frame interpolation" }] as const)
+      : isDeadFrames
+        ? ([{ id: "dead-frames", label: "Dead frame remover" }] as const)
       : isLogs
         ? ([{ id: "logs", label: "Logs" }] as const)
         : isSettings
@@ -415,11 +430,20 @@ export function App() {
               >
                 🔬 Offset Spike
               </button>
+              {/* DEV TOOLS: overflow inspector launcher */}
+              <button
+                type="button"
+                onClick={() => setOverflowOpen(true)}
+                style={DEV_LAUNCHER_BTN}
+              >
+                📐 Overflow Inspector
+              </button>
             </div>
           )}
           {spikeOpen && <OffsetSpike onClose={() => setSpikeOpen(false)} />}
           {/* DEV TOOLS panel */}
           {devToolsOpen && <PreviewDevTools onClose={() => setDevToolsOpen(false)} />}
+          {overflowOpen && <OverflowInspector onClose={() => setOverflowOpen(false)} />}
         </>
       )}
       {bgModalOpen && (
@@ -510,7 +534,7 @@ export function App() {
           <div className="sidebar-group">
             <button
               type="button"
-              className={`sidebar-group-header ${["audio-extraction", "clip-hunting", "bg-removal", "interpolation", "audio-conversion", "video-conversion"].includes(active) ? "is-active" : ""}`}
+              className={`sidebar-group-header ${["audio-extraction", "clip-hunting", "bg-removal", "interpolation", "dead-frames", "audio-conversion", "video-conversion"].includes(active) ? "is-active" : ""}`}
               onClick={() => setOpenGroups((g) => ({ ...g, media: !g.media }))}
             >
               <Layers size={18} strokeWidth={2} />
@@ -550,6 +574,14 @@ export function App() {
                 >
                   <Gauge size={14} />
                   <span>Frame Interpolation</span>
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar-subitem ${active === "dead-frames" ? "is-active" : ""}`}
+                  onClick={() => setActive("dead-frames")}
+                >
+                  <Scissors size={14} />
+                  <span>Dead Frame Remover</span>
                 </button>
                 <button
                   type="button"
@@ -733,7 +765,10 @@ export function App() {
                 <div className={`panel-view spring-motion ${isInterpolation ? "is-active" : "is-hidden"}`} aria-hidden={!isInterpolation}>
                   <InterpolatePanel active={isInterpolation} />
                 </div>
-                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && !isInterpolation && (
+                <div className={`panel-view spring-motion ${isDeadFrames ? "is-active" : "is-hidden"}`} aria-hidden={!isDeadFrames}>
+                  <DeadFramePanel active={isDeadFrames} />
+                </div>
+                {!isClipHunting && !isDownloader && !isAudioExtraction && !isBgRemoval && !isTsukyio && !isInterpolation && !isDeadFrames && (
                   <div className="panel-view is-active spring-motion">
                     {isHome ? <HomePanel onNavigate={handleHomeNavigate} />
                       : isAudioConversion ? <MediaToAudioPanel />

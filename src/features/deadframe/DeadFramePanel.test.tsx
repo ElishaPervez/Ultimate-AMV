@@ -1,0 +1,352 @@
+import React from "react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
+import { mockInvoke, mockInvokeFn } from "../../../tests/setup/tauri";
+import { mockDialogOpen } from "../../../tests/setup/dialog";
+import {
+  acceptsDroppedPath,
+  DeadFramePanel,
+  isSupportedVideoPath,
+  keptFrameCount,
+} from "./DeadFramePanel";
+
+const CLIP = String.raw`C:\clips\scene.mp4`;
+const OTHER_CLIP = String.raw`C:\clips\other.mp4`;
+
+// Frame 0 is never removable. Index 1 and 3 are held duplicates, index 4 is one
+// frame of drift from a slow pan: it survives the default dial and is only
+// caught once the dial is pushed up.
+const SCORES = [1, 0.0005, 0.2, 0.0005, 0.012, 0.2];
+
+function statusPayload() {
+  return JSON.stringify({
+    type: "status",
+    hardware: { hasCuda: true, device: "RTX Test" },
+    models: {},
+  });
+}
+
+function analysisPayload(args: unknown) {
+  const input = (args as { input: string }).input;
+  return JSON.stringify({
+    type: "analysis",
+    input,
+    frameCount: SCORES.length,
+    fps: 24,
+    width: 1920,
+    height: 1080,
+    duration: SCORES.length / 24,
+    scores: SCORES,
+  });
+}
+
+function previewPayload() {
+  return JSON.stringify({
+    type: "done",
+    output: String.raw`C:\appdata\deadframe_previews\preview-1.mp4`,
+    sourceFrames: SCORES.length,
+    keptFrames: 4,
+    elapsedSeconds: 1,
+  });
+}
+
+function exportPayload() {
+  return JSON.stringify({
+    type: "done",
+    outcomes: [{ ok: true, input: CLIP, output: String.raw`C:\clips\scene_nodead.mp4` }],
+    succeeded: 1,
+    failed: 0,
+    removedFrames: 2,
+    elapsedSeconds: 3,
+  });
+}
+
+function registerDefaults() {
+  mockInvoke("interpolate_status", () => statusPayload());
+  mockInvoke("deadframe_clear_previews", () => undefined);
+  mockInvoke("deadframe_analyze", (args) => analysisPayload(args));
+  mockInvoke("deadframe_preview", () => previewPayload());
+  mockInvoke("deadframe_export", () => exportPayload());
+}
+
+async function addClips(user: ReturnType<typeof userEvent.setup>, paths: string[]) {
+  mockDialogOpen.mockResolvedValueOnce(paths);
+  await user.click(screen.getByRole("button", { name: "Add clips" }));
+  // The queue row swaps "Measuring…" for the count once the scores land.
+  await screen.findAllByText(`${SCORES.length} → 4`);
+}
+
+function analyzeCallCount(): number {
+  return mockInvokeFn.mock.calls.filter(([command]) => command === "deadframe_analyze").length;
+}
+
+function exportButton(): HTMLElement {
+  return screen.getByRole("button", { name: "Export queue" });
+}
+
+async function previewSelectedClip(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Preview" }));
+  await waitFor(() => expect(exportButton()).toBeEnabled());
+}
+
+describe("DeadFramePanel export gate", () => {
+  it("keeps export locked while the queue is empty", async () => {
+    registerDefaults();
+    render(<DeadFramePanel active />);
+    expect(exportButton()).toBeDisabled();
+    expect(await screen.findByText("no preview yet")).toBeInTheDocument();
+  });
+
+  it("keeps export locked after clips are added but before any preview", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    expect(exportButton()).toBeDisabled();
+    expect(screen.getByText("no preview yet")).toBeInTheDocument();
+  });
+
+  it("unlocks export once a preview lands", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await previewSelectedClip(user);
+    expect(
+      screen.getByText("preview matches the dial - ready to export 1 clip"),
+    ).toBeInTheDocument();
+  });
+
+  it("re-locks export when the sensitivity dial moves", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await previewSelectedClip(user);
+    fireEvent.change(screen.getByRole("slider", { name: "Sensitivity" }), {
+      target: { value: "60" },
+    });
+    expect(exportButton()).toBeDisabled();
+    expect(screen.getByText("dial moved - preview again")).toBeInTheDocument();
+  });
+
+  it("re-locks export when a different queue clip is selected", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP, OTHER_CLIP]);
+    await previewSelectedClip(user);
+    // The row's own button, not its Remove button.
+    await user.click(screen.getByRole("button", { name: /^other\.mp4/ }));
+    expect(exportButton()).toBeDisabled();
+    expect(screen.getByText("no preview yet")).toBeInTheDocument();
+  });
+
+  it("leaves export unlocked when the output format changes", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await previewSelectedClip(user);
+    await user.click(screen.getByRole("button", { name: /H\.264 · MKV/ }));
+    expect(exportButton()).toBeEnabled();
+    expect(
+      screen.getByText("preview matches the dial - ready to export 1 clip"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("DeadFramePanel detection dial", () => {
+  it("recomputes the live count from the cached scores without measuring again", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    expect(analyzeCallCount()).toBe(1);
+    expect(screen.getByText("6 frames → 4 kept · 2 removed")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("slider", { name: "Sensitivity" }), {
+      target: { value: "60" },
+    });
+    expect(await screen.findByText("6 frames → 3 kept · 3 removed")).toBeInTheDocument();
+    expect(screen.getByText("6 → 3")).toBeInTheDocument();
+    expect(analyzeCallCount()).toBe(1);
+  });
+
+  it("counts a score sitting exactly on the threshold as kept", () => {
+    // 0.001 is the threshold at dial 0, so it must survive there and only fall
+    // once the dial pushes the threshold past it.
+    expect(keptFrameCount([1, 0.001], 0)).toBe(2);
+    expect(keptFrameCount([1, 0.001], 100)).toBe(1);
+  });
+});
+
+describe("DeadFramePanel output controls", () => {
+  it("unmounts the whole rate row for ProRes and brings it back for the others", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    expect(screen.getByRole("button", { name: "Quality" })).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Constant quality" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /ProRes · MOV/ }));
+    expect(screen.queryByRole("button", { name: "Quality" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "CBR" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("slider", { name: "Constant quality" })).not.toBeInTheDocument();
+    expect(screen.getByText(/nothing to tune/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /H\.264 · MP4/ }));
+    expect(screen.getByRole("button", { name: "Quality" })).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Constant quality" })).toBeInTheDocument();
+  });
+
+  it("swaps the value control and its value when the rate mode changes", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    expect(screen.getByRole("spinbutton", { name: "Constant quality" })).toHaveValue(18);
+
+    await user.click(screen.getByRole("button", { name: "CBR" }));
+    expect(screen.queryByRole("spinbutton", { name: "Constant quality" })).not.toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "Constant bitrate" })).toHaveValue(20);
+    expect(screen.getByText("The encoder holds this bitrate throughout the clip.")).toBeInTheDocument();
+  });
+
+  it("hands the backend the format, rate mode, and value it was shown", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await previewSelectedClip(user);
+
+    await user.click(screen.getByRole("button", { name: /H\.264 · MKV/ }));
+    await user.click(screen.getByRole("button", { name: "CBR" }));
+    fireEvent.change(screen.getByRole("slider", { name: "Constant bitrate" }), {
+      target: { value: "40" },
+    });
+    await user.click(screen.getByRole("button", { name: "Keep" }));
+
+    expect(exportButton()).toBeEnabled();
+    await user.click(exportButton());
+    await waitFor(() => {
+      expect(mockInvokeFn).toHaveBeenCalledWith("deadframe_export", {
+        inputs: [CLIP],
+        sensitivity: 18,
+        suffix: "_nodead",
+        outputFormat: "h264-mkv",
+        rateMode: "cbr",
+        quality: 18,
+        bitrateMbps: 40,
+        keepAudio: true,
+        gpu: true,
+      });
+    });
+  });
+});
+
+describe("DeadFramePanel preview", () => {
+  it("asks the backend for the selected clip at the dial the user can see", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    fireEvent.change(screen.getByRole("slider", { name: "Sensitivity" }), {
+      target: { value: "44" },
+    });
+    await previewSelectedClip(user);
+    expect(mockInvokeFn).toHaveBeenCalledWith("deadframe_preview", {
+      input: CLIP,
+      sensitivity: 44,
+    });
+  });
+
+  it("sweeps up a preview a crash left behind, without saying anything about it", async () => {
+    registerDefaults();
+    render(<DeadFramePanel active />);
+    await waitFor(() => expect(mockInvokeFn).toHaveBeenCalledWith("deadframe_clear_previews"));
+    expect(screen.queryByText(/leftover/i)).not.toBeInTheDocument();
+  });
+
+  it("calls a cancelled preview cancelled instead of showing the killed job's error", async () => {
+    registerDefaults();
+    let failPreview: (() => void) | undefined;
+    mockInvoke("deadframe_preview", () => new Promise((_resolve, reject) => {
+      // The killed sidecar's failure lands after the cancel call has returned,
+      // which is the ordering that would otherwise replace the cancel message.
+      failPreview = () => setTimeout(
+        () => reject(new Error("Dead frame removal stopped without a result (exit code 1).")),
+        0,
+      );
+    }));
+    mockInvoke("cancel_deadframe", () => failPreview?.());
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    await screen.findByText("Cancelled. Files that had already finished were kept.");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(screen.queryByText(/exit code 1/)).not.toBeInTheDocument();
+    expect(exportButton()).toBeDisabled();
+  });
+
+  it("leaves the gate locked and reports the reason when a preview fails", async () => {
+    registerDefaults();
+    mockInvoke("deadframe_preview", () => {
+      throw new Error("Could not read this file.");
+    });
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP]);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("Could not read this file.")).toBeInTheDocument();
+    expect(exportButton()).toBeDisabled();
+    expect(screen.getByText("no preview yet")).toBeInTheDocument();
+  });
+});
+
+describe("DeadFramePanel queue", () => {
+  it("marks a clip that could not be measured and keeps the rest usable", async () => {
+    registerDefaults();
+    mockInvoke("deadframe_analyze", (args) => {
+      const input = (args as { input: string }).input;
+      if (input === OTHER_CLIP) throw new Error("Could not read this file.");
+      return analysisPayload(args);
+    });
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    mockDialogOpen.mockResolvedValueOnce([CLIP, OTHER_CLIP]);
+    await user.click(screen.getByRole("button", { name: "Add clips" }));
+    expect(await screen.findByText("Could not read this file.")).toBeInTheDocument();
+    await previewSelectedClip(user);
+    // The unreadable clip is skipped by the export, so the count is 1 of 2.
+    expect(
+      screen.getByText("preview matches the dial - ready to export 1 clip"),
+    ).toBeInTheDocument();
+  });
+
+  it("removes a queued clip", async () => {
+    registerDefaults();
+    const user = userEvent.setup();
+    render(<DeadFramePanel active />);
+    await addClips(user, [CLIP, OTHER_CLIP]);
+    expect(screen.getByText("2 clips")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove other.mp4" }));
+    expect(screen.getByText("1 clip")).toBeInTheDocument();
+  });
+});
+
+describe("dead frame drop targets", () => {
+  it("accepts supported clips and rejects other files", () => {
+    expect(isSupportedVideoPath(String.raw`C:\clips\scene.MP4`)).toBe(true);
+    expect(isSupportedVideoPath(String.raw`C:\clips\notes.txt`)).toBe(false);
+  });
+
+  it("treats an extensionless drop as a folder to expand", () => {
+    expect(acceptsDroppedPath(String.raw`C:\clips\batch-01`)).toBe(true);
+    expect(acceptsDroppedPath(String.raw`C:\clips\notes.txt`)).toBe(false);
+  });
+});
