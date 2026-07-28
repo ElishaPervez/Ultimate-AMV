@@ -3,12 +3,14 @@ import subprocess
 import sys
 import importlib.util
 
+from . import installer
 from .config import load_config, save_config
 from .gpu import check_nvidia_gpu, get_cpu_switch_cmds, get_gpu_switch_cmds
 from .dependencies import (
     AUDIO_RUNTIME_MODULES,
     _numeric_runtime_ready,
     _prune_stale_numeric_metadata,
+    _prune_unused_package_dirs,
 )
 from .hardware import refresh_hardware
 from .logs import add_log, append_terminal_log
@@ -25,16 +27,11 @@ def _nelux_failure_status(error):
 
 
 def _check_package(package):
-    try:
-        result = subprocess.run(
-            [sys.executable, "-I", "-m", "pip", "show", package],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
+    # Reads the installed-package records directly instead of shelling out.
+    # Six of these run every time the setup screen opens; each one used to
+    # start a fresh Python process, so opening the screen took seconds. It
+    # also stays correct no matter which installer put the package there.
+    return installer.is_installed(package)
 
 
 def _nelux_importable():
@@ -315,20 +312,59 @@ def _ensure_pip(progress_callback):
         os.unlink(tmp.name)
 
 
-def install_setup(mode, progress_callback):
+def _ensure_installer_for(cmd, progress_callback):
+    """uv is self-contained; pip has to exist inside the bundled Python first."""
+    if installer.is_uv_cmd(cmd):
+        return
     _ensure_pip(progress_callback)
+
+
+def install_setup(mode, progress_callback):
+    # Whichever installer runs, packages land in Lib\site-packages and the
+    # embeddable Python only looks there when site loading is switched on. It
+    # ships switched off, so a Python that was never prepared imports nothing
+    # that gets installed.
+    _fix_pth_file()
     plan = collect_setup_plan(mode)
     installs = plan["installs"]
     if not installs:
         _prune_stale_numeric_metadata()
+        _prune_unused_package_dirs()
         apply_success_mode(mode)
         return {"ok": True, "mode": mode, "plan": plan}
+
+    add_log(
+        "audio.setup.installer",
+        "Setup installer selected",
+        details={"mode": mode, "installer": installer.active_installer()},
+    )
 
     total = len(installs)
     for index, cmd in enumerate(installs, start=1):
         progress_callback(index, total, "running", " ".join(cmd))
         add_log("audio.setup.step", f"Running setup step {index}/{total}", details={"mode": mode, "command": cmd})
+        _ensure_installer_for(cmd, progress_callback)
         returncode, output_lines = _run_command_streaming(cmd, index, total, progress_callback)
+
+        if returncode != 0:
+            # The fast installer is downloaded on demand, so on some machines
+            # it is absent, quarantined or broken while the bundled one works
+            # fine. Retry that step with the bundled installer rather than
+            # failing a setup that can still succeed.
+            fallback = installer.to_pip_cmd(cmd)
+            if fallback is not None:
+                add_log(
+                    "audio.setup.step.fallback",
+                    f"Step {index}/{total} retrying with the bundled installer",
+                    level="warning",
+                    details={"mode": mode, "error": _summarize_command_error(output_lines, returncode)},
+                )
+                progress_callback(index, total, "running", "Retrying with the bundled installer...")
+                _ensure_pip(progress_callback)
+                returncode, output_lines = _run_command_streaming(
+                    fallback, index, total, progress_callback
+                )
+
         if returncode != 0:
             error = _summarize_command_error(output_lines, returncode)
             progress_callback(index, total, "error", error)
@@ -338,6 +374,10 @@ def install_setup(mode, progress_callback):
         add_log("audio.setup.step.complete", f"Setup step {index}/{total} complete", details={"mode": mode})
 
     _prune_stale_numeric_metadata()
+    _prune_unused_package_dirs()
+    # Drop cache entries nothing points at any more. Silent by design: it only
+    # removes what is unreferenced, so there is nothing for a user to decide.
+    installer.prune_cache()
     apply_success_mode(mode)
     return {"ok": True, "mode": mode, "plan": collect_setup_plan(mode)}
 
@@ -352,6 +392,8 @@ def _run_command_streaming(cmd, step, total, progress_callback):
         bufsize=1,
         encoding="utf-8",
         errors="replace",
+        env=installer.subprocess_env(),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output_lines = []
     assert process.stdout is not None
@@ -366,15 +408,4 @@ def _run_command_streaming(cmd, step, total, progress_callback):
 
 
 def _summarize_command_error(output_lines, code):
-    lines = [line.strip() for line in output_lines if line.strip()]
-    lines = [
-        line
-        for line in lines
-        if not line.startswith("[notice]")
-        and "A new release of pip" not in line
-        and "To update, run:" not in line
-    ]
-    for line in reversed(lines):
-        if "ERROR:" in line or "error:" in line.lower():
-            return line
-    return lines[-1] if lines else f"Command failed with exit code {code}"
+    return installer.summarize_failure(output_lines, code)

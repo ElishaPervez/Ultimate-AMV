@@ -5,6 +5,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from . import installer
 from .logs import add_log, append_terminal_log
 from .runtime_versions import (
     NELUX_PACKAGE,
@@ -186,14 +187,9 @@ def _audio_runtime_missing(module_name, package_name):
     return False
 
 
-def _run_pip_install(args, progress_callback=None):
-    _ensure_pip(progress_callback)
-    cmd = [sys.executable, "-I", "-m", "pip", "install", *args]
+def _stream_command(cmd, progress_callback):
+    """Run one installer command, streaming its output into the log and UI."""
     append_terminal_log(f"$ {' '.join(cmd)}")
-    add_log("deps.repair.step", "Running dependency repair command", details={"command": cmd})
-    if progress_callback:
-        progress_callback("dependency-repair", -1, f"Installing {' '.join(args)}...")
-
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -202,6 +198,8 @@ def _run_pip_install(args, progress_callback=None):
         bufsize=1,
         encoding="utf-8",
         errors="replace",
+        env=installer.subprocess_env(),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output_lines = []
     assert process.stdout is not None
@@ -213,40 +211,96 @@ def _run_pip_install(args, progress_callback=None):
         append_terminal_log(line)
         if progress_callback:
             progress_callback("dependency-repair", -1, line)
-    code = process.wait(timeout=1200)
-    if code != 0:
-        summary = _summarize_command_error(output_lines, code)
-        add_log("deps.repair.step.error", "Dependency repair command failed", level="error", details={"error": summary})
-        raise RuntimeError(summary)
+    return process.wait(timeout=1200), output_lines
+
+
+def _run_with_fallback(cmd, progress_callback, failure_event, failure_message):
+    """Run an installer command; retry once through pip if uv cannot do it.
+
+    uv is downloaded on demand, so it can be missing, quarantined or broken on
+    a machine where pip works fine. Falling back keeps such a user on the slow
+    install instead of stranding them with a failure they cannot act on.
+    """
+    code, output_lines = _stream_command(cmd, progress_callback)
+    if code == 0:
+        return output_lines
+
+    fallback = installer.to_pip_cmd(cmd)
+    if fallback is not None:
+        summary = installer.summarize_failure(output_lines, code)
+        add_log(
+            "deps.installer.fallback",
+            "Fast installer failed, retrying with the bundled one",
+            level="warning",
+            details={"error": summary},
+        )
+        if progress_callback:
+            progress_callback("dependency-repair", -1, "Retrying with the bundled installer...")
+        _ensure_pip(progress_callback)
+        code, output_lines = _stream_command(fallback, progress_callback)
+        if code == 0:
+            return output_lines
+
+    summary = installer.summarize_failure(output_lines, code)
+    add_log(failure_event, failure_message, level="error", details={"error": summary})
+    raise RuntimeError(summary)
+
+
+def _run_pip_install(args, progress_callback=None):
+    cmd = installer.install_cmd(args)
+    _ensure_installer(cmd, progress_callback)
+    add_log("deps.repair.step", "Running dependency repair command", details={"command": cmd})
+    if progress_callback:
+        progress_callback("dependency-repair", -1, f"Installing {' '.join(args)}...")
+
+    _run_with_fallback(
+        cmd,
+        progress_callback,
+        "deps.repair.step.error",
+        "Dependency repair command failed",
+    )
+    _prune_unused_package_dirs()
+
+
+def _run_prepared_install(cmd, progress_callback=None):
+    """Run an already-built install command (the mode-switch plan builds its own)."""
+    _ensure_installer(cmd, progress_callback)
+    _run_with_fallback(
+        cmd,
+        progress_callback,
+        "deps.repair.step.error",
+        "Dependency repair command failed",
+    )
+    _prune_unused_package_dirs()
 
 
 def _run_pip_uninstall(packages, progress_callback=None):
-    _ensure_pip(progress_callback)
-    cmd = [sys.executable, "-I", "-m", "pip", "uninstall", "-y", *packages]
-    append_terminal_log(f"$ {' '.join(cmd)}")
+    cmd = installer.uninstall_cmd(packages)
+    if cmd is None:
+        return
+    _ensure_installer(cmd, progress_callback)
     add_log("deps.repair.step", "Removing conflicting packages", details={"command": cmd})
     if progress_callback:
         progress_callback("dependency-repair", -1, f"Removing {' '.join(packages)}...")
 
-    result = subprocess.run(
+    _run_with_fallback(
         cmd,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        encoding="utf-8",
-        errors="replace",
+        progress_callback,
+        "deps.repair.step.error",
+        "Package removal failed",
     )
-    output_lines = [
-        line.rstrip()
-        for line in ((result.stdout or "") + (result.stderr or "")).splitlines()
-        if line.strip()
-    ]
-    for line in output_lines:
-        append_terminal_log(line)
-    if result.returncode != 0:
-        summary = _summarize_command_error(output_lines, result.returncode)
-        add_log("deps.repair.step.error", "Package removal failed", level="error", details={"error": summary})
-        raise RuntimeError(summary)
+
+
+def _ensure_installer(cmd, progress_callback=None):
+    """Make sure the tool this command names can actually run.
+
+    uv arrives as a self-contained program, so there is nothing to prepare.
+    pip has to exist inside the bundled Python, and on a fresh embeddable
+    Python it does not.
+    """
+    if installer.is_uv_cmd(cmd):
+        return
+    _ensure_pip(progress_callback)
 
 
 def _ensure_pip(progress_callback=None):
@@ -286,18 +340,7 @@ def _ensure_pip(progress_callback=None):
 
 
 def _summarize_command_error(output_lines, code):
-    lines = [line.strip() for line in output_lines if line.strip()]
-    lines = [
-        line
-        for line in lines
-        if not line.startswith("[notice]")
-        and "A new release of pip" not in line
-        and "To update, run:" not in line
-    ]
-    for line in reversed(lines):
-        if "ERROR:" in line or "error:" in line.lower():
-            return line
-    return lines[-1] if lines else f"Command failed with exit code {code}"
+    return installer.summarize_failure(output_lines, code)
 
 
 def _numeric_runtime_probe_error():
@@ -344,6 +387,49 @@ def _site_packages_dir():
     return Path(sys.executable).resolve().parent / "Lib" / "site-packages"
 
 
+# Installed directories nothing in this app ever reads. onnx ships its own
+# test-suite fixtures as ~3,800 directories holding 9 files, and Tauri walks the
+# bundled Python on every dev start and every build: its resource walker calls
+# itself once per directory it skips and only unwinds when it reaches a file, so
+# that many empty directories in a row overflow the build script's stack and the
+# build dies before Rust compiles. Removing them also keeps them out of the
+# installer.
+UNUSED_PACKAGE_DIRS = ("onnx/backend/test/data",)
+
+
+def _prune_unused_package_dirs():
+    """Remove installed directories the app never reads. Never fatal."""
+    site_packages = _site_packages_dir()
+    if not site_packages.is_dir():
+        return []
+
+    removed = []
+    for relative in UNUSED_PACKAGE_DIRS:
+        target = site_packages.joinpath(*relative.split("/"))
+        if not target.is_dir():
+            continue
+        try:
+            shutil.rmtree(target)
+        except OSError as error:
+            # Leaving it behind only costs disk and a slower build, so a locked
+            # file here must not fail an otherwise successful install.
+            add_log(
+                "deps.unused_dirs.prune_failed",
+                "Could not remove an unused package directory",
+                level="warning",
+                details={"path": str(target), "error": str(error)},
+            )
+            continue
+        removed.append(relative)
+    if removed:
+        add_log(
+            "deps.unused_dirs.pruned",
+            "Removed unused package directories",
+            details={"removed": removed},
+        )
+    return removed
+
+
 def _prune_stale_numeric_metadata():
     """Remove only obsolete NumPy/Numba version records after a good probe."""
     if not _numeric_runtime_ready():
@@ -380,13 +466,12 @@ def _prune_stale_numeric_metadata():
 
 
 def _repair_numeric_runtime(progress_callback=None):
-    _run_pip_install(
-        [
-            "--upgrade",
-            "--force-reinstall",
-            NUMPY_PACKAGE,
-            NUMBA_PACKAGE,
-        ],
+    _run_prepared_install(
+        installer.install_cmd(
+            [NUMPY_PACKAGE, NUMBA_PACKAGE],
+            upgrade=True,
+            reinstall=True,
+        ),
         progress_callback,
     )
     error = _numeric_runtime_probe_error()
@@ -410,10 +495,15 @@ def _torch_import_error():
 
 def _install_torch(gpu, progress_callback=None, force=False):
     index_url = "https://download.pytorch.org/whl/cu128" if gpu else "https://download.pytorch.org/whl/cpu"
-    args = [*TORCH_PACKAGES, "--index-url", index_url]
-    if force:
-        args.extend(["--upgrade", "--force-reinstall"])
-    _run_pip_install(args, progress_callback)
+    _run_prepared_install(
+        installer.install_cmd(
+            TORCH_PACKAGES,
+            index_url=index_url,
+            upgrade=force,
+            reinstall=force,
+        ),
+        progress_callback,
+    )
 
 
 def _torch_ready(gpu):

@@ -156,46 +156,43 @@ def test_missing_feature_dependencies_clip_gpu_checks_torch_cuda(mocker):
 # ---------------------------------------------------------------------------
 
 
-def test_install_torch_with_force_uses_force_reinstall(mocker):
-    """When force=True, --force-reinstall must appear in the pip command."""
-    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
+def _torch_command(mocker, *, gpu, force):
+    """Build the torch install command _install_torch would run."""
+    runner = mocker.patch("amv_audio.dependencies._run_prepared_install")
     mocker.patch("amv_audio.dependencies._ensure_pip")  # prevent network calls
-
-    deps_mod._install_torch(gpu=False, progress_callback=None, force=True)
-
-    call_args = mock_pip.call_args[0][0]  # first positional arg = args list
-    assert "--force-reinstall" in call_args
-    assert "--upgrade" in call_args
+    deps_mod._install_torch(gpu=gpu, progress_callback=None, force=force)
+    return runner.call_args[0][0]
 
 
-def test_install_torch_without_force_omits_force_reinstall(mocker):
-    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
-    mocker.patch("amv_audio.dependencies._ensure_pip")
+def test_install_torch_with_force_replaces_the_installed_build(mocker):
+    """force=True must replace the files even when the version already matches.
 
-    deps_mod._install_torch(gpu=False, progress_callback=None, force=False)
+    Without it, swapping a CPU build for a CUDA build of the same version is
+    reported as already-satisfied and silently does nothing.
+    """
+    cmd = _torch_command(mocker, gpu=False, force=True)
+    assert "--force-reinstall" in cmd or "--reinstall" in cmd
+    assert "--upgrade" in cmd
 
-    call_args = mock_pip.call_args[0][0]
-    assert "--force-reinstall" not in call_args
+
+def test_install_torch_without_force_does_not_replace_files(mocker):
+    cmd = _torch_command(mocker, gpu=False, force=False)
+    assert "--force-reinstall" not in cmd
+    assert "--reinstall" not in cmd
 
 
 def test_install_torch_gpu_uses_cuda_index_url(mocker):
-    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
-    mocker.patch("amv_audio.dependencies._ensure_pip")
-
-    deps_mod._install_torch(gpu=True, progress_callback=None, force=False)
-
-    call_args_str = " ".join(mock_pip.call_args[0][0])
-    assert "cu128" in call_args_str
+    assert "cu128" in " ".join(_torch_command(mocker, gpu=True, force=False))
 
 
 def test_install_torch_cpu_uses_cpu_index_url(mocker):
-    mock_pip = mocker.patch("amv_audio.dependencies._run_pip_install")
-    mocker.patch("amv_audio.dependencies._ensure_pip")
+    assert "/cpu" in " ".join(_torch_command(mocker, gpu=False, force=False))
 
-    deps_mod._install_torch(gpu=False, progress_callback=None, force=False)
 
-    call_args_str = " ".join(mock_pip.call_args[0][0])
-    assert "/cpu" in call_args_str
+def test_install_torch_always_pins_the_tested_versions(mocker):
+    cmd = " ".join(_torch_command(mocker, gpu=True, force=True))
+    for package in deps_mod.TORCH_PACKAGES:
+        assert package in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -343,18 +340,20 @@ def test_audio_dependencies_flag_incompatible_numeric_runtime(mocker):
 
 
 def test_numeric_runtime_repair_force_reinstalls_the_verified_pair(mocker):
-    pip_install = mocker.patch("amv_audio.dependencies._run_pip_install")
+    runner = mocker.patch("amv_audio.dependencies._run_prepared_install")
     mocker.patch("amv_audio.dependencies._numeric_runtime_probe_error", return_value=None)
     mocker.patch("amv_audio.dependencies._prune_stale_numeric_metadata")
 
     deps_mod._repair_numeric_runtime()
 
-    assert pip_install.call_args[0][0] == [
-        "--upgrade",
-        "--force-reinstall",
-        "numpy==2.4.4",
-        "numba==0.65.1",
-    ]
+    cmd = runner.call_args[0][0]
+    assert "numpy==2.4.4" in cmd
+    assert "numba==0.65.1" in cmd
+    assert "--upgrade" in cmd
+    # Replacing the files is the point: a broken update can leave the version
+    # record intact while the files underneath are wrong, and a plain install
+    # trusts that record and does nothing.
+    assert "--force-reinstall" in cmd or "--reinstall" in cmd
 
 
 def test_ensure_audio_dependencies_routes_collision_to_numeric_repair(mocker):
@@ -401,3 +400,41 @@ def test_prune_stale_numeric_metadata_keeps_only_verified_records(mocker, tmp_pa
     assert (site_packages / "numpy-2.4.4.dist-info").is_dir()
     assert (site_packages / "numba-0.65.1.dist-info").is_dir()
     assert (site_packages / "unrelated-1.0.dist-info").is_dir()
+
+
+def test_prune_unused_package_dirs_removes_onnx_test_fixtures(mocker, tmp_path):
+    site_packages = tmp_path / "Lib" / "site-packages"
+    fixtures = site_packages / "onnx" / "backend" / "test" / "data" / "node" / "test_abs"
+    fixtures.mkdir(parents=True)
+    runner = site_packages / "onnx" / "backend" / "test" / "runner"
+    runner.mkdir(parents=True)
+    (runner / "__init__.py").write_text("", encoding="utf-8")
+    mocker.patch("amv_audio.dependencies._site_packages_dir", return_value=site_packages)
+    mocker.patch("amv_audio.dependencies.add_log")
+
+    removed = deps_mod._prune_unused_package_dirs()
+
+    assert removed == ["onnx/backend/test/data"]
+    assert not (site_packages / "onnx" / "backend" / "test" / "data").exists()
+    # The importable parts of onnx must survive.
+    assert (runner / "__init__.py").is_file()
+
+
+def test_prune_unused_package_dirs_is_a_no_op_when_absent(mocker, tmp_path):
+    site_packages = tmp_path / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    mocker.patch("amv_audio.dependencies._site_packages_dir", return_value=site_packages)
+    mocker.patch("amv_audio.dependencies.add_log")
+
+    assert deps_mod._prune_unused_package_dirs() == []
+
+
+def test_prune_unused_package_dirs_survives_a_locked_directory(mocker, tmp_path):
+    site_packages = tmp_path / "Lib" / "site-packages"
+    (site_packages / "onnx" / "backend" / "test" / "data").mkdir(parents=True)
+    mocker.patch("amv_audio.dependencies._site_packages_dir", return_value=site_packages)
+    mocker.patch("amv_audio.dependencies.add_log")
+    mocker.patch("amv_audio.dependencies.shutil.rmtree", side_effect=OSError("in use"))
+
+    # A locked file costs disk and a slower build; it must not fail the install.
+    assert deps_mod._prune_unused_package_dirs() == []
