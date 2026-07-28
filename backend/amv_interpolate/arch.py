@@ -56,12 +56,16 @@ class _FeatureHead(nn.Module):
 class _FlowBlock425(nn.Module):
     def __init__(self, in_channels, channels):
         super().__init__()
-        self.entry = nn.Sequential(
+        # Attribute names mirror the upstream Practical-RIFE checkpoint
+        # layout (conv0 / convblock / lastconv). They are the keys inside
+        # flownet.pkl, so renaming them for readability would silently load
+        # zero weights.
+        self.conv0 = nn.Sequential(
             _conv(in_channels, channels // 2, 3, 2, 1),
             _conv(channels // 2, channels, 3, 2, 1),
         )
-        self.residuals = nn.Sequential(*(_ResidualConv(channels) for _ in range(8)))
-        self.exit = nn.Sequential(
+        self.convblock = nn.Sequential(*(_ResidualConv(channels) for _ in range(8)))
+        self.lastconv = nn.Sequential(
             nn.ConvTranspose2d(channels, 4 * 13, 4, 2, 1),
             nn.PixelShuffle(2),
         )
@@ -75,8 +79,8 @@ class _FlowBlock425(nn.Module):
                 flow, scale_factor=1.0 / scale, mode="bilinear", align_corners=False
             ) / scale
             value = torch.cat((value, scaled_flow), dim=1)
-        features = self.residuals(self.entry(value))
-        output = self.exit(features)
+        features = self.convblock(self.conv0(value))
+        output = self.lastconv(features)
         output = functional.interpolate(
             output, scale_factor=scale, mode="bilinear", align_corners=False
         )
@@ -154,12 +158,13 @@ class Rife425Net(nn.Module):
 class _FlowBlock46(nn.Module):
     def __init__(self, in_channels, channels):
         super().__init__()
-        self.entry = nn.Sequential(
+        # Same checkpoint-key constraint as _FlowBlock425 above.
+        self.conv0 = nn.Sequential(
             _conv(in_channels, channels // 2, 3, 2, 1),
             _conv(channels // 2, channels, 3, 2, 1),
         )
-        self.residuals = nn.Sequential(*(_ResidualConv(channels) for _ in range(8)))
-        self.exit = nn.Sequential(
+        self.convblock = nn.Sequential(*(_ResidualConv(channels) for _ in range(8)))
+        self.lastconv = nn.Sequential(
             nn.ConvTranspose2d(channels, 4 * 6, 4, 2, 1),
             nn.PixelShuffle(2),
         )
@@ -173,7 +178,7 @@ class _FlowBlock46(nn.Module):
                 flow, scale_factor=1.0 / scale, mode="bilinear", align_corners=False
             ) / scale
             value = torch.cat((value, scaled_flow), dim=1)
-        output = self.exit(self.residuals(self.entry(value)))
+        output = self.lastconv(self.convblock(self.conv0(value)))
         output = functional.interpolate(
             output, scale_factor=scale, mode="bilinear", align_corners=False
         )

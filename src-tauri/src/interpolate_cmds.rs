@@ -13,7 +13,7 @@ use tauri::{Emitter, Manager};
 
 use crate::{
     app_root, apply_python_env, clear_child_pid, cmd, interpolate_cli_path, kill_child_pid,
-    log_error, log_info, python_exe, run_interpolate_cli, store_child_pid, tools,
+    log_error, log_info, python_exe_checked, run_interpolate_cli, store_child_pid, tools,
     truncate_log_text, INTERPOLATE_ACTIVE_OUTPUT, INTERPOLATE_CHILD_PID,
 };
 
@@ -148,16 +148,32 @@ fn write_jobs_file(
     Ok(JobsFileGuard(path))
 }
 
+const OUTPUT_FORMATS: &[&str] = &["h264-mp4", "hevc-mp4", "h264-mkv", "prores-mov"];
+
 fn interpolation_settings(
     factor: u32,
     target_fps: Option<f64>,
+    slow_motion: bool,
     model: &str,
     rate_mode: Option<String>,
     quality: Option<u32>,
     bitrate_mbps: Option<f64>,
-) -> Result<(&'static str, String, u32, f64), String> {
-    if !matches!(factor, 2 | 3 | 4) {
-        return Err("Frame interpolation supports 2x, 3x, or 4x speed factors.".to_string());
+    output_format: Option<String>,
+) -> Result<(&'static str, String, u32, f64, String), String> {
+    let valid_factor = if slow_motion {
+        matches!(factor, 2 | 3 | 4 | 8 | 16 | 32 | 64)
+    } else {
+        target_fps.is_some() || matches!(factor, 2 | 3 | 4)
+    };
+    if !valid_factor {
+        return Err(if slow_motion {
+            "Slow motion supports 2x, 3x, 4x, 8x, 16x, 32x, or 64x factors.".to_string()
+        } else {
+            "Frame interpolation supports 2x, 3x, or 4x speed factors.".to_string()
+        });
+    }
+    if slow_motion && target_fps.is_some() {
+        return Err("Slow motion cannot be combined with a target frame rate.".to_string());
     }
     if let Some(target) = target_fps {
         let target_int = target.round() as u32;
@@ -177,24 +193,33 @@ fn interpolation_settings(
     if !bitrate_mbps.is_finite() || bitrate_mbps <= 0.0 {
         return Err("Target bitrate must be greater than 0 Mbps.".to_string());
     }
+    let output_format = output_format.unwrap_or_else(|| "h264-mp4".to_string());
+    if !OUTPUT_FORMATS.contains(&output_format.as_str()) {
+        return Err(format!(
+            "Output format must be one of {}.",
+            OUTPUT_FORMATS.join(", ")
+        ));
+    }
     let model_tool = match model {
         "rife4.25" => "rife-4.25",
         "rife4.6" => "rife-4.6",
         _ => return Err(format!("Unknown interpolation model: {model}")),
     };
-    Ok((model_tool, rate_mode, quality, bitrate_mbps))
+    Ok((model_tool, rate_mode, quality, bitrate_mbps, output_format))
 }
 
 fn interpolation_args(
     jobs_file: &JobsFileGuard,
     factor: u32,
     target_fps: Option<f64>,
+    slow_motion: bool,
     model: String,
     gpu: bool,
     half: bool,
     rate_mode: String,
     quality: u32,
     bitrate_mbps: f64,
+    output_format: String,
 ) -> Vec<String> {
     let mut args = vec![
         "interpolate".to_string(),
@@ -202,6 +227,8 @@ fn interpolation_args(
         jobs_file.0.to_string_lossy().to_string(),
         "--factor".to_string(),
         factor.to_string(),
+        "--slow-motion".to_string(),
+        slow_motion.to_string(),
         "--model".to_string(),
         model,
         "--gpu".to_string(),
@@ -214,6 +241,8 @@ fn interpolation_args(
         quality.to_string(),
         "--bitrate-mbps".to_string(),
         bitrate_mbps.to_string(),
+        "--output-format".to_string(),
+        output_format,
     ];
     if let Some(target) = target_fps {
         args.push("--target-fps".to_string());
@@ -229,9 +258,11 @@ pub(crate) async fn interpolate_run(
     jobs: Vec<InterpolateJob>,
     factor: u32,
     target_fps: Option<f64>,
+    slow_motion: bool,
     model: String,
     gpu: bool,
     half: bool,
+    output_format: Option<String>,
     rate_mode: Option<String>,
     quality: Option<u32>,
     bitrate_mbps: Option<f64>,
@@ -239,13 +270,15 @@ pub(crate) async fn interpolate_run(
     if jobs.is_empty() {
         return Err("Add at least one clip before starting interpolation.".to_string());
     }
-    let (model_tool, rate_mode, quality, bitrate_mbps) = interpolation_settings(
+    let (model_tool, rate_mode, quality, bitrate_mbps, output_format) = interpolation_settings(
         factor,
         target_fps,
+        slow_motion,
         &model,
         rate_mode,
         quality,
         bitrate_mbps,
+        output_format,
     )?;
 
     window
@@ -267,12 +300,14 @@ pub(crate) async fn interpolate_run(
         &jobs_file,
         factor,
         target_fps,
+        slow_motion,
         model,
         gpu,
         half,
         rate_mode,
         quality,
         bitrate_mbps,
+        output_format,
     );
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _jobs_file = jobs_file;
@@ -374,13 +409,18 @@ pub(crate) async fn interpolate_exported_clips(
     if paths.is_empty() {
         return Err("No exported clips were available for smoothing.".to_string());
     }
-    let (model_tool, rate_mode, quality, bitrate_mbps) = interpolation_settings(
+    // The smoothed file has to slot back in where the export was, so its
+    // container is whatever that clip already used and only the video codec is
+    // fixed here.
+    let (model_tool, rate_mode, quality, bitrate_mbps, output_format) = interpolation_settings(
         factor,
         None,
+        false,
         &model,
         rate_mode,
         quality,
         bitrate_mbps,
+        None,
     )?;
     window
         .emit(
@@ -419,12 +459,14 @@ pub(crate) async fn interpolate_exported_clips(
         &jobs_file,
         factor,
         None,
+        false,
         model,
         gpu,
         half,
         rate_mode,
         quality,
         bitrate_mbps,
+        output_format,
     );
     let raw = tauri::async_runtime::spawn_blocking(move || {
         let _jobs_file = jobs_file;
@@ -489,7 +531,7 @@ pub(crate) fn run_streaming_interpolate_cli(
         "Starting streaming frame interpolation bridge",
         json!({ "args": &args, "outputCount": output_paths.len() }),
     );
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(interpolate_cli_path(&root))
@@ -639,6 +681,49 @@ mod tests {
     #[test]
     fn cancelling_without_a_running_job_is_a_no_op() {
         cancel_interpolate_now();
+    }
+
+    #[test]
+    fn slow_motion_rejects_a_target_frame_rate() {
+        let result =
+            interpolation_settings(2, Some(60.0), true, "rife4.25", None, None, None, None);
+        assert_eq!(
+            result.unwrap_err(),
+            "Slow motion cannot be combined with a target frame rate."
+        );
+    }
+
+    #[test]
+    fn slow_motion_is_forwarded_to_the_python_sidecar() {
+        let jobs_file = JobsFileGuard(PathBuf::from("jobs.json"));
+        let args = interpolation_args(
+            &jobs_file,
+            64,
+            None,
+            true,
+            "rife4.25".to_string(),
+            true,
+            true,
+            "quality".to_string(),
+            18,
+            20.0,
+            "h264-mp4".to_string(),
+        );
+        let flag = args
+            .iter()
+            .position(|value| value == "--slow-motion")
+            .expect("slow-motion flag");
+        assert_eq!(args.get(flag + 1).map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn normal_interpolation_keeps_its_four_times_ceiling() {
+        let result =
+            interpolation_settings(64, None, false, "rife4.25", None, None, None, None);
+        assert_eq!(
+            result.unwrap_err(),
+            "Frame interpolation supports 2x, 3x, or 4x speed factors."
+        );
     }
 
     #[test]

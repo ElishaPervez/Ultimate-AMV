@@ -30,6 +30,11 @@ MODEL_SPECS = {
 }
 MODEL_KEYS = tuple(MODEL_SPECS)
 
+# The upstream checkpoints ship the distillation teacher and the timestep
+# estimator alongside the inference network. Neither is used when the caller
+# supplies an explicit timestep, so they are dropped before loading.
+TRAINING_ONLY_PREFIXES = ("teacher.", "caltime.")
+
 
 def tools_dir():
     configured = os.environ.get("ULTIMATE_AMV_TOOLS_DIR")
@@ -91,19 +96,17 @@ class RifeModel:
         state = {
             key.removeprefix("module."): value
             for key, value in state.items()
+            if not key.removeprefix("module.").startswith(TRAINING_ONLY_PREFIXES)
         }
         missing, unexpected = self.network.load_state_dict(state, strict=False)
-        if unexpected:
+        # Every inference layer must be present and every supplied weight must
+        # land on one. Anything else means the weight file does not match this
+        # build of the network, and inference would silently produce garbage.
+        if missing or unexpected:
             raise RuntimeError(
-                "The downloaded RIFE model contains unexpected layers. "
-                "Delete it from the tools cache and let the app download it again."
-            )
-        # Training-only weights are not part of the inference network. Every
-        # inference layer must still be present.
-        if missing:
-            raise RuntimeError(
-                "The downloaded RIFE model is incomplete. "
-                "Delete it from the tools cache and let the app download it again."
+                f"{MODEL_SPECS[model_key].label} could not be loaded: the weight file "
+                f"does not match this version of the app. Delete {weights} and start "
+                "the batch again to download a fresh copy."
             )
         self.network.eval().to(self.device)
         if self.half:
@@ -117,18 +120,25 @@ class RifeModel:
         return tensor.to(dtype=dtype).div_(255.0)
 
     def interpolate(self, first, second, timestep, inference_scale=1.0):
+        # Everything that touches the network's output must stay inside this
+        # block. A tensor produced under inference_mode cannot be modified in
+        # place once execution leaves the block, and clamp_/mul_ below do
+        # exactly that -- outside, PyTorch raises and the frame is lost.
         torch = self.torch
-        first_tensor = self._tensor(first)
-        second_tensor = self._tensor(second)
         with torch.inference_mode():
+            first_tensor = self._tensor(first)
+            second_tensor = self._tensor(second)
             result = self.network(
                 first_tensor,
                 second_tensor,
                 float(timestep),
                 inference_scale=float(inference_scale),
             )
-        result = result.clamp_(0, 1).mul_(255).byte()
-        return result.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            result = result.clamp_(0, 1).mul_(255).byte()
+            frame = result.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        # The array above still points at the inference tensor's memory, which
+        # the next frame will reuse. Copy it out before returning.
+        return frame.copy()
 
     def reset_state(self):
         # Current RIFE networks are stateless between frame pairs. Keep this

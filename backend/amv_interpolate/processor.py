@@ -5,13 +5,69 @@ import math
 import os
 import subprocess
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
+# Output settings live in amv_video so the dead-frame remover writes files with
+# exactly the same encoder behaviour. Re-exported here because callers (and the
+# tests) still reach for them through this module.
+from amv_video.encode import (  # noqa: F401
+    OUTPUT_FORMAT_KEYS,
+    OUTPUT_FORMATS,
+    QUICKTIME_AUDIO_CODECS,
+    QUICKTIME_CONTAINERS,
+    _audio_args,
+    _encoder_command,
+    _rate_args,
+    _video_args,
+    format_extension,
+)
+
 
 SCENE_DIFFERENCE_THRESHOLD = 0.075
+INTERPOLATION_FACTORS = (2, 3, 4)
+SLOW_MOTION_FACTORS = (2, 3, 4, 8, 16, 32, 64)
+
+
+def _stop_process(process, timeout=5):
+    """Kill a helper process and wait for it to actually be gone.
+
+    On Windows kill() only *requests* termination; the process keeps its file
+    handles for a moment afterwards. Returning before it exits is what made a
+    partially written output file impossible to delete.
+    """
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            return
+    try:
+        process.wait(timeout=timeout)
+    except Exception:
+        pass
+
+
+def discard_partial_output(path, attempts=20, delay=0.1):
+    """Delete a half-written output file, tolerating a still-closing writer.
+
+    Returns True if the file is gone. Never raises: this only ever runs while
+    another failure is already being reported, and an exception here would
+    REPLACE that failure. A PyTorch error once reached the user as "the file is
+    being used by another process" for exactly that reason.
+    """
+    target = Path(path)
+    for attempt in range(attempts):
+        try:
+            target.unlink(missing_ok=True)
+            return True
+        except OSError:
+            if attempt == attempts - 1:
+                return False
+            time.sleep(delay)
+    return False
 
 
 @dataclass(frozen=True)
@@ -22,6 +78,7 @@ class MediaInfo:
     frame_count: int
     duration: float
     has_audio: bool
+    audio_codec: str = ""
 
 
 def round_up(value, multiple):
@@ -88,9 +145,24 @@ def output_fps(source_fps, factor=None, target_fps=None):
                 "Target frame rate must be higher than the source frame rate."
             )
         return target
-    if factor not in (2, 3, 4):
+    if factor not in INTERPOLATION_FACTORS:
         raise ValueError("Interpolation factor must be 2, 3, or 4")
     return float(source_fps) * factor
+
+
+def interpolation_rates(source_fps, factor, target_fps=None, slow_motion=False):
+    if slow_motion and target_fps is not None:
+        raise ValueError("Slow motion cannot be combined with a target frame rate.")
+    if slow_motion:
+        if factor not in SLOW_MOTION_FACTORS:
+            raise ValueError(
+                "Slow-motion factor must be 2, 3, 4, 8, 16, 32, or 64"
+            )
+        generated_fps = float(source_fps) * factor
+    else:
+        generated_fps = output_fps(source_fps, factor=factor, target_fps=target_fps)
+    playback_fps = float(source_fps) if slow_motion else generated_fps
+    return generated_fps, playback_fps
 
 
 def pair_timesteps(source_fps, target_fps, pair_index, next_output_index):
@@ -126,6 +198,45 @@ def resolve_tool(name):
             f"The bundled {name} tool is missing. Restart the app to repair its tools."
         )
     return str(path)
+
+
+def probe_audio_codec(input_path, ffprobe_path=None):
+    """Return the source's first audio codec, or an empty string if silent.
+
+    This is a separate probe on purpose. The video probe below restricts itself
+    to the first video stream so that frame counting stays cheap, which means
+    its stream list can never contain audio -- reading `has_audio` off that list
+    silently stripped the soundtrack from every interpolated clip. The codec
+    name is what decides whether the track can be copied into the chosen
+    container or has to be converted.
+    """
+    ffprobe = ffprobe_path or resolve_tool("ffprobe")
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(input_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        name = line.strip()
+        if name:
+            return name.lower()
+    return ""
 
 
 def probe_media(input_path, ffprobe_path=None):
@@ -174,13 +285,15 @@ def probe_media(input_path, ffprobe_path=None):
     frame_count = int(video.get("nb_read_frames") or video.get("nb_frames") or 0)
     if frame_count <= 0 and duration > 0:
         frame_count = max(1, round(duration * fps))
+    audio_codec = probe_audio_codec(input_path, ffprobe_path=ffprobe)
     return MediaInfo(
         width=int(video["width"]),
         height=int(video["height"]),
         fps=fps,
         frame_count=frame_count,
         duration=duration,
-        has_audio=any(stream.get("codec_type") == "audio" for stream in streams),
+        has_audio=bool(audio_codec),
+        audio_codec=audio_codec,
     )
 
 
@@ -226,110 +339,6 @@ def _decoder_command(ffmpeg, input_path):
     ]
 
 
-def _encoder_command(
-    ffmpeg,
-    input_path,
-    output_path,
-    width,
-    height,
-    fps,
-    use_gpu,
-    has_audio,
-    rate_mode="quality",
-    quality=18,
-    bitrate_mbps=20.0,
-):
-    fps_text = f"{fps:.8f}".rstrip("0").rstrip(".")
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s:v",
-        f"{width}x{height}",
-        "-r",
-        fps_text,
-        "-i",
-        "pipe:0",
-    ]
-    if has_audio:
-        command.extend(["-i", str(input_path)])
-    command.extend(["-map", "0:v:0"])
-    if has_audio:
-        command.extend(["-map", "1:a:0?", "-c:a", "copy"])
-    quality = max(14, min(28, int(quality)))
-    bitrate = float(bitrate_mbps)
-    if not math.isfinite(bitrate) or bitrate <= 0:
-        raise ValueError("Target bitrate must be greater than 0 Mbps.")
-    bitrate_text = f"{bitrate:g}M"
-    buffer_text = f"{bitrate * 2:g}M"
-    if rate_mode not in {"quality", "vbr", "cbr"}:
-        raise ValueError("Rate control must be quality, vbr, or cbr.")
-    if use_gpu:
-        command.extend(["-c:v", "h264_nvenc", "-preset", "p4"])
-        if rate_mode == "quality":
-            command.extend(["-rc", "constqp", "-cq", str(quality)])
-        elif rate_mode == "vbr":
-            command.extend(["-rc", "vbr", "-b:v", bitrate_text])
-        else:
-            command.extend(
-                [
-                    "-rc",
-                    "cbr",
-                    "-b:v",
-                    bitrate_text,
-                    "-minrate",
-                    bitrate_text,
-                    "-maxrate",
-                    bitrate_text,
-                    "-bufsize",
-                    buffer_text,
-                    "-cbr_padding",
-                    "1",
-                ]
-            )
-        command.extend(["-spatial-aq", "1", "-temporal-aq", "1"])
-    else:
-        command.extend(["-c:v", "libx264", "-preset", "slow"])
-        if rate_mode == "quality":
-            command.extend(["-crf", str(quality)])
-        elif rate_mode == "vbr":
-            command.extend(["-b:v", bitrate_text])
-        else:
-            command.extend(
-                [
-                    "-b:v",
-                    bitrate_text,
-                    "-minrate",
-                    bitrate_text,
-                    "-maxrate",
-                    bitrate_text,
-                    "-bufsize",
-                    buffer_text,
-                    "-x264-params",
-                    "nal-hrd=cbr",
-                ]
-            )
-    command.extend(
-        [
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            fps_text,
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(output_path),
-        ]
-    )
-    return command
-
-
 def interpolate_clip(
     input_path,
     output_path,
@@ -337,9 +346,11 @@ def interpolate_clip(
     factor,
     use_gpu,
     target_fps=None,
+    slow_motion=False,
     rate_mode="quality",
     quality=18,
     bitrate_mbps=20.0,
+    output_format="h264-mp4",
     max_model_dimension=1920,
     progress_callback=None,
     ffmpeg_path=None,
@@ -353,7 +364,12 @@ def interpolate_clip(
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
-    target_fps = output_fps(info.fps, factor=factor, target_fps=target_fps)
+    generated_fps, playback_fps = interpolation_rates(
+        info.fps,
+        factor,
+        target_fps=target_fps,
+        slow_motion=slow_motion,
+    )
     requested_scale = min(
         1.0, float(max_model_dimension) / max(info.width, info.height)
     )
@@ -381,12 +397,15 @@ def interpolate_clip(
             output_path,
             info.width,
             info.height,
-            target_fps,
+            playback_fps,
             use_gpu,
             info.has_audio,
             rate_mode=rate_mode,
             quality=quality,
             bitrate_mbps=bitrate_mbps,
+            output_format=output_format,
+            audio_codec=info.audio_codec,
+            audio_tempo=1.0 / factor if slow_motion and info.has_audio else None,
         ),
         stdin=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -436,7 +455,7 @@ def interpolate_clip(
                 model.reset_state()
             timesteps, next_output_index = pair_timesteps(
                 info.fps,
-                target_fps,
+                generated_fps,
                 pair_index,
                 next_output_index,
             )
@@ -471,10 +490,18 @@ def interpolate_clip(
             )
 
         final_time = (source_frames - 1) / info.fps
-        while next_output_index / target_fps <= final_time + 1e-9:
+        while next_output_index / generated_fps <= final_time + 1e-9:
             encoder.stdin.write(first.tobytes())
             written_frames += 1
             next_output_index += 1
+        if slow_motion:
+            # Every source frame owns one source-FPS interval. The interpolation
+            # loop covers the intervals between frames, so hold the last frame
+            # long enough for its interval to slow down by the same factor.
+            expected_frames = source_frames * factor
+            while written_frames < expected_frames:
+                encoder.stdin.write(first.tobytes())
+                written_frames += 1
 
         decoder.stdout.close()
         decoder_code = decoder.wait()
@@ -484,7 +511,13 @@ def interpolate_clip(
                 "\n".join(decode_tail)
                 or "FFmpeg stopped while decoding the source video."
             )
-        report("encode", 99, "Finishing video and copying audio")
+        report(
+            "encode",
+            99,
+            "Finishing video and stretching audio"
+            if slow_motion and info.has_audio
+            else "Finishing video and copying audio",
+        )
         encoder.stdin.close()
         encoder_code = encoder.wait()
         encode_thread.join(timeout=2)
@@ -500,15 +533,16 @@ def interpolate_clip(
             "sourceFrames": source_frames,
             "outputFrames": written_frames,
             "sourceFps": info.fps,
-            "outputFps": target_fps,
+            "outputFps": playback_fps,
+            "generatedFps": generated_fps,
             "sceneHolds": scene_holds,
             "inferenceScale": inference_scale,
+            "outputFormat": output_format,
         }
     except BaseException:
         for process in (decoder, encoder):
-            if process.poll() is None:
-                process.kill()
-        destination.unlink(missing_ok=True)
+            _stop_process(process)
+        discard_partial_output(destination)
         raise
 
 
@@ -518,9 +552,11 @@ def process_batch(
     factor,
     use_gpu,
     target_fps=None,
+    slow_motion=False,
     rate_mode="quality",
     quality=18,
     bitrate_mbps=20.0,
+    output_format="h264-mp4",
     progress_callback=None,
     ffmpeg_path=None,
     ffprobe_path=None,
@@ -552,16 +588,18 @@ def process_batch(
                 factor,
                 use_gpu,
                 target_fps=target_fps,
+                slow_motion=slow_motion,
                 rate_mode=rate_mode,
                 quality=quality,
                 bitrate_mbps=bitrate_mbps,
+                output_format=output_format,
                 progress_callback=clip_progress,
                 ffmpeg_path=ffmpeg_path,
                 ffprobe_path=ffprobe_path,
             )
             outcomes.append({"ok": True, **result})
         except Exception as error:
-            Path(output_path).unlink(missing_ok=True)
+            discard_partial_output(output_path)
             outcomes.append(
                 {
                     "ok": False,

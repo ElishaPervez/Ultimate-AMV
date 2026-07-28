@@ -127,7 +127,33 @@ def _video_args(codec, use_gpu, quicktime, rate_mode, quality, bitrate_mbps):
     return args
 
 
-def _audio_args(quicktime, audio_codec):
+def _tempo_filter(tempo):
+    value = float(tempo)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Audio tempo must be greater than 0.")
+    stages = []
+    while value < 0.5:
+        stages.append(0.5)
+        value /= 0.5
+    while value > 100:
+        stages.append(100.0)
+        value /= 100.0
+    stages.append(value)
+    return ",".join(f"atempo={stage:.8f}".rstrip("0").rstrip(".") for stage in stages)
+
+
+def _audio_args(quicktime, audio_codec, audio_tempo=None):
+    if audio_tempo is not None:
+        # Filtering requires decoding and re-encoding. AAC works in every
+        # output container offered by the interpolation screen.
+        return [
+            "-filter:a",
+            f"{_tempo_filter(audio_tempo)},apad",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "320k",
+        ]
     if quicktime and audio_codec and audio_codec.lower() not in QUICKTIME_AUDIO_CODECS:
         return ["-c:a", "aac", "-b:a", "320k"]
     return ["-c:a", "copy"]
@@ -147,6 +173,7 @@ def _encoder_command(
     bitrate_mbps=20.0,
     output_format="h264-mp4",
     audio_codec="",
+    audio_tempo=None,
 ):
     if output_format not in OUTPUT_FORMATS:
         raise ValueError(f"Unknown output format: {output_format}")
@@ -180,7 +207,7 @@ def _encoder_command(
     command.extend(["-map", "0:v:0"])
     if has_audio:
         command.extend(["-map", "1:a:0?"])
-        command.extend(_audio_args(quicktime, audio_codec))
+        command.extend(_audio_args(quicktime, audio_codec, audio_tempo=audio_tempo))
     command.extend(
         _video_args(codec, use_gpu, quicktime, rate_mode, quality, bitrate_mbps)
     )

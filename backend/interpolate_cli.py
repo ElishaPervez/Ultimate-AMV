@@ -19,7 +19,12 @@ from amv_audio.dependencies import ensure_feature_dependencies
 from amv_audio.hardware import get_hw_info, verify_cuda_torch
 from amv_audio.logs import add_log
 from amv_interpolate.models import MODEL_KEYS, RifeModel, model_status
-from amv_interpolate.processor import process_batch
+from amv_interpolate.processor import (
+    INTERPOLATION_FACTORS,
+    OUTPUT_FORMAT_KEYS,
+    SLOW_MOTION_FACTORS,
+    process_batch,
+)
 
 
 def emit(payload):
@@ -82,6 +87,14 @@ def interpolate(args):
     use_gpu = bool(args.gpu)
     half = bool(args.half and use_gpu)
     try:
+        if args.slow_motion and args.target_fps is not None:
+            raise ValueError("Slow motion cannot be combined with a target frame rate.")
+        if (
+            not args.slow_motion
+            and args.target_fps is None
+            and args.factor not in INTERPOLATION_FACTORS
+        ):
+            raise ValueError("Frame interpolation supports 2x, 3x, or 4x factors.")
         jobs = _load_jobs(args.jobs)
         feature = "interpolate_gpu" if use_gpu else "interpolate_cpu"
         progress(
@@ -110,9 +123,11 @@ def interpolate(args):
             args.factor,
             use_gpu,
             target_fps=args.target_fps,
+            slow_motion=args.slow_motion,
             rate_mode=args.rate_mode,
             quality=args.quality,
             bitrate_mbps=args.bitrate_mbps,
+            output_format=args.output_format,
             progress_callback=lambda stage, percent, message, clip_index, clip_count, clip_name: progress(
                 stage,
                 percent,
@@ -134,6 +149,8 @@ def interpolate(args):
                 "model": args.model,
                 "factor": args.factor,
                 "target_fps": args.target_fps,
+                "slow_motion": args.slow_motion,
+                "output_format": args.output_format,
                 "gpu": use_gpu,
                 "scene_holds": scene_holds,
             },
@@ -179,8 +196,11 @@ def build_parser():
     subcommands.add_parser("status")
     run_parser = subcommands.add_parser("interpolate")
     run_parser.add_argument("--jobs", required=True)
-    run_parser.add_argument("--factor", type=int, choices=(2, 3, 4), default=2)
+    run_parser.add_argument(
+        "--factor", type=int, choices=SLOW_MOTION_FACTORS, default=2
+    )
     run_parser.add_argument("--target-fps", type=float, default=None)
+    run_parser.add_argument("--slow-motion", type=_bool_value, default=False)
     run_parser.add_argument("--model", choices=MODEL_KEYS, default="rife4.25")
     run_parser.add_argument("--gpu", type=_bool_value, default=True)
     run_parser.add_argument("--half", type=_bool_value, default=True)
@@ -189,6 +209,9 @@ def build_parser():
     )
     run_parser.add_argument("--quality", type=int, default=18)
     run_parser.add_argument("--bitrate-mbps", type=float, default=20.0)
+    run_parser.add_argument(
+        "--output-format", choices=OUTPUT_FORMAT_KEYS, default="h264-mp4"
+    )
     return parser
 
 

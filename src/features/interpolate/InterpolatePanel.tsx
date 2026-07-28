@@ -12,16 +12,20 @@ import {
   Loader2,
   Sparkles,
   Trash2,
+  Upload,
   XCircle,
 } from "lucide-react";
 import { setDiscordJob } from "../../lib/discord";
+import { useFileDrop } from "../../lib/useFileDrop";
 import { fileName, fileStem, normalizeSelectedPaths } from "../../lib/paths";
+import { acceptsDroppedPath, isSupportedVideoPath, VIDEO_EXTENSIONS } from "../../lib/videoPaths";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import type {
   InterpolateDone,
   InterpolateFactor,
   InterpolateModelKey,
   InterpolateNamingMode,
+  InterpolateOutputFormat,
   InterpolateProgress,
   InterpolateQueueItem,
   InterpolateRateIntent,
@@ -30,11 +34,12 @@ import type {
 } from "../../types/interpolate";
 import { InterpolateProgressCard } from "./InterpolateProgressCard";
 import { VideoOutputControl } from "../video/VideoOutputControl";
+import { OUTPUT_FORMATS, outputFormatExtension } from "../video/outputFormats";
 import type { VideoControlSpec } from "../../types/conversion";
 
-const VIDEO_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi", "m4v"];
-
 let interpolationBusy = false;
+
+export { acceptsDroppedPath, isSupportedVideoPath };
 
 function parentDirectory(path: string): string {
   const index = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
@@ -53,13 +58,18 @@ export function buildInterpolationOutput(
   naming: InterpolateNamingMode,
   rateIntent: InterpolateRateIntent = "factor",
   targetFps = 60,
+  extension = "mp4",
 ): string {
   const stem = fileStem(input);
-  const suffix = rateIntent === "target" ? `${targetFps}fps` : `${factor}x`;
-  const name = naming === "suffix" ? `${stem}_${suffix}.mp4` : `${stem}.mp4`;
+  const suffix = rateIntent === "target"
+    ? `${targetFps}fps`
+    : rateIntent === "slow-motion"
+      ? `${factor}x-slowmo`
+      : `${factor}x`;
+  const name = naming === "suffix" ? `${stem}_${suffix}.${extension}` : `${stem}.${extension}`;
   const output = joinPath(outputFolder, name);
   if (output.toLocaleLowerCase() === input.toLocaleLowerCase()) {
-    return joinPath(outputFolder, `${stem}_${suffix}.mp4`);
+    return joinPath(outputFolder, `${stem}_${suffix}.${extension}`);
   }
   return output;
 }
@@ -95,6 +105,7 @@ export function InterpolatePanel({ active }: { active: boolean }) {
   const [outputFolder, setOutputFolder] = React.useState("");
   const [naming, setNaming] = React.useState<InterpolateNamingMode>("suffix");
   const [useGpu, setUseGpu] = React.useState(true);
+  const [outputFormat, setOutputFormat] = React.useState<InterpolateOutputFormat>("h264-mp4");
   const [rateMode, setRateMode] = React.useState<InterpolateRateMode>("quality");
   const [quality, setQuality] = React.useState(18);
   const [bitrateMbps, setBitrateMbps] = React.useState(20);
@@ -120,6 +131,7 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     selectedNaming = naming,
     selectedIntent = rateIntent,
     selectedTarget = targetFps,
+    selectedFormat = outputFormat,
   ) => items.map((item) => ({
     ...item,
     output: folder
@@ -130,9 +142,10 @@ export function InterpolatePanel({ active }: { active: boolean }) {
         selectedNaming,
         selectedIntent,
         selectedTarget,
+        outputFormatExtension(selectedFormat),
       )
       : "",
-  })), [factor, naming, outputFolder, rateIntent, targetFps]);
+  })), [factor, naming, outputFolder, outputFormat, rateIntent, targetFps]);
 
   React.useEffect(() => {
     if (!active || statusFetched.current) return;
@@ -202,7 +215,15 @@ export function InterpolatePanel({ active }: { active: boolean }) {
         .filter((path) => !known.has(path.toLocaleLowerCase()))
         .map((input) => ({
           input,
-          output: buildInterpolationOutput(input, folder, factor, naming, rateIntent, targetFps),
+          output: buildInterpolationOutput(
+            input,
+            folder,
+            factor,
+            naming,
+            rateIntent,
+            targetFps,
+            outputFormatExtension(outputFormat),
+          ),
           status: "queued" as const,
         }));
       return [...existing, ...added];
@@ -235,6 +256,29 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     }
   }
 
+  async function acceptDroppedPaths(paths: string[]) {
+    const clips = paths.filter(isSupportedVideoPath);
+    const folders = paths.filter((path) => !isSupportedVideoPath(path));
+    for (const folder of folders) {
+      try {
+        clips.push(...await invoke<string[]>("interpolate_list_folder", { folder }));
+      } catch {
+        // Not a readable folder — the remaining drops still go through.
+      }
+    }
+    if (clips.length === 0) {
+      setError("Nothing in that drop was a supported video clip.");
+      return;
+    }
+    acceptFiles(clips);
+  }
+
+  const dropZone = useFileDrop({
+    accept: acceptsDroppedPath,
+    enabled: !running,
+    onDrop: (paths) => void acceptDroppedPaths(paths),
+  });
+
   async function pickOutputFolder() {
     const selected = await open({ multiple: false, directory: true });
     if (!selected || Array.isArray(selected)) return;
@@ -253,13 +297,22 @@ export function InterpolatePanel({ active }: { active: boolean }) {
   }
 
   function updateRateIntent(next: InterpolateRateIntent) {
+    const nextFactor = next === "factor" && factor > 4 ? 4 : factor;
+    if (nextFactor !== factor) setFactor(nextFactor);
     setRateIntent(next);
-    setQueue((items) => refreshOutputs(items, outputFolder, factor, naming, next, targetFps));
+    setQueue((items) => refreshOutputs(items, outputFolder, nextFactor, naming, next, targetFps));
   }
 
   function updateTargetFps(next: number) {
     setTargetFps(next);
     setQueue((items) => refreshOutputs(items, outputFolder, factor, naming, rateIntent, next));
+  }
+
+  function updateOutputFormat(next: InterpolateOutputFormat) {
+    setOutputFormat(next);
+    setQueue((items) =>
+      refreshOutputs(items, outputFolder, factor, naming, rateIntent, targetFps, next)
+    );
   }
 
   async function runInterpolation() {
@@ -280,9 +333,11 @@ export function InterpolatePanel({ active }: { active: boolean }) {
         jobs,
         factor,
         targetFps: rateIntent === "target" ? targetFps : null,
+        slowMotion: rateIntent === "slow-motion",
         model,
         gpu: useGpu,
         half: useGpu,
+        outputFormat,
         rateMode,
         quality,
         bitrateMbps,
@@ -340,6 +395,7 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     ? ((Math.max(0, currentIndex - 1) + currentPercent / 100) / queue.length) * 100
     : 0;
   const gpuReady = Boolean(status?.hardware.hasCuda);
+  const supportsRateControl = OUTPUT_FORMATS.find((entry) => entry.key === outputFormat)?.rateControl ?? true;
   const outputSpec: VideoControlSpec = rateMode === "quality"
     ? {
       label: "Constant quality",
@@ -365,7 +421,15 @@ export function InterpolatePanel({ active }: { active: boolean }) {
     };
 
   return (
-    <section className="conversion-panel interpolate-panel">
+    <section
+      ref={dropZone.ref}
+      className={`conversion-panel interpolate-panel drop-zone${dropZone.hover ? " is-drop-target" : ""}`}
+    >
+      <div className="drop-zone-overlay">
+        <Upload size={32} strokeWidth={1.8} />
+        <span>Drop clips or a folder to smooth</span>
+        <small>MP4 · MKV · MOV · WEBM · AVI · M4V</small>
+      </div>
       <header className="conversion-hero interpolate-hero">
         <div>
           <span className="conversion-kicker">Motion synthesis</span>
@@ -383,81 +447,137 @@ export function InterpolatePanel({ active }: { active: boolean }) {
       </header>
 
       <div className="interpolate-layout">
-        <section className="interpolate-queue-pane" aria-label="Interpolation queue">
-          <div className="interpolate-queue-toolbar">
-            <div>
-              <span className="conversion-field-label">Clip queue</span>
-              <strong>{queue.length === 0 ? "No clips yet" : `${queue.length} clip${queue.length === 1 ? "" : "s"}`}</strong>
+        <div className="interpolate-queue-column">
+          <section className="interpolate-queue-pane" aria-label="Interpolation queue">
+            <div className="interpolate-queue-toolbar">
+              <div>
+                <span className="conversion-field-label">Clip queue</span>
+                <strong>{queue.length === 0 ? "No clips yet" : `${queue.length} clip${queue.length === 1 ? "" : "s"}`}</strong>
+              </div>
+              <div className="interpolate-add-actions">
+                <button type="button" className="conversion-pick-btn" disabled={running} onClick={() => void pickFiles()}>
+                  <FilePlus2 size={15} /> Add clips
+                </button>
+                <button type="button" className="conversion-pick-btn" disabled={running} onClick={() => void pickFolderInputs()}>
+                  <FolderOpen size={15} /> Add folder
+                </button>
+              </div>
             </div>
-            <div className="interpolate-add-actions">
-              <button type="button" className="conversion-pick-btn" disabled={running} onClick={() => void pickFiles()}>
-                <FilePlus2 size={15} /> Add clips
-              </button>
-              <button type="button" className="conversion-pick-btn" disabled={running} onClick={() => void pickFolderInputs()}>
-                <FolderOpen size={15} /> Add folder
-              </button>
-            </div>
-          </div>
 
-          {queue.length === 0 ? (
-            <button type="button" className="interpolate-empty" onClick={() => void pickFiles()}>
-              <Sparkles size={24} />
-              <strong>Build a smoothing queue</strong>
-              <span>Pick 1–40 short clips. MP4, MKV, MOV, WebM, AVI, and M4V are accepted.</span>
-            </button>
-          ) : (
-            <div className="interpolate-queue-list">
-              {queue.map((item, index) => (
-                <div className={`interpolate-queue-item is-${item.status}`} key={item.input}>
-                  <span className="interpolate-queue-index">{String(index + 1).padStart(2, "0")}</span>
-                  <div className="interpolate-queue-copy">
-                    <strong title={item.input}>{fileName(item.input)}</strong>
-                    <span title={item.output}>{item.message || (item.output ? fileName(item.output) : "Choose an output folder")}</span>
+            {queue.length === 0 ? (
+              <button type="button" className="interpolate-empty" onClick={() => void pickFiles()}>
+                <Sparkles size={24} />
+                <strong>Build a smoothing queue</strong>
+                <span>Drop clips or a folder anywhere on this page, or click to browse. MP4, MKV, MOV, WebM, AVI, and M4V are accepted.</span>
+              </button>
+            ) : (
+              <div className="interpolate-queue-list">
+                {queue.map((item, index) => (
+                  <div className={`interpolate-queue-item is-${item.status}`} key={item.input}>
+                    <span className="interpolate-queue-index">{String(index + 1).padStart(2, "0")}</span>
+                    <div className="interpolate-queue-copy">
+                      <strong title={item.input}>{fileName(item.input)}</strong>
+                      <span title={item.output}>{item.message || (item.output ? fileName(item.output) : "Choose an output folder")}</span>
+                    </div>
+                    <span className="interpolate-queue-state">
+                      {item.status === "running" ? <Loader2 size={14} className="audio-spin" />
+                        : item.status === "done" ? <Check size={14} />
+                          : item.status === "failed" ? <XCircle size={14} />
+                            : "Queued"}
+                    </span>
+                    <button
+                      type="button"
+                      className="interpolate-remove"
+                      aria-label={`Remove ${fileName(item.input)}`}
+                      disabled={running}
+                      onClick={() => setQueue((items) => items.filter((candidate) => candidate.input !== item.input))}
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
-                  <span className="interpolate-queue-state">
-                    {item.status === "running" ? <Loader2 size={14} className="audio-spin" />
-                      : item.status === "done" ? <Check size={14} />
-                        : item.status === "failed" ? <XCircle size={14} />
-                          : "Queued"}
-                  </span>
-                  <button
-                    type="button"
-                    className="interpolate-remove"
-                    aria-label={`Remove ${fileName(item.input)}`}
-                    disabled={running}
-                    onClick={() => setQueue((items) => items.filter((candidate) => candidate.input !== item.input))}
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="interpolate-encoding" aria-label="Output encoding">
+            <span className="conversion-field-label">Output encoding</span>
+            <div className="interpolate-formats">
+              {OUTPUT_FORMATS.map((entry) => (
+                <button
+                  type="button"
+                  className={outputFormat === entry.key ? "is-active" : ""}
+                  disabled={running}
+                  aria-pressed={outputFormat === entry.key}
+                  onClick={() => updateOutputFormat(entry.key)}
+                  key={entry.key}
+                >
+                  <strong>{entry.label}</strong>
+                  <span>{entry.hint}</span>
+                </button>
               ))}
             </div>
-          )}
-        </section>
+            {supportsRateControl ? (
+              <div className="interpolate-encoding-body">
+                <div className="conversion-segment interpolate-rate-mode">
+                  {(["quality", "vbr", "cbr"] as InterpolateRateMode[]).map((value) => (
+                    <button
+                      type="button"
+                      className={rateMode === value ? "is-active" : ""}
+                      disabled={running}
+                      onClick={() => setRateMode(value)}
+                      key={value}
+                    >
+                      {value === "quality" ? "Quality" : value.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <VideoOutputControl
+                  spec={outputSpec}
+                  value={rateMode === "quality" ? quality : bitrateMbps}
+                  disabled={running}
+                  onChange={rateMode === "quality" ? setQuality : setBitrateMbps}
+                />
+              </div>
+            ) : (
+              <p className="interpolate-encoding-note">
+                ProRes keeps almost everything the model produced, so there is nothing to tune.
+                Expect files several times larger than the source.
+              </p>
+            )}
+          </section>
+        </div>
 
         <aside className="interpolate-controls">
           <div className="interpolate-control">
             <span className="conversion-field-label">Frame rate</span>
-            <div className="conversion-segment">
+            <div className="conversion-segment interpolate-rate-intent">
               <button type="button" className={rateIntent === "factor" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("factor")}>
                 Multiplier
               </button>
               <button type="button" className={rateIntent === "target" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("target")}>
                 Target FPS
               </button>
+              <button type="button" className={rateIntent === "slow-motion" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("slow-motion")}>
+                Slow motion
+              </button>
             </div>
-            <div className="conversion-segment interpolate-factor">
-              {(rateIntent === "factor" ? [2, 3, 4] : [30, 60, 120]).map((value) => (
+            <div className={`conversion-segment interpolate-factor${rateIntent === "slow-motion" ? " is-slow-motion" : ""}`}>
+              {(rateIntent === "target"
+                ? [30, 60, 120]
+                : rateIntent === "slow-motion"
+                  ? [2, 3, 4, 8, 16, 32, 64]
+                  : [2, 3, 4]).map((value) => (
                 <button
                   type="button"
-                  className={(rateIntent === "factor" ? factor === value : targetFps === value) ? "is-active" : ""}
+                  className={(rateIntent === "target" ? targetFps === value : factor === value) ? "is-active" : ""}
                   disabled={running}
-                  onClick={() => rateIntent === "factor"
-                    ? updateFactor(value as InterpolateFactor)
-                    : updateTargetFps(value)}
+                  onClick={() => rateIntent === "target"
+                    ? updateTargetFps(value)
+                    : updateFactor(value as InterpolateFactor)}
                   key={value}
                 >
-                  {value}{rateIntent === "factor" ? "x" : ""}
+                  {value}{rateIntent === "target" ? "" : "x"}
                 </button>
               ))}
             </div>
@@ -494,7 +614,7 @@ export function InterpolatePanel({ active }: { active: boolean }) {
             <span className="conversion-field-label">File naming</span>
             <div className="conversion-segment">
               <button type="button" className={naming === "suffix" ? "is-active" : ""} disabled={running} onClick={() => updateNaming("suffix")}>
-                Add _{factor}x
+                Add _{rateIntent === "target" ? `${targetFps}fps` : rateIntent === "slow-motion" ? `${factor}x-slowmo` : `${factor}x`}
               </button>
               <button type="button" className={naming === "source-name" ? "is-active" : ""} disabled={running} onClick={() => updateNaming("source-name")}>
                 Source name
@@ -512,31 +632,6 @@ export function InterpolatePanel({ active }: { active: boolean }) {
               <button type="button" className={!useGpu ? "is-active" : ""} disabled={running} onClick={() => setUseGpu(false)}>CPU</button>
             </div>
           </div>
-
-          <details className="interpolate-encoding">
-            <summary>Output encoding</summary>
-            <div className="interpolate-encoding-body">
-              <div className="conversion-segment interpolate-rate-mode">
-                {(["quality", "vbr", "cbr"] as InterpolateRateMode[]).map((value) => (
-                  <button
-                    type="button"
-                    className={rateMode === value ? "is-active" : ""}
-                    disabled={running}
-                    onClick={() => setRateMode(value)}
-                    key={value}
-                  >
-                    {value === "quality" ? "Quality" : value.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-              <VideoOutputControl
-                spec={outputSpec}
-                value={rateMode === "quality" ? quality : bitrateMbps}
-                disabled={running}
-                onChange={rateMode === "quality" ? setQuality : setBitrateMbps}
-              />
-            </div>
-          </details>
 
           {!useGpu && (
             <div className="interpolate-warning">
@@ -559,8 +654,12 @@ export function InterpolatePanel({ active }: { active: boolean }) {
               overallPercent={overallPercent}
               completed={completed}
               total={queue.length}
-              cadenceSteps={rateIntent === "factor" ? factor : 5}
-              cadenceLabel={rateIntent === "factor" ? `${factor}x frame cadence` : `${targetFps} fps target cadence`}
+              cadenceSteps={rateIntent === "target" ? 5 : factor}
+              cadenceLabel={rateIntent === "target"
+                ? `${targetFps} fps target cadence`
+                : rateIntent === "slow-motion"
+                  ? `${factor}x slow motion`
+                  : `${factor}x frame cadence`}
               etaSeconds={etaSeconds}
               cancelling={cancelling}
               onCancel={() => void cancelInterpolation()}
