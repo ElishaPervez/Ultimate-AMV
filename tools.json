@@ -31,6 +31,17 @@
       ]
     },
     {
+      "name": "uv",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.11.32/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "acfde570451cfdb8689fa159a138ee805ba4e241c466432750302c86254b0984",
+      "size": 25726255,
+      "startup": false,
+      "kind": "zip",
+      "extract": [
+        { "from": "**/uv.exe", "to": "uv.exe" }
+      ]
+    },
+    {
       "name": "rife-4.25",
       "url": "https://drive.usercontent.google.com/download?id=1ZKjcbmt1hypiFprJPIKW0Tt0lr_2i7bg&export=download&confirm=t",
       "sha256": "e63d481b7ae5d4a4e6ad7ac5b410ff78f3bf7be3b51b2e38ca8152747abde5b4",

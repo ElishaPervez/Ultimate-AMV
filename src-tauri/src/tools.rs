@@ -78,6 +78,18 @@ pub struct ToolsStatus {
     pub binaries: Vec<BinaryStatus>,
 }
 
+/// The setup wizard's package installer, fetched on demand (startup:false in
+/// tools.json) so the installer download does not grow by 26 MB for users who
+/// never open setup. Everything that installs Python packages asks for this
+/// first and carries on without it if the download fails — backend/amv_audio/
+/// installer.py falls back to pip, so a blocked download costs a slow setup
+/// rather than a broken one.
+///
+/// Pinned to a permanent tagged release. A rotating build URL gets deleted
+/// upstream and starts 404ing. The same version is pinned in bundle-deps.ps1,
+/// manager.bat and .github/workflows/release.yml — bump them together.
+pub(crate) const UV_TOOL: &str = "uv";
+
 static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
 
 pub fn tools_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -761,6 +773,50 @@ mod tests {
             "**/bin/*.dll",
             "ffmpeg-8.1.1-full_build-shared/share/man/man1/ffmpeg.1.txt"
         ));
+    }
+
+    #[test]
+    fn glob_matches_uv_zip_flat_layout() {
+        // uv's Windows zip has no wrapping directory: uv.exe sits at the root
+        // next to uvw.exe and uvx.exe. The ffmpeg zips do wrap everything in a
+        // versioned folder, so "**/x" has to match both shapes or the tool
+        // installs as "matched no entries" and setup silently loses uv.
+        assert!(glob_matches("**/uv.exe", "uv.exe"));
+        assert!(glob_matches("**/uv.exe", "some-wrapper/uv.exe"));
+        // Must not grab the neighbours: uvx.exe and uvw.exe are different
+        // programs and installing one under the name uv.exe would produce a
+        // uv that cannot install anything.
+        assert!(!glob_matches("**/uv.exe", "uvx.exe"));
+        assert!(!glob_matches("**/uv.exe", "uvw.exe"));
+    }
+
+    #[test]
+    fn uv_manifest_entry_is_on_demand_and_extracts_the_binary() {
+        let raw = include_str!("../../tools.json");
+        let manifest: ToolsManifest =
+            serde_json::from_str(raw).expect("tools.json must parse");
+        let uv = manifest
+            .binaries
+            .iter()
+            .find(|binary| binary.name == UV_TOOL)
+            .expect("tools.json must define the uv entry");
+
+        // Downloading 26 MB on every cold start, for users who never open
+        // setup, is exactly what startup:false avoids.
+        assert!(!uv.startup, "uv must be fetched on demand, not at startup");
+        assert!(
+            uv.url.contains("/releases/download/"),
+            "uv must come from a permanent tagged release: {}",
+            uv.url
+        );
+        match &uv.kind {
+            BinaryKind::Zip { extract } => {
+                let rule = extract.first().expect("uv needs an extract rule");
+                assert_eq!(rule.to.as_deref(), Some("uv.exe"));
+                assert!(glob_matches(&rule.from_glob, "uv.exe"));
+            }
+            _ => panic!("uv ships as a zip"),
+        }
     }
 
     #[test]
