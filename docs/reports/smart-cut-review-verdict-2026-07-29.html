@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Cut review — what it got right, and what it missed</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b23; --panel2:#1c222c; --line:#2a323f;
+    --ink:#e8edf4; --dim:#9aa7b8; --faint:#6b7789;
+    --good:#3fb27f; --bad:#e5534b; --warn:#e0a13c; --info:#5aa9e6; --accent:#8b7ff0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 28px 96px}
+  h1{font-size:34px;line-height:1.2;margin:0 0 8px;letter-spacing:-.02em}
+  h2{font-size:24px;margin:56px 0 6px;letter-spacing:-.01em}
+  h3{font-size:18px;margin:0 0 10px}
+  .sub{color:var(--dim);margin:0 0 28px;font-size:17px}
+  .rule{height:1px;background:var(--line);margin:14px 0 26px}
+
+  .verdict{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:28px 0 8px}
+  .vcard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .vcard .tag{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+  .vcard .big{font-size:22px;font-weight:650;margin:6px 0 8px}
+  .vcard p{margin:0;color:var(--dim);font-size:15px}
+  .ok{color:var(--good)} .no{color:var(--bad)} .mid{color:var(--warn)} .in{color:var(--info)}
+
+  table{width:100%;border-collapse:collapse;margin:18px 0 8px;font-size:15px}
+  th{text-align:left;color:var(--faint);font-weight:600;font-size:12px;
+     letter-spacing:.1em;text-transform:uppercase;padding:0 12px 10px;border-bottom:1px solid var(--line)}
+  td{padding:13px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+  .p-real{background:rgba(63,178,127,.15);color:var(--good);border:1px solid rgba(63,178,127,.35)}
+  .p-part{background:rgba(224,161,60,.15);color:var(--warn);border:1px solid rgba(224,161,60,.35)}
+  .p-miss{background:rgba(229,83,75,.15);color:var(--bad);border:1px solid rgba(229,83,75,.35)}
+
+  .finding{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+           padding:22px 24px;margin:16px 0}
+  .finding.blocker{border-left:4px solid var(--bad)}
+  .finding.should{border-left:4px solid var(--warn)}
+  .finding.found{border-left:4px solid var(--accent);background:linear-gradient(180deg,rgba(139,127,240,.09),transparent 60%)}
+  .finding h3{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+  .num{color:var(--faint);font-variant-numeric:tabular-nums}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px}
+  .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .box .lbl{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin-bottom:6px}
+  .box p{margin:0;font-size:15px;color:var(--ink)}
+  .box p+p{margin-top:8px}
+  ul{margin:8px 0 0;padding-left:20px;color:var(--dim)} li{margin:5px 0}
+  li b{color:var(--ink);font-weight:600}
+  code{background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1px 6px;
+       font:13px/1.5 "Cascadia Mono",Consolas,monospace;color:#cfe3ff}
+  .path{display:block;background:#0b0e13;border:1px solid var(--line);border-radius:8px;
+        padding:10px 12px;margin:10px 0;font:13px/1.6 "Cascadia Mono",Consolas,monospace;
+        color:#cfe3ff;overflow-x:auto;white-space:nowrap}
+  .callout{background:rgba(90,169,230,.08);border:1px solid rgba(90,169,230,.3);
+           border-radius:12px;padding:16px 20px;margin:18px 0}
+  .callout.warn{background:rgba(224,161,60,.08);border-color:rgba(224,161,60,.32)}
+  .callout p{margin:0;color:var(--ink)} .callout p+p{margin-top:8px}
+  figure{margin:18px 0;background:var(--panel2);border:1px solid var(--line);
+         border-radius:12px;padding:18px}
+  figcaption{color:var(--faint);font-size:13px;margin-top:12px;text-align:center}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;margin-top:10px;font-size:13px;color:var(--dim)}
+  .sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:6px}
+  .footer{color:var(--faint);font-size:13px;margin-top:60px;border-top:1px solid var(--line);padding-top:18px}
+  @media(max-width:820px){.verdict,.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>The Smart Cut review: is it worth acting on?</h1>
+  <p class="sub">Short answer — yes. Every one of its three headline problems is real; I reproduced all
+  three myself before touching any code. It also missed the single biggest one, which I found while
+  fixing the others. Everything below is now fixed and committed.</p>
+
+  <div class="verdict">
+    <div class="vcard">
+      <div class="tag">Is the report useful</div>
+      <div class="big ok">Yes — high quality</div>
+      <p>Seven concerns raised, seven real. It reproduced its claims with actual video files instead of
+      reasoning from the source, and its numbers matched mine exactly when I repeated the experiment.</p>
+    </div>
+    <div class="vcard">
+      <div class="tag">Is it complete</div>
+      <div class="big mid">No — one blind spot</div>
+      <p>It tested a hand-written copy of what Smart Cut is supposed to do, not what the app actually
+      runs. That copy worked; the app's version has been silently disabling itself on every single clip.</p>
+    </div>
+  </div>
+
+  <h2>What was raised, and where it stands now</h2>
+  <div class="rule"></div>
+  <table>
+    <thead><tr><th style="width:44%">The concern</th><th style="width:16%">Verified?</th><th>Now</th></tr></thead>
+    <tbody>
+      <tr><td><b>1.</b> A clip can start on the wrong picture and run a second too long</td>
+          <td><span class="pill p-real">Reproduced</span></td><td>Fixed</td></tr>
+      <tr><td><b>2.</b> Merging clips from two differently-encoded files makes a file that stops playing halfway</td>
+          <td><span class="pill p-real">Reproduced</span></td><td>Refused up front, with a message</td></tr>
+      <tr><td><b>3.</b> If the first clip has no sound, the whole merge comes out silent</td>
+          <td><span class="pill p-real">Reproduced</span></td><td>Refused up front, with a message</td></tr>
+      <tr><td><b>4.</b> Cancel can be ignored if you click between two stages</td>
+          <td><span class="pill p-part">Confirmed in code</span></td><td>Fixed</td></tr>
+      <tr><td><b>5.</b> A failed or cancelled export can leave a broken file in your export folder</td>
+          <td><span class="pill p-part">Confirmed in code</span></td><td>Fixed</td></tr>
+      <tr><td><b>6.</b> The safety net that catches wrong footage lets 10% of the clip through</td>
+          <td><span class="pill p-part">Confirmed in code</span></td><td>Tightened to a few frames</td></tr>
+      <tr><td><b>7.</b> The checking tool can approve wrong video and reject correct video</td>
+          <td><span class="pill p-real">Reproduced</span></td><td>Rewritten to compare real content</td></tr>
+      <tr><td><b>8.</b> <b>Not in the report:</b> Smart Cut never actually copies anything — it quietly
+          re-encodes every clip, every time</td>
+          <td><span class="pill p-miss">Found while fixing</span></td><td>Fixed</td></tr>
+    </tbody>
+  </table>
+
+  <h2>The one the review missed</h2>
+  <div class="rule"></div>
+
+  <div class="finding found">
+    <h3><span class="num">8.</span> The feature has been turning itself off on every clip</h3>
+
+    <div class="grid2">
+      <div class="box">
+        <div class="lbl">What you would have seen</div>
+        <p>Smart Cut exports finish, and the picture is right — so nothing looks broken. But they take as
+        long as a normal export and the video gets squeezed a second time, because the part that was
+        supposed to be copied straight out of the episode was being re-compressed instead.</p>
+        <p>The whole selling point of the preset — everything after the first fraction of a second is
+        your original footage, untouched — was not happening at all.</p>
+      </div>
+      <div class="box">
+        <div class="lbl">Why</div>
+        <p>After copying the bulk of the clip, the app counts the pictures it got and compares that
+        against what it asked for. If the count is wrong it assumes the copy grabbed footage from the
+        wrong part of the episode and throws it away.</p>
+        <p>The counter was reading the tool's output slightly wrong for this one file type, so it always
+        counted zero. Zero never matches, so every clip was declared suspect and re-encoded.</p>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <p><b>Why the review couldn't see it.</b> Its checking tool rebuilds the Smart Cut procedure by hand
+      and then inspects the result. Its hand-written version has no such counter, so it spliced happily and
+      reported success — while the real app, given the same file, was quietly re-encoding. Two different
+      programs were being tested, and only one of them ships.</p>
+      <p>I confirmed the miscount with the exact tool the installed app uses
+      (version 8.1.1, the one sitting in your app's tools folder), not just the one on my path.</p>
+    </div>
+  </div>
+
+  <h2>The three blockers, in plain terms</h2>
+  <div class="rule"></div>
+
+  <div class="finding blocker">
+    <h3><span class="num">1.</span> A clip that starts on the wrong picture</h3>
+    <div class="grid2">
+      <div class="box">
+        <div class="lbl">What you would have seen</div>
+        <p>You ask for the four seconds from 3s to 7s. You get five seconds that start a whole second
+        early — the wrong shot entirely — and the export reports success.</p>
+        <p>It only happens with episodes whose internal clock does not start at zero. Plenty of rips and
+        remuxes are like that; most files are not, which is why it slipped through.</p>
+      </div>
+      <div class="box">
+        <div class="lbl">Why</div>
+        <p>Two clocks were being compared as if they were the same one: the clip's times are counted from
+        the first frame you can see, while the inspection tool reports times on the file's own internal
+        clock. On a file that starts at 1.000, those two disagree by exactly one second.</p>
+        <p>The app concluded the cut already sat on a safe splice point when it did not, took the fast
+        route, and landed a second early.</p>
+      </div>
+    </div>
+
+    <figure>
+      <svg viewBox="0 0 900 250" width="100%" role="img" aria-label="Timeline showing the old cut starting one second early and the new cut landing correctly">
+        <text x="12" y="22" fill="#9aa7b8" font-size="13" font-family="Segoe UI">Episode with an internal clock that starts at 1.000</text>
+
+        <!-- source strip -->
+        <rect x="12" y="36" width="876" height="34" rx="6" fill="#1c222c" stroke="#2a323f"/>
+        <g font-size="11" fill="#6b7789" font-family="Cascadia Mono, Consolas, monospace">
+          <line x1="12" y1="36" x2="12" y2="70" stroke="#2a323f"/>
+          <text x="16" y="86">what you see: 0s</text>
+          <line x1="230" y1="36" x2="230" y2="70" stroke="#2a323f"/>
+          <text x="204" y="86">2s</text>
+          <line x1="339" y1="36" x2="339" y2="70" stroke="#2a323f"/>
+          <text x="313" y="86">3s</text>
+          <line x1="448" y1="36" x2="448" y2="70" stroke="#2a323f"/>
+          <text x="422" y="86">4s</text>
+          <line x1="775" y1="36" x2="775" y2="70" stroke="#2a323f"/>
+          <text x="749" y="86">7s</text>
+        </g>
+        <g font-size="11" fill="#8b7ff0" font-family="Cascadia Mono, Consolas, monospace">
+          <text x="16" y="30" opacity="0">.</text>
+          <circle cx="230" cy="53" r="4" fill="#8b7ff0"/><text x="200" y="30">splice point</text>
+          <circle cx="448" cy="53" r="4" fill="#8b7ff0"/><text x="418" y="30">splice point</text>
+        </g>
+
+        <!-- requested -->
+        <rect x="339" y="104" width="436" height="26" rx="5" fill="rgba(90,169,230,.18)" stroke="#5aa9e6"/>
+        <text x="349" y="122" fill="#cfe3ff" font-size="13" font-family="Segoe UI">you asked for 3s → 7s (96 frames)</text>
+
+        <!-- old -->
+        <rect x="230" y="150" width="545" height="26" rx="5" fill="rgba(229,83,75,.18)" stroke="#e5534b"/>
+        <text x="240" y="168" fill="#ffd7d4" font-size="13" font-family="Segoe UI">before: 2s → 7s — 122 frames, opens on the wrong shot</text>
+
+        <!-- new -->
+        <rect x="339" y="196" width="436" height="26" rx="5" fill="rgba(63,178,127,.18)" stroke="#3fb27f"/>
+        <text x="349" y="214" fill="#c9f2df" font-size="13" font-family="Segoe UI">after: 3s → 7s — 98 frames, opens on the right frame</text>
+      </svg>
+      <figcaption>Measured, not estimated: I built a file with a clock starting at 1.000 and ran both versions.
+      The old one produced 122 frames starting a second early — an exact match to the picture at the 2 second mark.
+      The new one starts on the requested frame.</figcaption>
+      <div class="legend">
+        <span><span class="sw" style="background:#5aa9e6"></span>what you asked for</span>
+        <span><span class="sw" style="background:#e5534b"></span>what you got</span>
+        <span><span class="sw" style="background:#3fb27f"></span>what you get now</span>
+      </div>
+    </figure>
+  </div>
+
+  <div class="finding blocker">
+    <h3><span class="num">2 &amp; 3.</span> Merges that come out broken or silent</h3>
+    <div class="grid2">
+      <div class="box">
+        <div class="lbl">What you would have seen</div>
+        <p><b>Mixed sources:</b> merge a clip from one episode with a clip from another that was encoded
+        differently. The export succeeds, the file appears in your folder, and playback falls apart the
+        moment it reaches the second clip. I reproduced this: the result claims to be one format
+        throughout while the second half is another, and it decodes to nothing.</p>
+        <p><b>Silent first clip:</b> if the first clip in the selection has no sound, the finished merge
+        has no sound anywhere — the later clips' audio is dropped without a word. Put a clip with sound
+        first and the same selection works. Also reproduced.</p>
+      </div>
+      <div class="box">
+        <div class="lbl">Why, and what I did</div>
+        <p>Joining pieces without re-encoding means the first piece decides what the whole file claims to
+        be. Everything after it is copied in under that claim, whether it fits or not.</p>
+        <p>Smart Cut now inspects every source file before writing anything and refuses the merge if they
+        disagree on format, colour depth, frame size, frame rate, or whether they have sound at all. You
+        get one clear sentence naming the two files and pointing you at a re-encode preset, instead of a
+        file that looks fine until you play it.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <p><b>A deliberate choice you should know about.</b> The review suggested building a full parallel
+      sound timeline with silence inserted for the quiet clips. That is a real feature's worth of work and
+      a new source of bugs. The review itself accepted refusing the merge as the alternative, so that is
+      what I did: refuse clearly rather than half-solve it. Every anime rip has sound, so the silent case
+      should be rare; if you ever hit the refusal in practice, tell me and I'll build the real thing.</p>
+    </div>
+  </div>
+
+  <h2>The four smaller ones</h2>
+  <div class="rule"></div>
+
+  <div class="finding should">
+    <h3><span class="num">4.</span> Cancel that doesn't cancel</h3>
+    <p style="margin:0;color:var(--dim)">Cancel used to work by killing whatever was running at that
+    instant. A Smart Cut clip runs five short jobs back to back, so there are gaps where nothing is
+    running — a click landing in one of those gaps hit nothing and the export carried on to the next
+    stage. Cancel is now recorded as a decision about the whole export: it is checked before each job
+    starts and again after each finishes, and only a brand new export clears it.</p>
+  </div>
+
+  <div class="finding should">
+    <h3><span class="num">5.</span> Half-written files left in your export folder</h3>
+    <p style="margin:0;color:var(--dim)">A cancelled or failed export could leave a file with the exact
+    name you were expecting, usually empty. Every final write now happens under a temporary name next to
+    the destination and is renamed into place only once it has finished. If anything goes wrong, the
+    temporary file is deleted and your export folder never gains a broken file.</p>
+  </div>
+
+  <div class="finding should">
+    <h3><span class="num">6.</span> The wrong-footage safety net had a hole in it</h3>
+    <p style="margin:0;color:var(--dim)">The check that catches a copy landing on the wrong part of the
+    episode allowed the result to be a tenth of the clip off — two whole seconds of wrong footage on a
+    twenty-second clip — and treated "couldn't measure it" as "it's fine". It now allows four frames,
+    full stop, and an unmeasurable result forces the slow-but-correct route. This is the check that was
+    also miscounting (problem 8); it now works and is strict.</p>
+  </div>
+
+  <div class="finding should">
+    <h3><span class="num">7.</span> The checking tool that could be fooled</h3>
+    <div class="grid2">
+      <div class="box">
+        <div class="lbl">Before</div>
+        <p>It compared the <em>sizes</em> of the compressed chunks. Same size counted as same content — so
+        audio taken from completely the wrong moment could pass, since many sound formats produce
+        equal-sized chunks throughout. It also failed a perfectly good export because 19 of 21 sizes
+        matched and it demanded 20.</p>
+      </div>
+      <div class="box">
+        <div class="lbl">Now</div>
+        <p>It compares checksums of the actual compressed bytes, after putting both sides through
+        identical processing so only real differences remain. Verified both ways: a genuine copy scores
+        72 of 74 chunks byte-identical (the two exceptions are the splice points, which legitimately carry
+        an extra header), and a re-encode of the same footage scores zero. It also now takes the same
+        "give up and re-encode" decision the app takes, so it tests the file the app would really produce.</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>What I checked, and what I did not</h2>
+  <div class="rule"></div>
+  <div class="grid2">
+    <div class="box">
+      <div class="lbl">Verified myself</div>
+      <ul>
+        <li><b>Problem 1</b> — built a file with an offset clock, measured 122 frames starting a second
+        early before, 98 frames starting correctly after.</li>
+        <li><b>Problems 2 and 3</b> — built the mixed and silent-first merges, watched both "succeed"
+        and come out broken.</li>
+        <li><b>Problem 8</b> — confirmed the miscount with the app's own bundled inspection tool.</li>
+        <li><b>The checking tool</b> — now passes 5 of 5 on both a normal file and an offset-clock file,
+        and correctly scores zero on a re-encode.</li>
+        <li><b>132 backend tests pass</b>, including 8 new ones covering the offset clock, the merge
+        refusals, and the miscount.</li>
+      </ul>
+    </div>
+    <div class="box">
+      <div class="lbl">Not done — deliberately</div>
+      <ul>
+        <li><b>No run inside the real app.</b> Everything above was proven with the same tools the app
+        drives, on generated video. Exporting a real clip through the interface is yours to try.</li>
+        <li><b>Mixed sources still refuse instead of merging.</b> See the note above.</li>
+        <li><b>Lossless cut has the same mixed-source weakness</b> and I left it alone — it was outside
+        what was reviewed, and changing it risks breaking merges that work today. Worth a follow-up.</li>
+        <li><b>Nothing pushed.</b> Committed locally only, as always.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Files</h2>
+  <div class="rule"></div>
+  <span class="path">C:\projects (code)\27. Ultimate AMV script\src-tauri\src\clips.rs</span>
+  <span class="path">C:\projects (code)\27. Ultimate AMV script\src-tauri\src\lib.rs</span>
+  <span class="path">C:\projects (code)\27. Ultimate AMV script\scripts\devtools\verify-smart-cut.mjs</span>
+  <p style="color:var(--dim);margin-top:14px">The original review this responds to:</p>
+  <span class="path">C:\projects (code)\27. Ultimate AMV script\docs\reports\smart-cut-export-review-2026-07-29.md</span>
+  <p style="color:var(--dim);margin-top:14px">To run the checking tool against a real episode yourself:</p>
+  <span class="path">node "C:\projects (code)\27. Ultimate AMV script\scripts\devtools\verify-smart-cut.mjs" "&lt;your episode&gt;" 30 34</span>
+
+  <div class="footer">
+    Commit <code>217dc00</code> · local only, nothing pushed · 29 July 2026
+  </div>
+</div>
+</body>
+</html>
