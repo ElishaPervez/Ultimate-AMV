@@ -20,8 +20,8 @@
  *   2. Joint integrity  ~10 frames across the head/body seam decode, and no
  *                       single frame pair collapses (no gray/glitch frame)
  *   3. Duration         output length within two frames of <end> - <start>
- *   4. Stream copy      the output's body packets are the source's packets,
- *                       size for size
+ *   4. Stream copy      the output's body packets carry the same compressed
+ *                       bytes as the source's, checksum for checksum
  *   5. Audio alignment  the copied audio starts at the cut, not at the keyframe
  *                       an input seek would have snapped back to
  *
@@ -136,16 +136,39 @@ function headEncoderArgs(codec, pixFmt) {
   throw new Error(refusal(codec || "unknown"));
 }
 
-function firstKeyframeAtOrAfter(csv, start, tolerance) {
+// `startOffset` is the container's first timestamp. ffprobe prints packet times
+// on the container's own timeline while the requested cut — and every ffmpeg
+// -ss built from the result — is counted from the first visible frame, so the
+// offset comes off here. Mirrors first_keyframe_at_or_after in clips.rs.
+function firstKeyframeAtOrAfter(csv, start, tolerance, startOffset) {
   let earliest = null;
   for (const line of csv.split("\n")) {
     const fields = line.split(",");
-    const pts = Number(fields[0]);
-    if (!Number.isFinite(pts) || fields.length < 2) continue;
+    const raw = Number(fields[0]);
+    if (!Number.isFinite(raw) || fields.length < 2) continue;
+    const pts = raw - startOffset;
     if (!fields[1].includes("K") || pts < start - tolerance) continue;
     if (earliest === null || pts < earliest) earliest = pts;
   }
   return earliest;
+}
+
+// How far the copied body may differ from the requested length before the
+// backend gives up and re-encodes the whole clip. Mirrors
+// SMART_CUT_BODY_FRAME_SLACK in clips.rs.
+const BODY_FRAME_SLACK = 4;
+
+// Packets in an ffprobe `packet=pts_time` dump. Only the first field is read:
+// ffprobe puts a trailing comma on every line for transport streams and none
+// for MKV, so parsing the whole line counts zero packets in a perfectly good
+// segment. Mirrors count_packet_lines in clips.rs.
+function countPacketLines(csv) {
+  return csv
+    .split("\n")
+    .filter((line) => {
+      const field = line.split(",")[0]?.trim();
+      return field !== "" && Number.isFinite(Number(field));
+    }).length;
 }
 
 // ─── checks ──────────────────────────────────────────────────────────────────
@@ -170,47 +193,89 @@ function median(values) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+// Packets with both their size and a checksum of the compressed bytes they
+// carry. The checksum is what actually proves identity — two different pictures
+// can easily land on the same byte count.
 function packets(ffprobe, file, stream, from, seconds) {
-  const result = run(ffprobe, [
+  const args = [
     "-v", "error",
     "-select_streams", stream,
-    "-show_entries", "packet=pts_time,size",
-    "-read_intervals", `${Math.max(0, from).toFixed(3)}%+${seconds}`,
+    "-show_entries", "packet=pts_time,size,flags,data_hash",
+    "-show_data_hash", "CRC32",
     "-of", "csv=p=0",
-    file,
-  ]);
+  ];
+  if (Number.isFinite(seconds)) {
+    args.push("-read_intervals", `${Math.max(0, from).toFixed(3)}%+${seconds}`);
+  }
+  args.push(file);
+  const result = run(ffprobe, args);
   if (!result.ok) return [];
   return result.stdout
     .split("\n")
     .map((line) => line.split(","))
-    .filter((fields) => fields.length >= 2 && Number.isFinite(Number(fields[0])))
-    .map((fields) => ({ pts: Number(fields[0]), size: Number(fields[1]) }))
+    .filter((fields) => fields.length >= 4 && Number.isFinite(Number(fields[0])))
+    .map((fields) => ({
+      pts: Number(fields[0]),
+      size: Number(fields[1]),
+      keyframe: (fields[2] ?? "").includes("K"),
+      hash: (fields[3] ?? "").trim(),
+    }))
     .sort((x, y) => x.pts - y.pts);
 }
 
-// The copied packets must be the source's packets. Sizes are compared rather
-// than bytes: two encodes never coincide on a packet-size sequence, so an
-// aligned run of matching sizes means the bitstream came across untouched.
-// The alignment is retried from the first few output packets because the very
-// first one legitimately differs: a keyframe re-muxed into MKV carries its
-// parameter sets in-band, so it comes out a few dozen bytes bigger than the
-// source's.
-function matchingRun(sourceSizes, outputSizes) {
+// Longest run of identical values, allowing the output to start a packet or two
+// into the source's list. Fed checksums, not sizes: a matching run of checksums
+// means those packets carry the same compressed bytes, which a re-encode or a
+// seek that landed elsewhere cannot fake.
+function matchingRun(sourceValues, outputValues) {
   let best = { offset: -1, matched: 0 };
-  for (let skip = 0; skip < Math.min(3, outputSizes.length); skip += 1) {
-    const offset = sourceSizes.indexOf(outputSizes[skip]);
+  for (let skip = 0; skip < Math.min(3, outputValues.length); skip += 1) {
+    const offset = sourceValues.indexOf(outputValues[skip]);
     if (offset < 0) continue;
     let matched = 0;
     while (
-      skip + matched < outputSizes.length &&
-      offset + matched < sourceSizes.length &&
-      outputSizes[skip + matched] === sourceSizes[offset + matched]
+      skip + matched < outputValues.length &&
+      offset + matched < sourceValues.length &&
+      outputValues[skip + matched] === sourceValues[offset + matched]
     ) {
       matched += 1;
     }
     if (matched > best.matched) best = { offset: offset - skip, matched };
   }
   return best;
+}
+
+// Both sides of the body comparison are pushed through the SAME transport
+// stream with the same access-unit filter first. Straight container-to-container
+// checksums would disagree for reasons that have nothing to do with the picture:
+// MKV and MP4 frame the same compressed bytes differently, and the join strips
+// access-unit delimiters. Re-muxing both ranges identically leaves only the
+// compressed bytes themselves, so a matching checksum means the picture data
+// came across untouched, and a mismatch means it did not.
+// Returns the range's packets as { at, hash }, where `at` counts seconds from
+// the first packet of the range (the transport stream adds a fixed lead-in of
+// its own, which this takes back off).
+function normalizedPackets(ffmpeg, ffprobe, file, codec, from, seconds, target) {
+  const args = ["-y", "-hide_banner", "-loglevel", "error"];
+  if (from > 0) args.push("-ss", from.toFixed(6));
+  args.push("-i", file);
+  if (Number.isFinite(seconds)) args.push("-t", seconds.toFixed(3));
+  args.push(
+    "-map", "0:v:0",
+    "-c", "copy",
+    "-bsf:v", `${codec}_metadata=aud=remove`,
+    "-f", "mpegts",
+    target,
+  );
+  if (!run(ffmpeg, args).ok) return null;
+  const found = packets(ffprobe, target, "v:0", 0, Number.NaN);
+  if (found.length === 0) return null;
+  const base = Math.min(...found.map((packet) => packet.pts));
+  return found.map((packet) => ({
+    at: packet.pts - base,
+    hash: packet.hash,
+    keyframe: packet.keyframe,
+  }));
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
@@ -266,15 +331,21 @@ console.log(`work dir ${workDir}\n`);
 const probe = runOrDie(ffprobe, [
   "-v", "error",
   "-select_streams", "v:0",
-  "-show_entries", "stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate",
+  "-show_entries", "stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate:format=start_time",
   "-of", "json",
   source,
 ], "Probing the source");
-const stream = JSON.parse(probe.stdout).streams?.[0];
+const probed = JSON.parse(probe.stdout);
+const stream = probed.streams?.[0];
 if (!stream) {
   console.error("This file has no video stream to cut.");
   process.exit(1);
 }
+// Where the container's clock starts. ffmpeg's -ss is counted from the first
+// visible frame (it adds this to the seek target), ffprobe's packet times are
+// not — everything below works in the first-visible-frame timeline.
+const startOffsetRaw = Number(probed.format?.start_time);
+const startOffset = Number.isFinite(startOffsetRaw) && startOffsetRaw > 0 ? startOffsetRaw : 0;
 
 const avgFps = parseFpsRational(stream.avg_frame_rate);
 const nominalFps = parseFpsRational(stream.r_frame_rate);
@@ -290,6 +361,9 @@ try {
 }
 
 console.log(`codec    ${stream.codec_name} ${stream.pix_fmt} @ ${stream.avg_frame_rate} (nominal ${stream.r_frame_rate})`);
+if (startOffset > 0) {
+  console.log(`offset   the file's clock starts at ${startOffset.toFixed(3)}s — every time below is counted from the first frame`);
+}
 
 if (refusalMessage) {
   console.log(`\nRefused: ${refusalMessage}`);
@@ -315,15 +389,20 @@ const keyframeProbe = run(ffprobe, [
   "-v", "error",
   "-select_streams", "v:0",
   "-show_entries", "packet=pts_time,flags",
-  "-read_intervals", `${start.toFixed(3)}%+40`,
+  // Asked for on the container's clock, answered in first-frame time.
+  "-read_intervals", `${(start + startOffset).toFixed(3)}%+40`,
   "-of", "csv=p=0",
   source,
 ]);
-const keyframe = keyframeProbe.ok ? firstKeyframeAtOrAfter(keyframeProbe.stdout, start, tolerance) : null;
+const keyframe = keyframeProbe.ok
+  ? firstKeyframeAtOrAfter(keyframeProbe.stdout, start, tolerance, startOffset)
+  : null;
 console.log(`keyframe ${keyframe === null ? "none in the 40s window" : keyframe.toFixed(3)}`);
 
 const onKeyframe = keyframe !== null && Math.abs(keyframe - start) < tolerance;
-const spliced = keyframe !== null && !onKeyframe && keyframe < end - tolerance;
+// Whether the head/body splice was attempted. The backend can still abandon it
+// after the copy lands wrong, and so can this script — see below.
+let spliced = keyframe !== null && !onKeyframe && keyframe < end - tolerance;
 
 // 3. Produce the cut, exactly as run_smart_cut_clip does.
 //
@@ -384,18 +463,37 @@ if (onKeyframe) {
       "-f", "mpegts",
       body,
     ], "Copying the body");
-    const listPath = path.join(workDir, "concat.txt");
-    fs.writeFileSync(listPath, [head, body].map((file) => `file '${file.replace(/'/g, "'\\''")}'\n`).join(""));
-    runOrDie(ffmpeg, [
-      "-y", "-hide_banner", "-nostdin",
-      "-f", "concat", "-safe", "0",
-      "-i", listPath,
-      "-c", "copy",
-      // Strips the access-unit delimiters the transport-stream intermediates
-      // added, so the body's packets stay byte-identical to the source's.
-      "-bsf:v", `${stream.codec_name}_metadata=aud=remove`,
-      video,
-    ], "Joining head and body");
+
+    // The backend counts what the copy actually produced and throws the splice
+    // away when it does not match — a source with a lying keyframe index seeks
+    // somewhere else entirely. The script has to take the same decision, or it
+    // would be checking a file the app would never have shipped.
+    const bodyPackets = run(ffprobe, [
+      "-v", "error", "-select_streams", "v:0",
+      "-show_entries", "packet=pts_time", "-of", "csv=p=0", body,
+    ]);
+    const copiedFrames = bodyPackets.ok ? countPacketLines(bodyPackets.stdout) : null;
+    const wantedBodyFrames = Math.max(1, Math.round((end - keyframe) * fps));
+    if (copiedFrames === null || Math.abs(copiedFrames - wantedBodyFrames) > BODY_FRAME_SLACK) {
+      console.log(
+        `         body copy landed on ${copiedFrames === null ? "an unreadable segment" : `${copiedFrames} frames instead of ${wantedBodyFrames}`} — falling back to a full re-encode, as the app does\n`,
+      );
+      spliced = false;
+      runOrDie(ffmpeg, headVideoArgs(duration, video, false), "Re-encoding the clip");
+    } else {
+      const listPath = path.join(workDir, "concat.txt");
+      fs.writeFileSync(listPath, [head, body].map((file) => `file '${file.replace(/'/g, "'\\''")}'\n`).join(""));
+      runOrDie(ffmpeg, [
+        "-y", "-hide_banner", "-nostdin",
+        "-f", "concat", "-safe", "0",
+        "-i", listPath,
+        "-c", "copy",
+        // Strips the access-unit delimiters the transport-stream intermediates
+        // added, so the body's packets stay byte-identical to the source's.
+        "-bsf:v", `${stream.codec_name}_metadata=aud=remove`,
+        video,
+      ], "Joining head and body");
+    }
   } else {
     console.log("path     full re-encode (no keyframe inside the clip)\n");
     runOrDie(ffmpeg, headVideoArgs(duration, video, false), "Re-encoding the clip");
@@ -505,7 +603,7 @@ const frameProbe = run(ffprobe, [
   "-of", "csv=p=0",
   output,
 ]);
-const outFrames = frameProbe.stdout.split("\n").filter((line) => line.trim() !== "" && Number.isFinite(Number(line))).length;
+const outFrames = countPacketLines(frameProbe.stdout);
 const wantFrames = Math.round(duration * fps);
 // A quarter-second of slack. The body is copied, so it can only end on a packet
 // boundary, and an open-GOP source hands over a few leading pictures with the
@@ -522,21 +620,63 @@ record(
 if (spliced || onKeyframe) {
   const bodyStartInOutput = onKeyframe ? 0 : keyframe - start;
   const seconds = Math.min(4, Math.max(1, Math.floor(end - keyframe)));
-  // ffprobe's read interval starts at the keyframe at or before the requested
-  // point, so the head's packets can lead the list — drop anything before the
-  // body starts.
-  const sourceSizes = packets(ffprobe, source, "v:0", keyframe, seconds)
-    .filter((packet) => packet.pts >= keyframe - 0.001)
-    .map((packet) => packet.size);
-  const outputSizes = packets(ffprobe, output, "v:0", bodyStartInOutput, seconds)
-    .filter((packet) => packet.pts >= bodyStartInOutput - 0.001)
-    .map((packet) => packet.size);
-  const { matched } = matchingRun(sourceSizes, outputSizes);
-  record(
-    "stream copy: the body's packets are the source's packets",
-    matched >= 5 && matched >= Math.min(outputSizes.length, sourceSizes.length) - 1,
-    `${matched} of ${outputSizes.length} output packets match the source packet for packet`,
+  const sourceRange = normalizedPackets(
+    ffmpeg, ffprobe, source, stream.codec_name, keyframe, seconds,
+    path.join(workDir, "proof_source.ts"),
   );
+  // The whole output is re-muxed and the head's packets are dropped by time
+  // afterwards: seeking into it would snap back to the clip's own first
+  // keyframe and drag the re-encoded head into the comparison.
+  const outputRange = normalizedPackets(
+    ffmpeg, ffprobe, output, stream.codec_name, 0, Number.NaN,
+    path.join(workDir, "proof_output.ts"),
+  );
+  const sourceBody = sourceRange ?? [];
+  const outputBody = (outputRange ?? [])
+    .filter((packet) => packet.at >= bodyStartInOutput - 0.5 / fps)
+    .slice(0, sourceBody.length + 2);
+  if (sourceBody.length === 0 || outputBody.length === 0) {
+    record("stream copy: the body's packets are the source's packets", false, "the packet checksums could not be read");
+  } else {
+    // Line the two lists up on their longest identical run, then account for
+    // EVERY packet at that alignment. Keyframes are allowed to differ: a
+    // keyframe re-muxed a second time carries another copy of the stream's
+    // parameter sets ahead of the picture, which changes its checksum without
+    // changing a single pixel. Any other mismatch means the body is not the
+    // source's bitstream.
+    const { offset, matched: run } = matchingRun(
+      sourceBody.map((packet) => packet.hash),
+      outputBody.map((packet) => packet.hash),
+    );
+    let identical = 0;
+    let differing = 0;
+    let differingKeyframes = 0;
+    if (offset >= 0) {
+      // The last couple of packets on each side sit at the edge of a range that
+      // was cut at a packet boundary, so they have no honest counterpart —
+      // everything before them does.
+      const limit = Math.min(outputBody.length, sourceBody.length - offset) - 2;
+      for (let i = 0; i < limit; i += 1) {
+        const counterpart = sourceBody[offset + i];
+        if (!counterpart) break;
+        if (counterpart.hash === outputBody[i].hash) {
+          identical += 1;
+        } else {
+          differing += 1;
+          if (outputBody[i].keyframe) differingKeyframes += 1;
+        }
+      }
+    }
+    const compared = identical + differing;
+    record(
+      "stream copy: the body's packets are the source's packets",
+      run >= 5 && compared >= 5 && differing === differingKeyframes && identical >= compared - differingKeyframes,
+      offset < 0
+        ? "no run of matching packets — the body is not the source's bitstream"
+        : `${identical} of ${compared} packets carry the source's exact compressed bytes` +
+          (differing > 0 ? ` (${differing} differ, all of them keyframes re-stamped with parameter sets)` : ""),
+    );
+  }
 } else {
   record("stream copy: nothing was copied (full re-encode)", true, "no body segment");
 }
@@ -551,10 +691,14 @@ if (hasAudio) {
   // audio from shortly before the video keyframe, exactly as the shipped
   // Lossless cut preset does, so it is allowed a wider lead-in.
   const lead = onKeyframe ? 0.3 : 0.05;
-  const sourceAudio = packets(ffprobe, source, "a:0", Math.max(0, start - 1), 6)
-    .filter((packet) => packet.pts >= start - lead)
-    .map((packet) => packet.size);
-  const outputAudio = packets(ffprobe, output, "a:0", 0, 4).map((packet) => packet.size);
+  // Checksums again, not sizes: a codec whose packets are all the same length
+  // (and plenty are) would make audio taken from completely the wrong moment
+  // look perfectly aligned. Audio is copied packet for packet into the output,
+  // so the checksums match directly with no re-muxing.
+  const sourceAudio = packets(ffprobe, source, "a:0", Math.max(0, start - 1 + startOffset), 6)
+    .filter((packet) => packet.pts - startOffset >= start - lead)
+    .map((packet) => packet.hash);
+  const outputAudio = packets(ffprobe, output, "a:0", 0, 4).map((packet) => packet.hash);
   const { offset, matched } = matchingRun(sourceAudio, outputAudio);
   // offset counts how many source packets sit between the cut and where the
   // output's audio begins. A packet or two is the audio frame grid; seconds'

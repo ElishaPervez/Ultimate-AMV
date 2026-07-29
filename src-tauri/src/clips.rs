@@ -20,8 +20,8 @@ use crate::{
     probe_has_audio_stream, probe_media_summary, python_exe_checked, run_ffmpeg_with_progress,
     sanitize_path_segment,
     serialize_clip_preview_done, short_stable_id, store_child_pid, truncate_log_text,
-    append_app_log, MediaSummary, CLIP_CHILD_PID, CLIP_SERVER, PROXY_BUILD_LOCK, PROXY_CHILD_PID,
-    ConversionDone, H264_NVENC_AVAILABLE,
+    append_app_log, MediaSummary, CLIP_CANCEL_REQUESTED, CLIP_CHILD_PID, CLIP_SERVER,
+    PROXY_BUILD_LOCK, PROXY_CHILD_PID, ConversionDone, H264_NVENC_AVAILABLE,
 };
 
 #[derive(Deserialize)]
@@ -484,13 +484,33 @@ fn preset_supports_rate_control(preset: &str) -> bool {
 
 // Video stream properties smart cut needs before it can splice: the codec and
 // pixel format pick the head encoder, the two frame rates decide whether the
-// source is constant-rate enough to splice at all.
+// source is constant-rate enough to splice at all, width/height and the rest
+// decide whether two sources can be joined without re-encoding.
+//
+// `start_offset` is the container's first timestamp. Most files start at 0, but
+// a stream ripped from broadcast or remuxed with an offset starts later, and
+// ffprobe then reports packet timestamps on THAT timeline while every clip
+// range (and every ffmpeg -ss) is counted from the first visible frame. The
+// offset is what converts between the two.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SourceVideoParams {
     codec: String,
     pix_fmt: String,
+    width: i64,
+    height: i64,
     avg_frame_rate: String,
     r_frame_rate: String,
+    start_offset: f64,
+}
+
+// Audio stream properties that have to line up before two cuts can be joined
+// with a stream copy. `None` (no audio stream at all) is itself a mismatch when
+// another source has sound.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SourceAudioParams {
+    codec: String,
+    sample_rate: String,
+    channels: i64,
 }
 
 // Every smart-cut refusal reads the same: name what we could not splice, then
@@ -596,12 +616,109 @@ fn smart_cut_head_encoder_args(codec: &str, pix_fmt: &str) -> Result<Vec<String>
     }
 }
 
+// One source file as the merge preflight sees it.
+#[derive(Clone, Debug)]
+struct SourceMergeProfile {
+    name: String,
+    video: SourceVideoParams,
+    audio: Option<SourceAudioParams>,
+}
+
+// Smart cut cuts each clip on its own and then joins the pieces with a stream
+// copy. The join takes its stream layout from the FIRST piece and copies
+// everything after it under that description, so anything that disagrees comes
+// out broken rather than rejected: a different codec plays as garbage, a
+// different size shows as a torn picture, and a first clip with no sound throws
+// away the sound of every later clip. None of that surfaces as an error — the
+// export reports success. So every source is compared up front and the whole
+// merge is refused before a single file is written.
+//
+// Returns the message to show the user, or None when the sources can be joined.
+fn smart_cut_merge_mismatch(profiles: &[SourceMergeProfile]) -> Option<String> {
+    let refuse = |what: &str, first: &SourceMergeProfile, other: &SourceMergeProfile,
+                  first_value: String, other_value: String| {
+        Some(format!(
+            "Smart cut can't merge clips whose {what} differ: \"{}\" is {first_value} and \"{}\" is {other_value}. \
+             Joining them without re-encoding would produce a file that breaks partway through. \
+             Merge these with a re-encode preset, or export the clips separately.",
+            first.name, other.name
+        ))
+    };
+
+    let first = profiles.first()?;
+    for other in profiles.iter().skip(1) {
+        if !first.video.codec.eq_ignore_ascii_case(&other.video.codec) {
+            return refuse("video formats", first, other,
+                first.video.codec.clone(), other.video.codec.clone());
+        }
+        if first.video.pix_fmt != other.video.pix_fmt {
+            return refuse("colour formats", first, other,
+                first.video.pix_fmt.clone(), other.video.pix_fmt.clone());
+        }
+        if (first.video.width, first.video.height) != (other.video.width, other.video.height) {
+            return refuse("frame sizes", first, other,
+                format!("{}x{}", first.video.width, first.video.height),
+                format!("{}x{}", other.video.width, other.video.height));
+        }
+        // Frame rates get the same 1% tolerance the single-clip guard uses:
+        // 23.976 and 24 splice cleanly, 24 and 30 do not.
+        let rates = (
+            parse_fps_rational(&first.video.avg_frame_rate),
+            parse_fps_rational(&other.video.avg_frame_rate),
+        );
+        if let (Some(a), Some(b)) = rates {
+            if (a - b).abs() / a.max(b) > 0.01 {
+                return refuse("frame rates", first, other,
+                    format!("{a:.3} fps"), format!("{b:.3} fps"));
+            }
+        }
+
+        match (&first.audio, &other.audio) {
+            (None, Some(_)) | (Some(_), None) => {
+                let (silent, sounded) = if first.audio.is_none() {
+                    (&first.name, &other.name)
+                } else {
+                    (&other.name, &first.name)
+                };
+                return Some(format!(
+                    "Smart cut can't merge these clips: \"{silent}\" has no sound and \"{sounded}\" does. \
+                     The joined file would come out silent all the way through. \
+                     Merge these with a re-encode preset, or export the clips separately."
+                ));
+            }
+            (Some(a), Some(b)) => {
+                if !a.codec.eq_ignore_ascii_case(&b.codec) {
+                    return refuse("sound formats", first, other, a.codec.clone(), b.codec.clone());
+                }
+                if a.sample_rate != b.sample_rate || a.channels != b.channels {
+                    return refuse("sound layouts", first, other,
+                        format!("{} Hz, {} channel(s)", a.sample_rate, a.channels),
+                        format!("{} Hz, {} channel(s)", b.sample_rate, b.channels));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    None
+}
+
 // Earliest keyframe at or after `start` in ffprobe's `packet=pts_time,flags`
 // CSV. Packets are listed in decode order, so a stream with B-frames can print
 // a later pts before an earlier one — every line is scanned for the minimum
 // rather than trusting the first `K`. A keyframe up to half a frame before
 // `start` still counts as landing on the cut.
-fn first_keyframe_at_or_after(csv: &str, start: f64, tolerance: f64) -> Option<f64> {
+//
+// `start_offset` is the container's first timestamp. ffprobe prints packet
+// timestamps on the container's own timeline while `start` (and every ffmpeg
+// -ss the caller builds from the result) is counted from the first visible
+// frame, so the offset is subtracted here and the returned time is always
+// counted from the start of the picture.
+fn first_keyframe_at_or_after(
+    csv: &str,
+    start: f64,
+    tolerance: f64,
+    start_offset: f64,
+) -> Option<f64> {
     let mut earliest: Option<f64> = None;
     for line in csv.lines() {
         let mut fields = line.split(',');
@@ -609,6 +726,7 @@ fn first_keyframe_at_or_after(csv: &str, start: f64, tolerance: f64) -> Option<f
             continue;
         };
         let Some(flags) = fields.next() else { continue };
+        let pts = pts - start_offset;
         if !flags.contains('K') || pts < start - tolerance {
             continue;
         }
@@ -633,11 +751,27 @@ fn parse_source_video_params(json_text: &str) -> Result<SourceVideoParams, Strin
             .unwrap_or_default()
             .to_string()
     };
+    let number = |key: &str| stream.get(key).and_then(Value::as_i64).unwrap_or_default();
+    // ffmpeg's -ss is measured from the container's start_time (it adds
+    // format.start_time to the seek target), so that is the value that turns a
+    // probed packet timestamp into a seek position. A file with no reported
+    // start (or a negative one, which ffmpeg does not add either) is treated as
+    // starting at zero.
+    let start_offset = value
+        .get("format")
+        .and_then(|format| format.get("start_time"))
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|offset| offset.is_finite() && *offset > 0.0)
+        .unwrap_or(0.0);
     Ok(SourceVideoParams {
         codec: field("codec_name"),
         pix_fmt: field("pix_fmt"),
+        width: number("width"),
+        height: number("height"),
         avg_frame_rate: field("avg_frame_rate"),
         r_frame_rate: field("r_frame_rate"),
+        start_offset,
     })
 }
 
@@ -646,7 +780,7 @@ fn probe_source_video_params(ffprobe: &Path, input: &Path) -> Result<SourceVideo
         .arg("-v").arg("error")
         .arg("-select_streams").arg("v:0")
         .arg("-show_entries")
-        .arg("stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate")
+        .arg("stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate:format=start_time")
         .arg("-of").arg("json")
         .arg(input)
         .output()
@@ -655,6 +789,58 @@ fn probe_source_video_params(ffprobe: &Path, input: &Path) -> Result<SourceVideo
         return Err("Could not read this file's video format.".to_string());
     }
     parse_source_video_params(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_source_audio_params(json_text: &str) -> Option<SourceAudioParams> {
+    let value: Value = serde_json::from_str(json_text).ok()?;
+    let stream = value.get("streams").and_then(|streams| streams.get(0))?;
+    let field = |key: &str| {
+        stream
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(SourceAudioParams {
+        codec: field("codec_name"),
+        sample_rate: field("sample_rate"),
+        channels: stream.get("channels").and_then(Value::as_i64).unwrap_or_default(),
+    })
+}
+
+// `None` means the file has no audio stream (or could not be read), which the
+// merge preflight treats as "silent" rather than as an error.
+fn probe_source_audio_params(ffprobe: &Path, input: &Path) -> Option<SourceAudioParams> {
+    let output = cmd(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("a:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name,sample_rate,channels")
+        .arg("-of").arg("json")
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_source_audio_params(&String::from_utf8_lossy(&output.stdout))
+}
+
+// Packets in an ffprobe `packet=pts_time` CSV dump.
+//
+// Only the FIRST field is parsed. ffprobe prints a trailing comma on every line
+// for some containers (transport streams among them) and none for others, so a
+// whole-line parse silently counts zero packets in a perfectly good segment —
+// which is exactly what smart cut's body check reads as "this copy landed on
+// the wrong footage", throwing away every splice and re-encoding every clip.
+fn count_packet_lines(csv: &str) -> usize {
+    csv.lines()
+        .filter(|line| {
+            line.split(',')
+                .next()
+                .is_some_and(|field| field.trim().parse::<f64>().is_ok())
+        })
+        .count()
 }
 
 // Video packet count of a finished segment. Only ever called on the short temp
@@ -671,29 +857,30 @@ fn probe_video_packet_count(ffprobe: &Path, input: &Path) -> Option<usize> {
     if !output.status.success() {
         return None;
     }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| line.trim().parse::<f64>().is_ok())
-            .count(),
-    )
+    Some(count_packet_lines(&String::from_utf8_lossy(&output.stdout)))
 }
 
 // Keyframe lookup over a bounded 40 s window, not the whole file — a full
 // packet dump of a 24-minute episode costs seconds per clip. A start near EOF
 // or an absurd GOP length returns None, which the caller answers by re-encoding
 // the whole clip.
+//
+// `start` is counted from the first visible frame; the read window has to be
+// asked for on the container's own timeline, so the source's start timestamp is
+// added here and taken back off every result.
 fn probe_first_keyframe(
     ffprobe: &Path,
     input: &Path,
     start: f64,
     tolerance: f64,
+    start_offset: f64,
 ) -> Option<f64> {
+    let window_start = start + start_offset;
     let output = cmd(ffprobe)
         .arg("-v").arg("error")
         .arg("-select_streams").arg("v:0")
         .arg("-show_entries").arg("packet=pts_time,flags")
-        .arg("-read_intervals").arg(format!("{start:.3}%+40"))
+        .arg("-read_intervals").arg(format!("{window_start:.3}%+40"))
         .arg("-of").arg("csv=p=0")
         .arg(input)
         .output()
@@ -701,7 +888,12 @@ fn probe_first_keyframe(
     if !output.status.success() {
         return None;
     }
-    first_keyframe_at_or_after(&String::from_utf8_lossy(&output.stdout), start, tolerance)
+    first_keyframe_at_or_after(
+        &String::from_utf8_lossy(&output.stdout),
+        start,
+        tolerance,
+        start_offset,
+    )
 }
 
 #[cfg(test)]
@@ -847,18 +1039,34 @@ mod rate_control_tests {
 #[cfg(test)]
 mod smart_cut_tests {
     use super::{
-        first_keyframe_at_or_after, parse_fps_rational, parse_source_video_params,
-        pix_fmt_bit_depth, preset_extension, smart_cut_fps, smart_cut_head_encoder_args,
-        SourceVideoParams, VIDEO_PRESETS,
+        count_packet_lines, first_keyframe_at_or_after, parse_fps_rational, parse_source_audio_params,
+        parse_source_video_params, pix_fmt_bit_depth, preset_extension, smart_cut_fps,
+        smart_cut_head_encoder_args, smart_cut_merge_mismatch, SourceAudioParams,
+        SourceMergeProfile, SourceVideoParams, VIDEO_PRESETS,
     };
 
     fn params(codec: &str, pix_fmt: &str, avg: &str, r: &str) -> SourceVideoParams {
         SourceVideoParams {
             codec: codec.to_string(),
             pix_fmt: pix_fmt.to_string(),
+            width: 1920,
+            height: 1080,
             avg_frame_rate: avg.to_string(),
             r_frame_rate: r.to_string(),
+            start_offset: 0.0,
         }
+    }
+
+    fn audio(codec: &str, sample_rate: &str, channels: i64) -> SourceAudioParams {
+        SourceAudioParams {
+            codec: codec.to_string(),
+            sample_rate: sample_rate.to_string(),
+            channels,
+        }
+    }
+
+    fn profile(name: &str, video: SourceVideoParams, audio: Option<SourceAudioParams>) -> SourceMergeProfile {
+        SourceMergeProfile { name: name.to_string(), video, audio }
     }
 
     #[test]
@@ -870,29 +1078,172 @@ mod smart_cut_tests {
     #[test]
     fn keyframe_lines_are_read_flags_first_field_second() {
         let csv = "12.000000,K__\n12.041667,__\n";
-        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02), Some(12.0));
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02, 0.0), Some(12.0));
         // A non-keyframe packet at the requested time is never picked.
-        assert_eq!(first_keyframe_at_or_after("12.000000,__\n", 12.0, 0.02), None);
+        assert_eq!(first_keyframe_at_or_after("12.000000,__\n", 12.0, 0.02, 0.0), None);
     }
 
     #[test]
     fn out_of_order_packets_still_yield_the_earliest_keyframe() {
         // Decode order: the later keyframe is listed first.
         let csv = "18.500000,K__\n12.250000,K__\n9.000000,K__\n";
-        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02), Some(12.25));
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02, 0.0), Some(12.25));
     }
 
     #[test]
     fn keyframes_within_half_a_frame_before_the_cut_still_count() {
         let csv = "11.990000,K__\n";
-        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02), Some(11.99));
-        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.005), None);
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.02, 0.0), Some(11.99));
+        assert_eq!(first_keyframe_at_or_after(csv, 12.0, 0.005, 0.0), None);
     }
 
     #[test]
     fn an_empty_or_garbled_probe_yields_no_keyframe() {
-        assert_eq!(first_keyframe_at_or_after("", 12.0, 0.02), None);
-        assert_eq!(first_keyframe_at_or_after("N/A,K__\nK__\n\n", 12.0, 0.02), None);
+        assert_eq!(first_keyframe_at_or_after("", 12.0, 0.02, 0.0), None);
+        assert_eq!(first_keyframe_at_or_after("N/A,K__\nK__\n\n", 12.0, 0.02, 0.0), None);
+    }
+
+    #[test]
+    fn a_source_that_starts_late_is_measured_from_its_first_frame() {
+        // The file's timestamps begin at 1.000, so its keyframes at 1/3/5/7 are
+        // 0/2/4/6 counted from the first visible frame. A cut asked for at 3.0
+        // must NOT be told it landed on the keyframe printed as 3.000000 —
+        // that one is two seconds into the picture.
+        let csv = "1.000000,K__\n3.000000,K__\n5.000000,K__\n7.000000,K__\n";
+        assert_eq!(first_keyframe_at_or_after(csv, 3.0, 0.02, 1.0), Some(4.0));
+        // And the keyframe that IS at 3 seconds of picture is found there.
+        assert_eq!(first_keyframe_at_or_after(csv, 2.0, 0.02, 1.0), Some(2.0));
+        // With no offset the same probe output means something different.
+        assert_eq!(first_keyframe_at_or_after(csv, 3.0, 0.02, 0.0), Some(3.0));
+    }
+
+    #[test]
+    fn the_probe_keeps_the_containers_start_timestamp() {
+        let json = r#"{"streams":[{"codec_name":"h264","width":1920,"height":1080,
+            "pix_fmt":"yuv420p","r_frame_rate":"24/1","avg_frame_rate":"24/1"}],
+            "format":{"start_time":"1.000000"}}"#;
+        assert_eq!(parse_source_video_params(json).unwrap().start_offset, 1.0);
+        // Missing, unreadable and negative starts all mean "starts at zero":
+        // ffmpeg does not shift a seek for any of them either.
+        for start in ["\"N/A\"", "\"-0.500000\"", "null"] {
+            let json = format!(
+                r#"{{"streams":[{{"codec_name":"h264","pix_fmt":"yuv420p"}}],
+                   "format":{{"start_time":{start}}}}}"#
+            );
+            assert_eq!(parse_source_video_params(&json).unwrap().start_offset, 0.0, "{start}");
+        }
+        assert_eq!(
+            parse_source_video_params(r#"{"streams":[{"codec_name":"h264"}]}"#)
+                .unwrap()
+                .start_offset,
+            0.0
+        );
+    }
+
+    #[test]
+    fn the_audio_probe_reads_the_first_audio_stream() {
+        let json = r#"{"streams":[{"codec_name":"aac","sample_rate":"48000","channels":2}]}"#;
+        assert_eq!(parse_source_audio_params(json), Some(audio("aac", "48000", 2)));
+        assert_eq!(parse_source_audio_params(r#"{"streams":[]}"#), None);
+        assert_eq!(parse_source_audio_params("not json"), None);
+    }
+
+    #[test]
+    fn merges_of_matching_sources_are_allowed() {
+        let video = params("h264", "yuv420p", "24000/1001", "24000/1001");
+        let sources = vec![
+            profile("ep01.mkv", video.clone(), Some(audio("aac", "48000", 2))),
+            profile("ep02.mkv", video.clone(), Some(audio("aac", "48000", 2))),
+        ];
+        assert_eq!(smart_cut_merge_mismatch(&sources), None);
+        // 23.976 and 24 are the same rate for splicing purposes.
+        let near = params("h264", "yuv420p", "24/1", "24/1");
+        assert_eq!(
+            smart_cut_merge_mismatch(&[
+                profile("a.mkv", video.clone(), None),
+                profile("b.mkv", near, None),
+            ]),
+            None
+        );
+        // One source, and no sources, have nothing to disagree with.
+        assert_eq!(smart_cut_merge_mismatch(&[profile("a.mkv", video, None)]), None);
+        assert_eq!(smart_cut_merge_mismatch(&[]), None);
+    }
+
+    #[test]
+    fn merges_of_mismatched_sources_are_refused_by_name() {
+        let h264 = params("h264", "yuv420p", "24/1", "24/1");
+        let hevc = params("hevc", "yuv420p", "24/1", "24/1");
+        let message = smart_cut_merge_mismatch(&[
+            profile("a.mkv", h264.clone(), None),
+            profile("b.mkv", hevc, None),
+        ])
+        .expect("mixed codecs must be refused");
+        assert!(message.contains("video formats"), "{message}");
+        assert!(message.contains("\"a.mkv\"") && message.contains("\"b.mkv\""), "{message}");
+
+        let mut wide = h264.clone();
+        wide.width = 1280;
+        wide.height = 720;
+        assert!(smart_cut_merge_mismatch(&[
+            profile("a.mkv", h264.clone(), None),
+            profile("b.mkv", wide, None),
+        ])
+        .is_some_and(|message| message.contains("frame sizes")));
+
+        let ten_bit = params("h264", "yuv420p10le", "24/1", "24/1");
+        assert!(smart_cut_merge_mismatch(&[
+            profile("a.mkv", h264.clone(), None),
+            profile("b.mkv", ten_bit, None),
+        ])
+        .is_some_and(|message| message.contains("colour formats")));
+
+        let thirty = params("h264", "yuv420p", "30/1", "30/1");
+        assert!(smart_cut_merge_mismatch(&[
+            profile("a.mkv", h264.clone(), None),
+            profile("b.mkv", thirty, None),
+        ])
+        .is_some_and(|message| message.contains("frame rates")));
+    }
+
+    #[test]
+    fn a_silent_source_beside_a_sounded_one_is_refused_either_way_round() {
+        let video = params("h264", "yuv420p", "24/1", "24/1");
+        let silent_first = smart_cut_merge_mismatch(&[
+            profile("silent.mkv", video.clone(), None),
+            profile("sound.mkv", video.clone(), Some(audio("aac", "48000", 2))),
+        ])
+        .expect("a silent first clip must be refused");
+        assert!(silent_first.contains("\"silent.mkv\" has no sound"), "{silent_first}");
+
+        let silent_last = smart_cut_merge_mismatch(&[
+            profile("sound.mkv", video.clone(), Some(audio("aac", "48000", 2))),
+            profile("silent.mkv", video.clone(), None),
+        ])
+        .expect("a silent later clip must be refused too");
+        assert!(silent_last.contains("\"silent.mkv\" has no sound"), "{silent_last}");
+
+        // Different sound formats cannot be joined either.
+        assert!(smart_cut_merge_mismatch(&[
+            profile("a.mkv", video.clone(), Some(audio("aac", "48000", 2))),
+            profile("b.mkv", video.clone(), Some(audio("ac3", "48000", 2))),
+        ])
+        .is_some_and(|message| message.contains("sound formats")));
+        assert!(smart_cut_merge_mismatch(&[
+            profile("a.mkv", video.clone(), Some(audio("aac", "48000", 2))),
+            profile("b.mkv", video, Some(audio("aac", "44100", 2))),
+        ])
+        .is_some_and(|message| message.contains("sound layouts")));
+    }
+
+    #[test]
+    fn packets_are_counted_with_or_without_ffprobes_trailing_comma() {
+        // Transport streams (what the body copy is written as) come back with a
+        // trailing comma on every line; MKV does not. Both are real packets.
+        assert_eq!(count_packet_lines("1.483333,\n1.650000,\n1.566667,\n"), 3);
+        assert_eq!(count_packet_lines("0.000000\n0.167000\n0.083000\n"), 3);
+        assert_eq!(count_packet_lines("N/A\n\nnot-a-time\n"), 0);
+        assert_eq!(count_packet_lines(""), 0);
     }
 
     #[test]
@@ -988,7 +1339,8 @@ mod smart_cut_tests {
     #[test]
     fn the_stream_probe_reads_the_first_video_stream() {
         let json = r#"{"streams":[{"codec_name":"hevc","width":1920,"height":1080,
-            "pix_fmt":"yuv420p10le","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}]}"#;
+            "pix_fmt":"yuv420p10le","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}],
+            "format":{"start_time":"0.000000"}}"#;
         assert_eq!(
             parse_source_video_params(json).unwrap(),
             params("hevc", "yuv420p10le", "24000/1001", "24000/1001")
@@ -1015,6 +1367,45 @@ fn padded_clip_range(clip: &ExportClip) -> (f64, f64) {
     (start, duration)
 }
 
+// Called at the top of every export: a cancel request belongs to the export it
+// was made during, never to the next one.
+fn begin_clip_export() {
+    CLIP_CANCEL_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn clip_export_cancelled() -> bool {
+    CLIP_CANCEL_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+// Every ffmpeg run that belongs to a clip export goes through here. Killing the
+// running child is not enough on its own: between two of them there is no child
+// to kill, so the flag is checked before the next one starts and again after it
+// returns. The error text matches what a killed run produces, so the frontend
+// sees one cancellation either way.
+fn run_clip_ffmpeg(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    args: Vec<String>,
+    duration: f64,
+    label: &str,
+) -> Result<(), String> {
+    if clip_export_cancelled() {
+        return Err(format!("{label} cancelled."));
+    }
+    let result = run_ffmpeg_with_progress(
+        window,
+        ffmpeg,
+        args,
+        duration,
+        label,
+        Some(&CLIP_CHILD_PID),
+    );
+    if clip_export_cancelled() {
+        return Err(format!("{label} cancelled."));
+    }
+    result
+}
+
 fn run_clip_export(
     window: tauri::Window,
     clips: Vec<ExportClip>,
@@ -1024,6 +1415,7 @@ fn run_clip_export(
     rate_mode: Option<String>,
     bitrate_mbps: Option<f64>,
 ) -> Result<String, String> {
+    begin_clip_export();
     let (rate_mode, bitrate_mbps) = if preset_supports_rate_control(&preset) {
         (rate_mode, bitrate_mbps)
     } else {
@@ -1261,13 +1653,12 @@ fn run_clip_export(
 
         let duration = export_duration;
         emit_conversion_progress(&window, "starting", Some(0.0), message, None, None);
-        let primary_result = run_ffmpeg_with_progress(
+        let primary_result = run_clip_ffmpeg(
             &window,
             &ffmpeg,
             args,
             duration,
             "Exporting clip",
-            Some(&CLIP_CHILD_PID),
         );
 
         if let Err(primary_error) = primary_result {
@@ -1317,13 +1708,12 @@ fn run_clip_export(
                     "0.5".to_string(),
                     output.to_string_lossy().to_string(),
                 ]);
-                run_ffmpeg_with_progress(
+                run_clip_ffmpeg(
                     &window,
                     &ffmpeg,
                     fallback_args,
                     duration,
                     "Exporting clip (libx264 fallback)",
-                    Some(&CLIP_CHILD_PID),
                 )?;
             } else {
                 return Err(primary_error);
@@ -1397,6 +1787,7 @@ fn run_clip_export_merged(
     rate_mode: Option<String>,
     bitrate_mbps: Option<f64>,
 ) -> Result<String, String> {
+    begin_clip_export();
     let (rate_mode, bitrate_mbps) = if preset_supports_rate_control(&preset) {
         (rate_mode, bitrate_mbps)
     } else {
@@ -1683,13 +2074,12 @@ fn run_clip_export_merged(
         None,
         None,
     );
-    let primary_result = run_ffmpeg_with_progress(
+    let primary_result = run_clip_ffmpeg(
         &window,
         &ffmpeg,
         args,
         total_duration,
         "Merging clips",
-        Some(&CLIP_CHILD_PID),
     );
     if let Err(primary_error) = primary_result {
         if matches!(
@@ -1727,13 +2117,12 @@ fn run_clip_export_merged(
                 "-stats_period".to_string(), "0.5".to_string(),
                 output.to_string_lossy().to_string(),
             ]);
-            run_ffmpeg_with_progress(
+            run_clip_ffmpeg(
                 &window,
                 &ffmpeg,
                 fallback_args,
                 total_duration,
                 "Merging clips (libx264 fallback)",
-                Some(&CLIP_CHILD_PID),
             )?;
         } else {
             return Err(primary_error);
@@ -1756,6 +2145,62 @@ struct TempDirGuard(PathBuf);
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+// A final output written under a temporary name and moved into place only once
+// ffmpeg has finished successfully.
+//
+// ffmpeg creates its output file the moment it opens it, so a failure, a
+// cancel, or a killed process leaves a playable-looking file sitting in the
+// export folder under the name the user asked for — usually zero bytes or a
+// fraction of the clip. Writing beside it and renaming afterwards means the
+// export folder only ever gains a file that is finished. The temp name keeps
+// the real extension so ffmpeg still picks the right container, and starts with
+// a dot so it is out of the way if anything ever interrupts the cleanup.
+struct StagedOutput {
+    temp: PathBuf,
+    destination: PathBuf,
+    committed: bool,
+}
+
+impl StagedOutput {
+    fn new(destination: &Path) -> StagedOutput {
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let stem = destination
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "output".to_string());
+        // The extension has to stay on the end: ffmpeg picks the container from
+        // it, and a name ending in ".part1234" would fail to open at all.
+        let temp_name = match destination.extension() {
+            Some(ext) => format!(".{stem}.part{}.{}", std::process::id(), ext.to_string_lossy()),
+            None => format!(".{stem}.part{}", std::process::id()),
+        };
+        StagedOutput {
+            temp: parent.join(temp_name),
+            destination: destination.to_path_buf(),
+            committed: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.temp
+    }
+
+    fn commit(mut self) -> Result<(), String> {
+        fs::rename(&self.temp, &self.destination)
+            .map_err(|error| format!("Could not write the finished clip: {error}"))?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedOutput {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.temp);
+        }
     }
 }
 
@@ -1821,13 +2266,12 @@ fn concat_copy_segments(
         output.to_string_lossy().to_string(),
     ]);
     emit_conversion_progress(window, "encode", Some(percent), message, None, None);
-    run_ffmpeg_with_progress(
+    run_clip_ffmpeg(
         window,
         ffmpeg,
         concat_args,
         total_duration,
         label,
-        Some(&CLIP_CHILD_PID),
     )
 }
 
@@ -1835,6 +2279,12 @@ fn concat_copy_segments(
 // snaps an input seek to a keyframe, so this only has to cover one GOP; a
 // bigger window just means a few more packets are read and thrown away.
 const SMART_CUT_AUDIO_BACKOFF: f64 = 15.0;
+
+// How many frames the copied body may differ from the requested length before
+// the whole clip is re-encoded instead. Packet-boundary and open-GOP effects
+// account for one or two; a seek that landed in the wrong place is off by a
+// whole group of pictures, which is dozens.
+const SMART_CUT_BODY_FRAME_SLACK: usize = 4;
 
 // One smart cut. The video is built in two pieces — the head (requested start
 // -> first keyframe at or after it) re-encoded so the clip opens on the exact
@@ -1876,7 +2326,12 @@ fn run_smart_cut_clip(
     // nothing to re-encode.
     let tolerance = 0.5 / fps;
     let end = start + duration;
-    let keyframe = probe_first_keyframe(ffprobe, input, start, tolerance);
+    // Counted from the first visible frame, like `start` and every -ss below —
+    // probe_first_keyframe has already taken the container's start timestamp
+    // off. Without that, a source whose timestamps begin at 1.000 would make a
+    // cut at 3.000 look like it landed on a keyframe that is really at 2.000,
+    // and the clip would open on the wrong image and run a second long.
+    let keyframe = probe_first_keyframe(ffprobe, input, start, tolerance, params.start_offset);
     let stage = |fraction: f32| Some(percent_from + percent_span * fraction);
 
     // The cut already sits on a keyframe: one copy from the keyframe's exact
@@ -1892,7 +2347,8 @@ fn run_smart_cut_clip(
                 None,
                 None,
             );
-            return run_ffmpeg_with_progress(
+            let staged = StagedOutput::new(output);
+            run_clip_ffmpeg(
                 window,
                 ffmpeg,
                 vec![
@@ -1919,12 +2375,12 @@ fn run_smart_cut_clip(
                     "pipe:1".to_string(),
                     "-stats_period".to_string(),
                     "0.5".to_string(),
-                    output.to_string_lossy().to_string(),
+                    staged.path().to_string_lossy().to_string(),
                 ],
                 length,
                 "Smart cut (stream copy)",
-                Some(&CLIP_CHILD_PID),
-            );
+            )?;
+            return staged.commit();
         }
     }
 
@@ -1984,13 +2440,12 @@ fn run_smart_cut_clip(
             None,
             None,
         );
-        run_ffmpeg_with_progress(
+        run_clip_ffmpeg(
             window,
             ffmpeg,
             head_args(kf - start, &head, true),
             kf - start,
             "Smart cut head",
-            Some(&CLIP_CHILD_PID),
         )?;
 
         let body = temp_dir.join("body.ts");
@@ -2002,7 +2457,7 @@ fn run_smart_cut_clip(
             None,
             None,
         );
-        run_ffmpeg_with_progress(
+        run_clip_ffmpeg(
             window,
             ffmpeg,
             vec![
@@ -2027,18 +2482,26 @@ fn run_smart_cut_clip(
             ],
             end - kf,
             "Smart cut body",
-            Some(&CLIP_CHILD_PID),
         )?;
 
         // A source whose keyframe index lies (ffmpeg says "File is broken,
         // keyframes not correctly marked") seeks to the wrong place on a stream
         // copy, and the body would silently hold footage from elsewhere in the
         // episode. Counting what the copy actually produced catches it.
+        //
+        // The allowance is a fixed handful of frames, not a share of the clip:
+        // a stream copy can only end on a packet boundary and an open-GOP source
+        // hands over a couple of leading pictures with the keyframe, but nothing
+        // legitimate scales with length. A tenth of a 20-second body would have
+        // waved through two full seconds of wrong footage. Erring towards an
+        // unnecessary re-encode is the deliberate trade — it is slower, never
+        // wrong. A count that cannot be read at all is treated the same way,
+        // rather than assumed correct.
         let wanted_frames = ((end - kf) * fps).round().max(1.0) as usize;
-        let copied_frames =
-            probe_video_packet_count(ffprobe, &body).unwrap_or(wanted_frames);
-        let slack = (wanted_frames / 10).max(3);
-        if copied_frames.abs_diff(wanted_frames) <= slack {
+        let copied_frames = probe_video_packet_count(ffprobe, &body);
+        let body_matches = copied_frames
+            .is_some_and(|copied| copied.abs_diff(wanted_frames) <= SMART_CUT_BODY_FRAME_SLACK);
+        if body_matches {
             concat_copy_segments(
                 window,
                 ffmpeg,
@@ -2061,6 +2524,7 @@ fn run_smart_cut_clip(
                     "keyframe": kf,
                     "wantedFrames": wanted_frames,
                     "copiedFrames": copied_frames,
+                    "reason": if copied_frames.is_some() { "frame count" } else { "unreadable" },
                 }),
             );
         }
@@ -2079,13 +2543,12 @@ fn run_smart_cut_clip(
             None,
             None,
         );
-        run_ffmpeg_with_progress(
+        run_clip_ffmpeg(
             window,
             ffmpeg,
             head_args(duration, &video, false),
             duration,
             "Smart cut (full re-encode)",
-            Some(&CLIP_CHILD_PID),
         )?;
     }
 
@@ -2111,7 +2574,7 @@ fn run_smart_cut_clip(
         None,
         None,
     );
-    run_ffmpeg_with_progress(
+    run_clip_ffmpeg(
         window,
         ffmpeg,
         vec![
@@ -2138,7 +2601,6 @@ fn run_smart_cut_clip(
         ],
         duration,
         "Smart cut audio",
-        Some(&CLIP_CHILD_PID),
     )?;
 
     emit_conversion_progress(
@@ -2149,7 +2611,8 @@ fn run_smart_cut_clip(
         None,
         None,
     );
-    run_ffmpeg_with_progress(
+    let staged = StagedOutput::new(output);
+    run_clip_ffmpeg(
         window,
         ffmpeg,
         vec![
@@ -2170,12 +2633,12 @@ fn run_smart_cut_clip(
             "pipe:1".to_string(),
             "-stats_period".to_string(),
             "0.5".to_string(),
-            output.to_string_lossy().to_string(),
+            staged.path().to_string_lossy().to_string(),
         ],
         duration,
         "Smart cut mux",
-        Some(&CLIP_CHILD_PID),
-    )
+    )?;
+    staged.commit()
 }
 
 // Smart-cut merge: identical in shape to the lossless merge below, except each
@@ -2194,6 +2657,30 @@ fn run_smart_cut_merge(
     output: &Path,
     color: &ColorMetadata,
 ) -> Result<String, String> {
+    // Compatibility first, before anything is written. The join copies every
+    // segment under the first one's stream description, so mismatched sources
+    // produce a file that plays for a few seconds and then breaks — with no
+    // error anywhere. Refusing here costs the user one clear message instead.
+    let mut profiles: Vec<SourceMergeProfile> = Vec::with_capacity(input_paths.len());
+    for path in input_paths {
+        profiles.push(SourceMergeProfile {
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string()),
+            video: probe_source_video_params(ffprobe, path)?,
+            audio: probe_source_audio_params(ffprobe, path),
+        });
+    }
+    if let Some(message) = smart_cut_merge_mismatch(&profiles) {
+        log_warn(
+            "clip.smart_cut.merge_refused",
+            "Smart cut merge refused: the selected clips cannot be joined without re-encoding",
+            json!({ "sources": profiles.iter().map(|p| p.name.clone()).collect::<Vec<_>>() }),
+        );
+        return Err(message);
+    }
+
     let temp_dir = create_segment_temp_dir(out_dir, "smartcutmerge")?;
     let _guard = TempDirGuard(temp_dir.clone());
 
@@ -2223,18 +2710,20 @@ fn run_smart_cut_merge(
         segment_paths.push(segment);
     }
 
+    let staged = StagedOutput::new(output);
     concat_copy_segments(
         window,
         ffmpeg,
         &temp_dir,
         &segment_paths,
         total_duration,
-        output,
+        staged.path(),
         None,
         92.0_f32,
         format!("Joining {} smart-cut segments...", clips.len()),
         "Joining smart-cut segments",
     )?;
+    staged.commit()?;
 
     let done = ConversionDone {
         r#type: "done".to_string(),
@@ -2305,13 +2794,12 @@ fn run_lossless_cut_merge(
             None,
             None,
         );
-        run_ffmpeg_with_progress(
+        run_clip_ffmpeg(
             window,
             ffmpeg,
             args,
             duration,
             "Cutting lossless segment",
-            Some(&CLIP_CHILD_PID),
         )?;
 
         segment_paths.push(segment);
@@ -3903,6 +4391,9 @@ fn run_streaming_clip_cli(window: tauri::Window, args: Vec<String>) -> Result<St
 }
 
 pub(crate) async fn stop_clip_processes_for_dependency_setup(window: &tauri::Window) {
+    // Same as a user cancel: an export mid-way between two ffmpeg runs must not
+    // start another one against a runtime that is being reinstalled underneath it.
+    CLIP_CANCEL_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
     kill_child_pid(&CLIP_CHILD_PID);
     // A dependency-setup run reinstalls the Python/ffmpeg runtime an in-flight
     // proxy build is using — stop that build too, not just the clip child.
@@ -3957,6 +4448,9 @@ pub(crate) async fn stop_clip_processes_for_dependency_setup(window: &tauri::Win
 #[tauri::command]
 pub(crate) async fn cancel_clip(window: tauri::Window) {
     log_warn("clip.cancel", "Cancelling active clip process", Value::Null);
+    // Raised BEFORE the kill so an export that is between two of its ffmpeg
+    // runs right now still sees it and stops instead of starting the next one.
+    CLIP_CANCEL_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
     kill_child_pid(&CLIP_CHILD_PID);
     crate::interpolate_cmds::cancel_interpolate_now();
     // A featherweight source-proxy build can be running independently of the

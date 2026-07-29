@@ -68,6 +68,14 @@ pub(crate) struct ConversionDone {
 
 pub(crate) static AUDIO_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static CLIP_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+// Cancel is a request for the WHOLE export, not just for the ffmpeg process
+// that happens to be running. An export like smart cut runs five processes back
+// to back per clip, and killing a pid only works while one is actually alive —
+// a click that lands in the gap between two of them would otherwise be
+// forgotten and the export would carry on. Set on cancel, cleared when a new
+// export starts, checked either side of every clip ffmpeg run.
+pub(crate) static CLIP_CANCEL_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 // Featherweight previews: the in-flight source-proxy ffmpeg build. Mirrors
 // CLIP_CHILD_PID so a new source selection / app teardown cancels it.
 pub(crate) static PROXY_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
