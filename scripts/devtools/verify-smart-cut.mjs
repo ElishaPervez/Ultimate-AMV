@@ -10,6 +10,8 @@
  *   --ffmpeg <path>       override the ffmpeg binary
  *   --ffprobe <path>      override the ffprobe binary
  *   --out <path>          where to write the cut (default: inside the work dir)
+ *   --container mp4|mkv   force the output container instead of deriving it
+ *                         from the source (skips the container check)
  *
  * It repeats the backend's procedure (probe -> head re-encode -> body copy ->
  * concat -> audio mux, see run_smart_cut_clip in src-tauri/src/clips.rs) and
@@ -24,6 +26,9 @@
  *                       bytes as the source's, checksum for checksum
  *   5. Audio alignment  the copied audio starts at the cut, not at the keyframe
  *                       an input seek would have snapped back to
+ *   6. Container        an mp4 source comes back as an mp4 (mkv otherwise), and
+ *                       HEVC in mp4 carries the hvc1 brand QuickTime/Final Cut
+ *                       need — hev1 files are refused despite being valid
  *
  * Exit code 0 only when every check passes.
  */
@@ -319,7 +324,14 @@ if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
 }
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-smart-cut-"));
-const output = flag("--out") ? path.resolve(flag("--out")) : path.join(workDir, "smartcut.mkv");
+// Mirrors smart_cut_extension() in src-tauri/src/clips.rs: an mp4-family source
+// keeps its container (its audio is already legal there), anything else stays
+// on MKV. --container forces one for testing the other path deliberately.
+const MP4_FAMILY = new Set([".mp4", ".m4v", ".mov"]);
+const container =
+  flag("--container") ?? (MP4_FAMILY.has(path.extname(source).toLowerCase()) ? "mp4" : "mkv");
+const output = flag("--out") ? path.resolve(flag("--out")) : path.join(workDir, `smartcut.${container}`);
+const targetIsMp4 = MP4_FAMILY.has(path.extname(output).toLowerCase());
 const duration = end - start;
 
 console.log(`source   ${source}`);
@@ -422,11 +434,14 @@ const headVideoArgs = (length, target, asTs) => [
   "-t", length.toFixed(3),
   "-map", "0:v:0",
   ...headArgs,
-  ...(asTs ? ["-f", "mpegts"] : []),
+  ...(asTs ? ["-f", "mpegts"] : tagArgs),
   target,
 ];
 
-const video = path.join(workDir, "video.mkv");
+const video = path.join(workDir, targetIsMp4 ? "video.mp4" : "video.mkv");
+// HEVC in MP4 defaults to the `hev1` brand, which QuickTime and Final Cut
+// refuse to open. `hvc1` is metadata only — no re-encode, same bitstream.
+const tagArgs = targetIsMp4 && stream.codec_name === "hevc" ? ["-tag:v", "hvc1"] : [];
 
 if (onKeyframe) {
   console.log("path     pure copy (the cut already lands on a keyframe)\n");
@@ -438,6 +453,7 @@ if (onKeyframe) {
     "-map", "0:v:0", "-map", "0:a:0?",
     "-c", "copy",
     "-avoid_negative_ts", "make_zero",
+    ...tagArgs,
     output,
   ], "Copying the clip");
 } else {
@@ -491,6 +507,7 @@ if (onKeyframe) {
         // Strips the access-unit delimiters the transport-stream intermediates
         // added, so the body's packets stay byte-identical to the source's.
         "-bsf:v", `${stream.codec_name}_metadata=aud=remove`,
+        ...tagArgs,
         video,
       ], "Joining head and body");
     }
@@ -525,6 +542,7 @@ if (onKeyframe) {
       "-i", audio,
       "-map", "0:v:0", "-map", "1:a:0",
       "-c", "copy",
+      ...tagArgs,
       output,
     ], "Muxing video and audio");
   }
@@ -712,6 +730,38 @@ if (hasAudio) {
   );
 } else {
   record("audio: source has no audio track", true, "nothing to align");
+}
+
+// ─── check 6: the container is the one the app would have written ────────────
+
+// An mp4 source must come back as an mp4, or the export still needs converting
+// before it will open in an editor. And HEVC inside an mp4 must carry the hvc1
+// brand: with the default hev1, QuickTime and Final Cut refuse the file even
+// though the video inside it is perfect.
+{
+  const expected = MP4_FAMILY.has(path.extname(source).toLowerCase()) ? "mp4" : "mkv";
+  const actual = path.extname(output).toLowerCase().replace(".", "");
+  const containerOk = flag("--out") || flag("--container") ? true : actual === expected;
+  record(
+    "container: matches what the app writes for this source",
+    containerOk,
+    `source is ${path.extname(source) || "(none)"}, clip is .${actual}${containerOk ? "" : ` (expected .${expected})`}`,
+  );
+
+  if (targetIsMp4) {
+    const tagProbe = run(ffprobe, [
+      "-v", "error", "-select_streams", "v:0",
+      "-show_entries", "stream=codec_name,codec_tag_string",
+      "-of", "csv=p=0", output,
+    ]);
+    const [codecName = "", codecTag = ""] = tagProbe.stdout.trim().split(",");
+    const wanted = codecName === "hevc" ? "hvc1" : "avc1";
+    record(
+      "container: mp4 carries a codec brand editors accept",
+      codecTag.trim() === wanted,
+      `${codecName} tagged ${codecTag.trim() || "(none)"}, expected ${wanted}`,
+    );
+  }
 }
 
 // ─── verdict ─────────────────────────────────────────────────────────────────

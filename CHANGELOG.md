@@ -5,6 +5,12 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Smart cut now keeps your source's format instead of always saving as MKV: an MP4 episode gives you MP4 clips, which import straight into Premiere, After Effects and DaVinci with no conversion step. MKV and other sources are unchanged, because they can hold audio an MP4 cannot.
+- HEVC clips saved as MP4 are now labelled so QuickTime and Final Cut will open them.
+
 ## [0.14.0] : 2026-07-17
 
 ### Changed

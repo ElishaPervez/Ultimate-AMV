@@ -145,7 +145,7 @@ Dropdown entry (directly under Lossless cut):
 - label: `Smart cut (frame-accurate, no quality loss)`
 - description: `Copies the original like Lossless cut, but re-encodes only the
   first fraction of a second so the clip starts on the exact frame. H.264/HEVC
-  sources only. Saved as MKV.`
+  sources only. Saved as MKV.` — superseded, see the 2026-08-03 amendment.
 - `disabled: false` in both CPU and GPU mode.
 
 No quality slider, no rate control (both already follow from the function
@@ -202,7 +202,34 @@ audio uses a two-stage seek so its cut doesn't snap to a video keyframe; a
 post-copy frame-count guard falls back to full re-encode for sources whose
 keyframe index is broken.
 
+## Amendment 2026-08-03 — the container follows the source
+
+MKV is no longer unconditional. Smart cut writes **MP4 when every source is
+`.mp4` / `.m4v` / `.mov`**, and keeps MKV for everything else. Decision context
++ measurements: `docs/reports/smart-cut-container-scope-2026-08-03.html`.
+
+Why it is safe where lossless-cut's is not: smart cut already refuses anything
+that is not H.264/HEVC at 8 or 10 bit, and an MP4-family source's audio is by
+definition already legal in MP4 — it is sitting in one. The rule reads the file
+NAME, never its contents, because the output path is chosen before the source is
+opened and the merge strip predicts the same name in the UI.
+
+Do **not** widen this to "probe the audio and decide": ffmpeg 8.1's MP4 muxer
+accepts FLAC, Opus, Vorbis, DTS and PCM on `-c copy` **without any error**
+(measured), so a try-and-fall-back scheme catches nothing and ships files
+players refuse.
+
+HEVC into MP4 additionally needs `-tag:v hvc1` on every write that can become
+the finished clip; the default `hev1` brand is refused by QuickTime/Final Cut.
+
+Touch points: `smart_cut_extension` / `preset_extension_for` / `is_mp4_family` /
+`mp4_codec_tag_args` (clips.rs), the naming sites in `run_clip_export` and
+`run_clip_export_merged` (merged resolves its sources *before* naming),
+`clipPresetExtension` (ClipExtractorPanel.tsx) which must stay in lockstep, and
+check 6 in `scripts/devtools/verify-smart-cut.mjs`.
+
 ## Non-goals (explicitly out of scope)
 
-- NVENC head encoding, AV1 source support, audio re-encode toggle, MP4 output,
-  VFR support — all future work, listed in the report.
+- NVENC head encoding, AV1 source support, audio re-encode toggle, VFR support —
+  all future work, listed in the report.
+- MP4 output for MKV sources: deliberately refused, see the amendment above.
