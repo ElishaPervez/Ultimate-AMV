@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Cut export — adversarial review</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: rgba(17, 22, 34, 0.92);
+      --panel-2: rgba(24, 30, 45, 0.82);
+      --line: rgba(255, 255, 255, 0.10);
+      --text: #f3f5fb;
+      --muted: #a5aec2;
+      --red: #ff667a;
+      --red-soft: rgba(255, 102, 122, 0.13);
+      --amber: #ffbf66;
+      --amber-soft: rgba(255, 191, 102, 0.12);
+      --green: #60d6a7;
+      --green-soft: rgba(96, 214, 167, 0.12);
+      --blue: #7da9ff;
+      --blue-soft: rgba(125, 169, 255, 0.12);
+      --violet: #b792ff;
+      --shadow: 0 22px 70px rgba(0, 0, 0, 0.34);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font: 15px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 8% -8%, rgba(125, 169, 255, 0.18), transparent 31rem),
+        radial-gradient(circle at 100% 8%, rgba(183, 146, 255, 0.13), transparent 28rem),
+        linear-gradient(180deg, #0b0f18 0%, var(--bg) 38rem);
+    }
+
+    button, summary { font: inherit; }
+    a { color: inherit; }
+    .shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 42px 0 76px; }
+    .eyebrow {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 28px; height: 2px; background: currentColor; border-radius: 2px; }
+    h1 { max-width: 850px; margin: 18px 0 14px; font-size: clamp(38px, 6vw, 72px); line-height: .98; letter-spacing: -.055em; }
+    .lede { max-width: 810px; margin: 0; color: #c7cede; font-size: clamp(17px, 2vw, 22px); line-height: 1.45; }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 24px 0 0; }
+    .chip, .filter {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 11px;
+      color: var(--muted);
+      background: rgba(255,255,255,.035);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .verdict {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+      margin: 34px 0 20px;
+      padding: 24px;
+      border: 1px solid rgba(255,102,122,.28);
+      border-radius: 22px;
+      background: linear-gradient(135deg, var(--red-soft), rgba(17,22,34,.94) 65%);
+      box-shadow: var(--shadow);
+    }
+    .verdict h2 { margin: 0 0 4px; font-size: 25px; letter-spacing: -.02em; }
+    .verdict p { margin: 0; color: #d8dce7; }
+    .verdict-mark {
+      width: 82px;
+      height: 82px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,102,122,.4);
+      border-radius: 22px;
+      color: var(--red);
+      background: rgba(255,102,122,.08);
+      font-size: 38px;
+      font-weight: 900;
+    }
+
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0 36px; }
+    .stat { padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); }
+    .stat strong { display: block; font-size: 28px; line-height: 1; letter-spacing: -.04em; }
+    .stat span { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .stat.blockers strong { color: var(--red); }
+    .stat.fixes strong { color: var(--amber); }
+    .stat.passed strong { color: var(--green); }
+
+    .section { margin-top: 48px; }
+    .section-head { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 17px; }
+    .section h2 { margin: 0; font-size: 29px; letter-spacing: -.035em; }
+    .section-head p { max-width: 580px; margin: 0; color: var(--muted); }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr 44px 1fr 44px 1fr;
+      align-items: stretch;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .node {
+      min-height: 124px;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel-2);
+    }
+    .node.bad { border-color: rgba(255,102,122,.34); background: var(--red-soft); }
+    .node .kicker { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    .node strong { display: block; margin-top: 6px; font-size: 17px; line-height: 1.25; }
+    .node p { margin: 8px 0 0; color: #bac1d1; font-size: 13px; line-height: 1.45; }
+    .arrow { display: grid; place-items: center; color: #687188; font-size: 24px; }
+
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .filter { cursor: pointer; transition: .15s ease; }
+    .filter:hover, .filter.active { color: var(--text); border-color: rgba(125,169,255,.48); background: var(--blue-soft); }
+    .findings { display: grid; gap: 12px; }
+    details.finding {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--panel);
+      box-shadow: 0 12px 38px rgba(0,0,0,.18);
+    }
+    details.finding[open] { border-color: rgba(255,255,255,.17); }
+    details.finding.hidden { display: none; }
+    summary {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 15px;
+      align-items: center;
+      padding: 18px 20px;
+      cursor: pointer;
+      list-style: none;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; color: var(--muted); font-size: 22px; font-weight: 400; }
+    details[open] summary::after { content: "–"; }
+    .rank {
+      width: 36px; height: 36px; display: grid; place-items: center;
+      border: 1px solid var(--line); border-radius: 11px;
+      color: var(--muted); background: rgba(255,255,255,.035); font-weight: 800;
+    }
+    .finding-title strong { display: block; font-size: 16px; line-height: 1.35; }
+    .finding-title span { color: var(--muted); font-size: 12px; }
+    .severity { padding: 6px 9px; border-radius: 999px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .severity.blocker { color: var(--red); background: var(--red-soft); }
+    .severity.should-fix { color: var(--amber); background: var(--amber-soft); }
+    .finding-body { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; padding: 0 20px 20px 71px; }
+    .finding-body h3 { margin: 0 0 5px; color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    .finding-body p { margin: 0 0 15px; color: #d5dae6; }
+    .evidence { padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.026); }
+    .evidence p:last-child { margin-bottom: 0; }
+    .pointer { color: var(--blue); font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+
+    .lab-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .lab-card { padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); }
+    .lab-card .result { display: inline-flex; margin-bottom: 11px; padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .result.fail { color: var(--red); background: var(--red-soft); }
+    .result.pass { color: var(--green); background: var(--green-soft); }
+    .lab-card strong { display: block; font-size: 16px; line-height: 1.3; }
+    .lab-card p { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+
+    .matrix { overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); }
+    .row { display: grid; grid-template-columns: 46px minmax(180px, 1.2fr) 110px minmax(260px, 2fr); gap: 12px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line); }
+    .row:first-child { border-top: 0; }
+    .row.header { color: var(--muted); background: rgba(255,255,255,.025); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .status { font-size: 11px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
+    .status.pass { color: var(--green); }
+    .status.fail { color: var(--red); }
+    .status.partial { color: var(--amber); }
+    .row p { margin: 0; color: #c3cad8; font-size: 13px; }
+
+    .closeout { margin-top: 48px; padding: 24px; border: 1px solid rgba(125,169,255,.26); border-radius: 22px; background: linear-gradient(135deg, var(--blue-soft), var(--panel)); }
+    .closeout h2 { margin: 0 0 8px; font-size: 24px; }
+    .closeout p { margin: 0; color: #d3d9e5; }
+    .closeout ol { margin: 15px 0 0; padding-left: 21px; color: #d3d9e5; }
+    .closeout li + li { margin-top: 6px; }
+    .foot { margin-top: 24px; color: #7f899f; font-size: 12px; text-align: center; }
+
+    @media (max-width: 860px) {
+      .stats, .lab-grid { grid-template-columns: 1fr 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .arrow { min-height: 36px; transform: rotate(90deg); }
+      .finding-body { grid-template-columns: 1fr; padding-left: 20px; }
+      .row { grid-template-columns: 36px 1fr 86px; }
+      .row p { grid-column: 2 / -1; }
+      .row.header { display: none; }
+    }
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 24px, 1180px); padding-top: 24px; }
+      .verdict { grid-template-columns: 1fr; }
+      .verdict-mark { width: 58px; height: 58px; }
+      .stats, .lab-grid { grid-template-columns: 1fr; }
+      summary { grid-template-columns: auto 1fr; }
+      summary::after { display: none; }
+      .severity { grid-column: 2; width: fit-content; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="eyebrow">Adversarial implementation review</div>
+    <h1>Smart Cut is not safe to ship yet.</h1>
+    <p class="lede">Three inputs produce successful-looking files with missing, wrong, or undecodable media. The ordinary single-source path works, and all existing automated checks pass, but the release blockers sit in cases those checks never exercise.</p>
+    <div class="meta">
+      <span class="chip">Reviewed commit 5d8666d</span>
+      <span class="chip">29 July 2026</span>
+      <span class="chip">Read-only review</span>
+      <span class="chip">Generated media tests</span>
+    </div>
+
+    <section class="verdict" aria-label="Review verdict">
+      <div>
+        <h2>Verdict: do not merge as-is</h2>
+        <p>Fix the timestamp timeline and both merge failures before release. The remaining four findings should be corrected in the same pass because they affect cancellation, failed outputs, fallback safety, and the tool used to approve media quality.</p>
+      </div>
+      <div class="verdict-mark" aria-hidden="true">×</div>
+    </section>
+
+    <section class="stats" aria-label="Review totals">
+      <div class="stat blockers"><strong>3</strong><span>Release blockers</span></div>
+      <div class="stat fixes"><strong>4</strong><span>Should-fix defects</span></div>
+      <div class="stat passed"><strong>913</strong><span>Frontend tests passed</span></div>
+      <div class="stat passed"><strong>125</strong><span>Rust tests passed</span></div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Failure shape</div>
+          <h2>The unsafe assumption</h2>
+        </div>
+        <p>The final join trusts every temporary clip to share one compatible stream layout. A successful join therefore does not mean the resulting sections can all play.</p>
+      </div>
+      <div class="flow" role="img" aria-label="Multiple clips are individually cut, then joined without compatibility validation, resulting in a file that can lose or corrupt later streams.">
+        <div class="node">
+          <div class="kicker">Inputs</div>
+          <strong>Clips can come from different files</strong>
+          <p>The selection may mix codecs, color layouts, and clips with or without audio.</p>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node">
+          <div class="kicker">Per-clip work</div>
+          <strong>Each clip succeeds on its own</strong>
+          <p>Every temporary file is playable, so the progress UI keeps moving normally.</p>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node bad">
+          <div class="kicker">Final join</div>
+          <strong>The first clip defines the whole file</strong>
+          <p>Later audio can disappear, and later video can be interpreted as the wrong codec.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="findings">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Verified findings</div>
+          <h2>What breaks and why</h2>
+        </div>
+        <p>Each item starts with the visible consequence, then traces the cause and the smallest safe correction.</p>
+      </div>
+      <div class="toolbar" aria-label="Finding filters">
+        <button class="filter active" type="button" data-filter="all">All 7</button>
+        <button class="filter" type="button" data-filter="blocker">3 blockers</button>
+        <button class="filter" type="button" data-filter="should-fix">4 should-fix</button>
+      </div>
+
+      <div class="findings">
+        <details class="finding" data-severity="blocker" open>
+          <summary>
+            <span class="rank">01</span>
+            <span class="finding-title">
+              <strong>A file whose timestamps start above zero can begin on the wrong frame and run too long.</strong>
+              <span>Timestamp normalization · single export</span>
+            </span>
+            <span class="severity blocker">Blocker</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>A 24 fps H.264 source began at timestamp 1.000 and placed keyframes every two seconds. A requested 3.000–7.000 second cut was treated as already sitting on a keyframe. The exported file began on the wrong image and contained 122 video frames instead of 96: about 5.08 seconds instead of 4.00.</p>
+              <h3>Cause</h3>
+              <p>The keyframe scan returns the source’s original timestamps, but the requested clip range is measured from the beginning of the visible content. The implementation compares those two different timelines directly. In this case, source timestamp 3.000 was mistaken for content time 3.000, so the direct-copy shortcut ran when it should not have.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Read the video stream’s start timestamp, convert every probed keyframe to the same zero-based timeline used by clip ranges, and use that normalized value for the comparison and cut. Add a media test with a +1 second start timestamp that checks the first frame and exact frame count.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code references</h3>
+              <p class="pointer">src-tauri/src/clips.rs:644<br>src-tauri/src/clips.rs:686<br>src-tauri/src/clips.rs:1882</p>
+              <h3>Observed result</h3>
+              <p>First-frame comparison failed. Requested: 96 frames. Produced: 122 frames. The direct-copy path still reported a normal completion.</p>
+            </aside>
+          </div>
+        </details>
+
+        <details class="finding" data-severity="blocker" open>
+          <summary>
+            <span class="rank">02</span>
+            <span class="finding-title">
+              <strong>Merging H.264 and HEVC clips can produce a file whose later section does not decode.</strong>
+              <span>Stream compatibility · merge export</span>
+            </span>
+            <span class="severity blocker">Blocker</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>A one-second H.264 clip followed by a one-second HEVC clip joined without an error. The result identified its only video stream as H.264. When playback reached the HEVC section, the decoder reported invalid H.264 data and returned no usable frames for that section.</p>
+              <h3>Cause</h3>
+              <p>The merge path cuts every selection independently, then joins all temporary files without checking that they describe the same kind of video. The first file’s description becomes the description for the entire result, even when later packets use another codec.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Inspect all unique sources before creating temporary or final files. Refuse the merge with a clear message unless their video descriptions are compatible. At minimum compare codec, pixel layout, dimensions, frame rate, and the stream parameters required by the final container.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code references</h3>
+              <p class="pointer">src-tauri/src/clips.rs:1455<br>src-tauri/src/clips.rs:2186<br>src-tauri/src/clips.rs:2226</p>
+              <h3>Observed result</h3>
+              <p>The join exited successfully. The result was labeled H.264, while the second half generated repeated decode errors and missing frames.</p>
+            </aside>
+          </div>
+        </details>
+
+        <details class="finding" data-severity="blocker" open>
+          <summary>
+            <span class="rank">03</span>
+            <span class="finding-title">
+              <strong>If the first merged clip is silent, sound from every later clip disappears.</strong>
+              <span>Audio layout · merge export</span>
+            </span>
+            <span class="severity blocker">Blocker</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>A silent one-second H.264 clip was merged before a one-second H.264 clip with AAC audio. The operation completed without an error, but the result contained only a video stream. Reversing the order retained audio, so the visible result depends on selection order.</p>
+              <h3>Cause</h3>
+              <p>The first temporary file defines which streams the joined file contains. The app already checks which sources have audio, but the Smart Cut merge does not use that information to make every temporary segment share the same audio layout.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Build the merged video and audio timelines separately, inserting correctly timed silence for clips without audio, then combine them. If that work is deferred, refuse mixed silent/sound merges instead of silently deleting sound.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code references</h3>
+              <p class="pointer">src-tauri/src/clips.rs:1447<br>src-tauri/src/clips.rs:1478<br>src-tauri/src/clips.rs:2204</p>
+              <h3>Observed result</h3>
+              <p>The join exited successfully. A stream inspection showed video only; the later clip’s audio never reached the result.</p>
+            </aside>
+          </div>
+        </details>
+
+        <details class="finding" data-severity="should-fix">
+          <summary>
+            <span class="rank">04</span>
+            <span class="finding-title">
+              <strong>Cancel can be ignored when the click lands between two processing stages.</strong>
+              <span>Cancellation · sequential work</span>
+            </span>
+            <span class="severity should-fix">Should-fix</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>The user clicks Cancel after the opening frames finish but before the body copy begins. No process exists during that short gap, so the cancel action stops nothing. The next process starts and the export continues even though the UI accepted the click.</p>
+              <h3>Cause</h3>
+              <p>Cancellation only terminates the process that is active at that exact moment. It does not record that the whole export was cancelled, and the next stage does not check for a pending cancel request.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Store a cancellation generation or flag for the entire export. Check it before every new process starts and after every process returns. Reset it only when a new top-level export begins.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code references</h3>
+              <p class="pointer">src-tauri/src/video_cmds.rs:664<br>src-tauri/src/clips.rs:1987<br>src-tauri/src/clips.rs:3958</p>
+            </aside>
+          </div>
+        </details>
+
+        <details class="finding" data-severity="should-fix">
+          <summary>
+            <span class="rank">05</span>
+            <span class="finding-title">
+              <strong>A failed or cancelled export can leave a broken file with the final filename.</strong>
+              <span>Output safety · error handling</span>
+            </span>
+            <span class="severity should-fix">Should-fix</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>When the direct-copy shortcut, final audio/video write, or final merge is interrupted, the export folder can retain an incomplete `.mkv`. A forced cancellation reproduced this as a zero-byte file that looked like the requested result.</p>
+              <h3>Cause</h3>
+              <p>Those final stages write straight to the user-facing filename. Temporary working folders are cleaned, but no guard removes a final file that was opened before the process failed.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Write every final stage to a sibling temporary filename, then rename it only after success. Delete that temporary file on error or cancellation.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code references</h3>
+              <p class="pointer">src-tauri/src/clips.rs:1895<br>src-tauri/src/clips.rs:2152<br>src-tauri/src/clips.rs:2226</p>
+              <h3>Observed result</h3>
+              <p>The interrupted process left a file at the final destination. No later cleanup removed it.</p>
+            </aside>
+          </div>
+        </details>
+
+        <details class="finding" data-severity="should-fix">
+          <summary>
+            <span class="rank">06</span>
+            <span class="finding-title">
+              <strong>The safety fallback can accept a body that is visibly too short or too long.</strong>
+              <span>Wrong-footage guard · frame count</span>
+            </span>
+            <span class="severity should-fix">Should-fix</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>For a 20-second body at 24 fps, 480 frames are expected. The current threshold accepts 432 or 528 frames—two seconds of missing or extra footage—as close enough. If frame counting itself fails, the code assumes the count was perfect and skips the fallback.</p>
+              <h3>Cause</h3>
+              <p>The allowed difference grows to ten percent of the clip, even though the review contract says an unnecessary fallback is safer than accepting the wrong footage. A failed inspection is also converted into an artificial success.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Use a small fixed allowance measured in frames and treat an unavailable count as a reason to re-encode. For stronger protection, also confirm that the body begins on the intended source picture instead of relying on length alone.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code reference</h3>
+              <p class="pointer">src-tauri/src/clips.rs:2037</p>
+            </aside>
+          </div>
+        </details>
+
+        <details class="finding" data-severity="should-fix">
+          <summary>
+            <span class="rank">07</span>
+            <span class="finding-title">
+              <strong>The verification script can approve wrong content and reject a valid stream copy.</strong>
+              <span>Approval tool · false pass and false failure</span>
+            </span>
+            <span class="severity should-fix">Should-fix</span>
+          </summary>
+          <div class="finding-body">
+            <div>
+              <h3>Failure scenario</h3>
+              <p>Audio or video packets with the same byte length are treated as the same content. Constant-size audio can therefore appear aligned even when it came from the wrong moment. In the opposite direction, a generated H.264 sample used the intended stream-copy pipeline but the script failed it because 19 of 21 inspected packet sizes matched and its threshold demanded 20.</p>
+              <h3>Cause</h3>
+              <p>The script compares packet lengths, not packet contents, and its matching rule assumes only one packet may change during container conversion. It also omits the app’s post-copy fallback, so it does not always test the path the app will use.</p>
+              <h3>Smallest safe fix</h3>
+              <p>Hash normalized packet contents for video, compare decoded audio fingerprints at the requested time, and mirror the fallback before running checks. Keep the allowed container-only differences explicit rather than inferring identity from byte length.</p>
+            </div>
+            <aside class="evidence">
+              <h3>Code references</h3>
+              <p class="pointer">scripts/devtools/verify-smart-cut.mjs:191<br>scripts/devtools/verify-smart-cut.mjs:328<br>scripts/devtools/verify-smart-cut.mjs:520</p>
+              <h3>Observed result</h3>
+              <p>A clean generated H.264 sample scored 4/5 because the stream-copy check rejected 19 matching packets out of 21.</p>
+            </aside>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Evidence</div>
+          <h2>What the checks actually showed</h2>
+        </div>
+        <p>The automated suites confirm registration and helper behavior. Generated media exposed failures at the joins and timestamp boundary.</p>
+      </div>
+      <div class="lab-grid">
+        <article class="lab-card">
+          <span class="result pass">Pass</span>
+          <strong>Existing project checks</strong>
+          <p>TypeScript compiled. All 125 Rust tests passed. All 913 active frontend tests passed; two were skipped.</p>
+        </article>
+        <article class="lab-card">
+          <span class="result fail">Reproduced</span>
+          <strong>Non-zero source timestamps</strong>
+          <p>A four-second request produced about 5.08 seconds and opened on the wrong frame.</p>
+        </article>
+        <article class="lab-card">
+          <span class="result fail">Reproduced</span>
+          <strong>Mixed video codecs</strong>
+          <p>The join reported success, but the later HEVC section was read as broken H.264 data.</p>
+        </article>
+        <article class="lab-card">
+          <span class="result fail">Reproduced</span>
+          <strong>Silent clip first</strong>
+          <p>The final file had no audio stream even though a later input contained sound.</p>
+        </article>
+        <article class="lab-card">
+          <span class="result pass">Pass</span>
+          <strong>Ordinary zero-start sample</strong>
+          <p>The first frame and audio alignment were correct across an H.264 head/body seam.</p>
+        </article>
+        <article class="lab-card">
+          <span class="result fail">Reproduced</span>
+          <strong>Verifier reliability</strong>
+          <p>The intended copy path failed its size-based proof despite 19 of 21 packets matching.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Invariant scorecard</div>
+          <h2>Attack results</h2>
+        </div>
+        <p>“Pass” means the implementation survived the specific review target. “Partial” means the ordinary path held but an edge case defeated it.</p>
+      </div>
+      <div class="matrix">
+        <div class="row header"><span>#</span><span>Review target</span><span>Result</span><span>Consequence</span></div>
+        <div class="row"><strong>1</strong><span>Lossless-cut behavior stayed identical</span><span class="status pass">Pass</span><p>The extracted join helper preserves the previous flags, ordering-sensitive values, and progress events.</p></div>
+        <div class="row"><strong>2</strong><span>Opening-frame accuracy</span><span class="status partial">Partial</span><p>The ordinary sample starts correctly; a non-zero source timestamp defeats the direct-copy decision.</p></div>
+        <div class="row"><strong>3</strong><span>Copied body remains source video</span><span class="status partial">Partial</span><p>The video-only transport path and codec-specific cleanup are scoped correctly, but the verifier does not prove content identity.</p></div>
+        <div class="row"><strong>4</strong><span>Audio and video stay aligned</span><span class="status partial">Partial</span><p>A normal cut below the 15-second backoff aligned; silent-first merges delete later audio.</p></div>
+        <div class="row"><strong>5</strong><span>Joined timestamps begin cleanly</span><span class="status partial">Partial</span><p>The zero-start sample begins near zero; sources with an offset timeline can take the wrong shortcut.</p></div>
+        <div class="row"><strong>6</strong><span>Transport intermediates carry video only</span><span class="status pass">Pass</span><p>No Smart Cut path places audio in the transport segments, and only accepted H.264/HEVC video reaches them.</p></div>
+        <div class="row"><strong>7</strong><span>Refusals and failures leave no debris</span><span class="status partial">Partial</span><p>Unsupported formats refuse before temporary work, but interrupted final writes can leave a broken destination file.</p></div>
+        <div class="row"><strong>8</strong><span>Cancel stops the whole export</span><span class="status fail">Fail</span><p>A cancel request between child processes is forgotten before the next stage starts.</p></div>
+        <div class="row"><strong>9</strong><span>Wrong-body fallback cannot miss</span><span class="status fail">Fail</span><p>Ten percent drift is accepted, and a failed count is treated as a perfect count.</p></div>
+        <div class="row"><strong>10</strong><span>Frame-rate guard and rational math</span><span class="status pass">Pass</span><p>Missing and zero rates refuse, while 24000/1001 versus 24 stays within the intended tolerance.</p></div>
+        <div class="row"><strong>11</strong><span>Keyframe scan and parsing</span><span class="status partial">Partial</span><p>Flags, ordering, malformed rows, and decimal formatting hold; raw timestamps are not normalized to the clip timeline.</p></div>
+        <div class="row"><strong>12</strong><span>Merge mode handles valid selections safely</span><span class="status fail">Fail</span><p>Mixed codec inputs can corrupt later video, and a silent first clip can remove later sound.</p></div>
+        <div class="row"><strong>13</strong><span>Frontend parity</span><span class="status pass">Pass</span><p>The preset is enabled in CPU and GPU modes, uses MKV, hides quality controls, and sits below Lossless cut.</p></div>
+      </div>
+    </section>
+
+    <section class="closeout">
+      <h2>Merge gate</h2>
+      <p>Re-run the review after these three observable outcomes are impossible:</p>
+      <ol>
+        <li>A non-zero-timestamp source exports the same first frame and frame count as its requested zero-based range.</li>
+        <li>A merge either rejects incompatible video before writing or produces a fully decodable result.</li>
+        <li>Mixed silent/sound clips retain a correct audio timeline regardless of selection order.</li>
+      </ol>
+    </section>
+
+    <p class="foot">Review scope: commit 5d8666d plus the approved implementation and as-built review briefs. No application source was modified.</p>
+  </main>
+
+  <script>
+    const filters = [...document.querySelectorAll("[data-filter]")];
+    const findings = [...document.querySelectorAll(".finding")];
+    filters.forEach((button) => {
+      button.addEventListener("click", () => {
+        const target = button.dataset.filter;
+        filters.forEach((item) => item.classList.toggle("active", item === button));
+        findings.forEach((finding) => {
+          finding.classList.toggle("hidden", target !== "all" && finding.dataset.severity !== target);
+        });
+      });
+    });
+  </script>
+</body>
+</html>
