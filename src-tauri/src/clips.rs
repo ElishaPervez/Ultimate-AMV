@@ -40,8 +40,59 @@ fn preset_extension(preset: &str) -> &'static str {
         // Stream-copy presets: container must tolerate arbitrary source codecs
         // (10-bit HEVC, AV1, exotic profiles) without re-muxing limits. MKV is
         // the robust choice — MP4/MOV reject several codecs on -c copy.
+        // Smart cut narrows this per-source, see smart_cut_extension().
         "lossless-cut" | "smart-cut" => "mkv",
         _ => "mov",
+    }
+}
+
+// Containers whose audio is, by definition, already legal in MP4: it is sitting
+// in an MP4-family file right now, so it can be copied straight back into one.
+fn is_mp4_family(path: &Path) -> bool {
+    matches!(
+        lowercase_extension(path).as_deref(),
+        Some("mp4" | "m4v" | "mov")
+    )
+}
+
+// Smart cut keeps the source's container instead of always writing MKV.
+//
+// It can, where lossless-cut cannot, because smart cut already refuses anything
+// that is not H.264/HEVC at 8 or 10 bit — both native to MP4. The decision is
+// made from the file NAME rather than a probe on purpose: the output path is
+// chosen before the source is opened, and the UI predicts the same name in
+// advance, so both need an answer without touching the file. An MP4/MOV source
+// is safe by construction (its audio already lives in an MP4). Anything else —
+// MKV with FLAC/DTS/PCM, WebM, unknown — keeps today's MKV behavior, because
+// ffmpeg's MP4 muxer accepts those audio codecs WITHOUT error and produces
+// files players then refuse; there is no failure to fall back on.
+fn smart_cut_extension(sources: &[PathBuf]) -> &'static str {
+    if !sources.is_empty() && sources.iter().all(|path| is_mp4_family(path)) {
+        "mp4"
+    } else {
+        "mkv"
+    }
+}
+
+// Extension for an export, given the sources it is built from. Only smart cut
+// varies by source; every other preset is fixed by the preset alone.
+fn preset_extension_for(preset: &str, sources: &[PathBuf]) -> &'static str {
+    if preset == "smart-cut" {
+        smart_cut_extension(sources)
+    } else {
+        preset_extension(preset)
+    }
+}
+
+// HEVC in MP4 defaults to the `hev1` brand, which QuickTime/Final Cut (and some
+// Premiere builds) refuse to open — same bitstream, unacceptable label. `hvc1`
+// is the tag they accept; it is metadata only, applied on a stream copy, and
+// meaningless outside MP4. H.264 needs nothing (it gets `avc1` already).
+fn mp4_codec_tag_args(target: &Path, codec: &str) -> Vec<String> {
+    if is_mp4_family(target) && codec.trim() == "hevc" {
+        vec!["-tag:v".to_string(), "hvc1".to_string()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1039,11 +1090,13 @@ mod rate_control_tests {
 #[cfg(test)]
 mod smart_cut_tests {
     use super::{
-        count_packet_lines, first_keyframe_at_or_after, parse_fps_rational, parse_source_audio_params,
-        parse_source_video_params, pix_fmt_bit_depth, preset_extension, smart_cut_fps,
-        smart_cut_head_encoder_args, smart_cut_merge_mismatch, SourceAudioParams,
-        SourceMergeProfile, SourceVideoParams, VIDEO_PRESETS,
+        count_packet_lines, first_keyframe_at_or_after, mp4_codec_tag_args, parse_fps_rational,
+        parse_source_audio_params, parse_source_video_params, pix_fmt_bit_depth, preset_extension,
+        preset_extension_for, smart_cut_extension, smart_cut_fps, smart_cut_head_encoder_args,
+        smart_cut_merge_mismatch, SourceAudioParams, SourceMergeProfile, SourceVideoParams,
+        VIDEO_PRESETS,
     };
+    use std::path::PathBuf;
 
     fn params(codec: &str, pix_fmt: &str, avg: &str, r: &str) -> SourceVideoParams {
         SourceVideoParams {
@@ -1070,9 +1123,71 @@ mod smart_cut_tests {
     }
 
     #[test]
-    fn smart_cut_is_a_registered_mkv_preset() {
+    fn smart_cut_is_a_registered_preset_defaulting_to_mkv() {
         assert!(VIDEO_PRESETS.contains(&"smart-cut"));
+        // Preset alone, with no source to judge by, stays on the safe container.
         assert_eq!(preset_extension("smart-cut"), "mkv");
+        assert_eq!(preset_extension_for("smart-cut", &[]), "mkv");
+    }
+
+    #[test]
+    fn smart_cut_keeps_an_mp4_family_source_in_mp4() {
+        for name in ["ep01.mp4", "ep01.MP4", "ep01.m4v", "ep01.mov"] {
+            assert_eq!(
+                smart_cut_extension(&[PathBuf::from(name)]),
+                "mp4",
+                "{name} should stay in mp4"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_cut_falls_back_to_mkv_for_every_other_source() {
+        // MKV/WebM can hold audio (FLAC, DTS, PCM) that ffmpeg will happily
+        // write into an mp4 and players then refuse, so they keep today's
+        // container. A source with no extension is unknown, so also mkv.
+        for name in ["ep01.mkv", "ep01.webm", "ep01.avi", "ep01.ts", "noext"] {
+            assert_eq!(
+                smart_cut_extension(&[PathBuf::from(name)]),
+                "mkv",
+                "{name} should stay in mkv"
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_needs_every_source_in_the_mp4_family() {
+        let mp4 = PathBuf::from("ep01.mp4");
+        let mov = PathBuf::from("ep02.mov");
+        let mkv = PathBuf::from("ep03.mkv");
+        assert_eq!(smart_cut_extension(&[mp4.clone(), mov.clone()]), "mp4");
+        // One mkv in the selection drags the whole merge back to mkv.
+        assert_eq!(smart_cut_extension(&[mp4.clone(), mkv.clone()]), "mkv");
+        assert_eq!(smart_cut_extension(&[mkv, mp4]), "mkv");
+    }
+
+    #[test]
+    fn only_smart_cut_reads_the_source_when_picking_a_container() {
+        let mp4 = [PathBuf::from("ep01.mp4")];
+        assert_eq!(preset_extension_for("smart-cut", &mp4), "mp4");
+        // Lossless cut must keep MKV whatever it is handed: it accepts any
+        // source codec, including ones mp4 cannot hold.
+        assert_eq!(preset_extension_for("lossless-cut", &mp4), "mkv");
+        assert_eq!(preset_extension_for("prores-hq", &mp4), "mov");
+        assert_eq!(preset_extension_for("h264-cpu", &[PathBuf::from("a.mkv")]), "mp4");
+    }
+
+    #[test]
+    fn hevc_gets_the_quicktime_tag_only_in_mp4() {
+        let mp4 = PathBuf::from("clip.mp4");
+        let mkv = PathBuf::from("clip.mkv");
+        assert_eq!(
+            mp4_codec_tag_args(&mp4, "hevc"),
+            vec!["-tag:v".to_string(), "hvc1".to_string()]
+        );
+        // H.264 already lands as avc1, and MKV has no such tag at all.
+        assert!(mp4_codec_tag_args(&mp4, "h264").is_empty());
+        assert!(mp4_codec_tag_args(&mkv, "hevc").is_empty());
     }
 
     #[test]
@@ -1437,7 +1552,7 @@ fn run_clip_export(
         let input = canonical_input_path(&clip.source)?;
         let color = probe_color_metadata(&ffprobe, &input);
 
-        let ext = preset_extension(&preset);
+        let ext = preset_extension_for(&preset, std::slice::from_ref(&input));
         let output = loop {
             let candidate = out_dir.join(format!("{file_index}.{ext}"));
             if !candidate.exists() {
@@ -1813,14 +1928,8 @@ fn run_clip_export_merged(
             format!("{}-{} ({} clips)", min, max, parts.len())
         }
     };
-    let ext = preset_extension(&preset);
-    let mut output = out_dir.join(format!("{base_name}.{ext}"));
-    let mut suffix = 1;
-    while output.exists() {
-        output = out_dir.join(format!("{base_name} ({suffix}).{ext}"));
-        suffix += 1;
-    }
-
+    // Sources are resolved BEFORE the output is named: smart cut picks the
+    // container from them, so the name cannot be decided without them.
     let mut input_paths: Vec<PathBuf> = Vec::new();
     let mut input_index_for_clip: Vec<usize> = Vec::with_capacity(clips.len());
     for clip in clips.iter() {
@@ -1833,6 +1942,14 @@ fn run_clip_export_merged(
             }
         };
         input_index_for_clip.push(idx);
+    }
+
+    let ext = preset_extension_for(&preset, &input_paths);
+    let mut output = out_dir.join(format!("{base_name}.{ext}"));
+    let mut suffix = 1;
+    while output.exists() {
+        output = out_dir.join(format!("{base_name} ({suffix}).{ext}"));
+        suffix += 1;
     }
 
     // Probe which inputs actually have audio streams
@@ -2219,6 +2336,8 @@ fn create_segment_temp_dir(out_dir: &Path, prefix: &str) -> Result<PathBuf, Stri
 // quotes per ffmpeg's syntax. `bitstream_filter` is for callers that need the
 // packets tidied on the way through (smart cut strips the access-unit
 // delimiters its transport-stream intermediates add); it never re-encodes.
+// `extra_output_args` carries container metadata (the MP4 `hvc1` tag); it never
+// re-encodes either.
 #[allow(clippy::too_many_arguments)]
 fn concat_copy_segments(
     window: &tauri::Window,
@@ -2228,6 +2347,7 @@ fn concat_copy_segments(
     total_duration: f64,
     output: &Path,
     bitstream_filter: Option<&str>,
+    extra_output_args: &[String],
     percent: f32,
     message: String,
     label: &str,
@@ -2258,6 +2378,7 @@ fn concat_copy_segments(
     if let Some(filter) = bitstream_filter {
         concat_args.extend(["-bsf:v".to_string(), filter.to_string()]);
     }
+    concat_args.extend(extra_output_args.iter().cloned());
     concat_args.extend([
         "-progress".to_string(),
         "pipe:1".to_string(),
@@ -2321,6 +2442,11 @@ fn run_smart_cut_clip(
     let params = probe_source_video_params(ffprobe, input)?;
     let fps = smart_cut_fps(&params)?;
     let head_encoder = smart_cut_head_encoder_args(&params.codec, &params.pix_fmt)?;
+    // Container of the file we were asked to write. Every intermediate that can
+    // become the finished clip follows it, so the silent-source path can rename
+    // rather than remux, and so HEVC gets the MP4 tag QuickTime needs.
+    let target_is_mp4 = is_mp4_family(output);
+    let tag_args = mp4_codec_tag_args(output, &params.codec);
 
     // Half a frame: closer than this and the cut IS the keyframe, so there is
     // nothing to re-encode.
@@ -2371,12 +2497,17 @@ fn run_smart_cut_clip(
                     "copy".to_string(),
                     "-avoid_negative_ts".to_string(),
                     "make_zero".to_string(),
+                ]
+                .into_iter()
+                .chain(tag_args.iter().cloned())
+                .chain([
                     "-progress".to_string(),
                     "pipe:1".to_string(),
                     "-stats_period".to_string(),
                     "0.5".to_string(),
                     staged.path().to_string_lossy().to_string(),
-                ],
+                ])
+                .collect(),
                 length,
                 "Smart cut (stream copy)",
             )?;
@@ -2387,7 +2518,7 @@ fn run_smart_cut_clip(
     let temp_parent = output.parent().unwrap_or_else(|| Path::new("."));
     let temp_dir = create_segment_temp_dir(temp_parent, "smartcut")?;
     let _guard = TempDirGuard(temp_dir.clone());
-    let video = temp_dir.join("video.mkv");
+    let video = temp_dir.join(if target_is_mp4 { "video.mp4" } else { "video.mkv" });
 
     // Head re-encode. -ss before -i is frame-accurate here BECAUSE the video is
     // re-encoded: ffmpeg decodes from the preceding keyframe and throws away
@@ -2414,6 +2545,10 @@ fn run_smart_cut_clip(
         args.extend(color_tag_args(color));
         if as_ts {
             args.extend(["-f".to_string(), "mpegts".to_string()]);
+        } else {
+            // Writing the finished video directly (nothing to splice): this file
+            // becomes the clip, so it needs the container tag now.
+            args.extend(tag_args.iter().cloned());
         }
         args.push(target.to_string_lossy().to_string());
         args
@@ -2510,6 +2645,7 @@ fn run_smart_cut_clip(
                 duration,
                 &video,
                 Some(&format!("{}_metadata=aud=remove", params.codec)),
+                &tag_args,
                 percent_from + percent_span * 0.6,
                 format!("{label}: joining..."),
                 "Joining smart cut",
@@ -2629,12 +2765,17 @@ fn run_smart_cut_clip(
             "1:a:0".to_string(),
             "-c".to_string(),
             "copy".to_string(),
+        ]
+        .into_iter()
+        .chain(tag_args.iter().cloned())
+        .chain([
             "-progress".to_string(),
             "pipe:1".to_string(),
             "-stats_period".to_string(),
             "0.5".to_string(),
             staged.path().to_string_lossy().to_string(),
-        ],
+        ])
+        .collect(),
         duration,
         "Smart cut mux",
     )?;
@@ -2687,13 +2828,16 @@ fn run_smart_cut_merge(
     let mut total_duration = 0.0_f64;
     let mut segment_paths: Vec<PathBuf> = Vec::with_capacity(clips.len());
     let span = 90.0 / clips.len() as f32;
+    // Segments carry the finished file's container, so each one is written
+    // exactly as a single-clip export would be and the join is same-into-same.
+    let segment_ext = if is_mp4_family(output) { "mp4" } else { "mkv" };
 
     for (i, clip) in clips.iter().enumerate() {
         let input = &input_paths[input_index_for_clip[i]];
         let (start, duration) = padded_clip_range(clip);
         total_duration += duration;
 
-        let segment = temp_dir.join(format!("seg_{i:04}.mkv"));
+        let segment = temp_dir.join(format!("seg_{i:04}.{segment_ext}"));
         run_smart_cut_clip(
             window,
             ffmpeg,
@@ -2710,6 +2854,10 @@ fn run_smart_cut_merge(
         segment_paths.push(segment);
     }
 
+    let merge_tag_args = profiles
+        .first()
+        .map(|profile| mp4_codec_tag_args(output, &profile.video.codec))
+        .unwrap_or_default();
     let staged = StagedOutput::new(output);
     concat_copy_segments(
         window,
@@ -2719,6 +2867,7 @@ fn run_smart_cut_merge(
         total_duration,
         staged.path(),
         None,
+        &merge_tag_args,
         92.0_f32,
         format!("Joining {} smart-cut segments...", clips.len()),
         "Joining smart-cut segments",
@@ -2813,6 +2962,7 @@ fn run_lossless_cut_merge(
         total_duration,
         output,
         None,
+        &[],
         92.0_f32,
         format!("Joining {} lossless segments...", clips.len()),
         "Joining lossless segments",

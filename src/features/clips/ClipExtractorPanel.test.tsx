@@ -47,6 +47,7 @@ import {
   clipBitrateDefault,
   clipQualitySpec,
   clipExportOptions,
+  clipPresetExtension,
   formatSupportsRateControl,
 } from './ClipExtractorPanel'
 
@@ -268,6 +269,33 @@ describe('H.264 10-bit export controls', () => {
     expect(formatSupportsRateControl('prores-hq')).toBe(false)
     expect(formatSupportsRateControl('lossless-cut')).toBe(false)
     expect(formatSupportsRateControl('smart-cut')).toBe(false)
+  })
+
+  // Mirrors preset_extension_for() in src-tauri/src/clips.rs. If these two ever
+  // disagree, the merge strip shows a filename the backend never writes.
+  it('keeps a smart cut of an mp4-family source in mp4', () => {
+    expect(clipPresetExtension('smart-cut', ['C:\\clips\\ep 1.mp4'])).toBe('mp4')
+    expect(clipPresetExtension('smart-cut', ['C:\\clips\\ep 1.MP4'])).toBe('mp4')
+    expect(clipPresetExtension('smart-cut', ['/media/ep1.m4v'])).toBe('mp4')
+    expect(clipPresetExtension('smart-cut', ['C:\\clips\\a.mov', 'C:\\clips\\b.mp4'])).toBe('mp4')
+  })
+
+  it('falls back to mkv for any smart-cut source that is not mp4-family', () => {
+    expect(clipPresetExtension('smart-cut', ['C:\\clips\\ep 1.mkv'])).toBe('mkv')
+    expect(clipPresetExtension('smart-cut', ['C:\\clips\\ep 1.webm'])).toBe('mkv')
+    // One mkv in a merge selection drags the whole output back to mkv.
+    expect(clipPresetExtension('smart-cut', ['C:\\a.mp4', 'C:\\b.mkv'])).toBe('mkv')
+    // A dotted folder name must not be mistaken for the file's extension.
+    expect(clipPresetExtension('smart-cut', ['C:\\my.mp4.folder\\ep1'])).toBe('mkv')
+    // Nothing selected yet: no promise beyond today's default.
+    expect(clipPresetExtension('smart-cut', [])).toBe('mkv')
+  })
+
+  it('leaves every other preset fixed regardless of the source', () => {
+    expect(clipPresetExtension('lossless-cut', ['C:\\clips\\ep 1.mp4'])).toBe('mkv')
+    expect(clipPresetExtension('h264-cpu', ['C:\\clips\\ep 1.mkv'])).toBe('mp4')
+    expect(clipPresetExtension('prores-hq', ['C:\\clips\\ep 1.mp4'])).toBe('mov')
+    expect(clipPresetExtension('gpu-intra', [])).toBe('mov')
   })
 
   it('uses format-appropriate bitrate defaults', () => {

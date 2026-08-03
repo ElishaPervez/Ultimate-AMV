@@ -2251,9 +2251,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     },
     [mergeOrderedClips],
   );
-  // Container extension the backend will actually write for the current
-  // preset, so the merge UI labels match the real output file.
-  const mergeExt = clipPresetExtension(exportFormat);
+  // Container extension the backend will actually write for the current preset
+  // and the selected clips' sources, so the merge UI labels match the real
+  // output file. Smart cut reads the sources; every other preset ignores them.
+  const mergeExt = React.useMemo(
+    () =>
+      clipPresetExtension(
+        exportFormat,
+        mergeOrderedClips.map((clip) => clip.path ?? clip.sourceName),
+      ),
+    [exportFormat, mergeOrderedClips],
+  );
 
   async function handleClipClick(
     clip: ClipPreviewItem,
@@ -3768,9 +3776,24 @@ type ClipExportOption = {
   description?: string;
 };
 
-// Mirrors preset_extension() in src-tauri/src/clips.rs. Used for UI labels so
-// the displayed filename matches the file the backend writes.
-function clipPresetExtension(format: ClipExportFormat): string {
+// Containers whose contents are already legal in an mp4, so smart cut can copy
+// them straight back into one. Mirrors is_mp4_family() in clips.rs.
+const MP4_FAMILY_EXTENSIONS = ["mp4", "m4v", "mov"];
+
+function isMp4FamilySource(sourcePath: string): boolean {
+  const ext = sourcePath.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase() ?? "";
+  return MP4_FAMILY_EXTENSIONS.includes(ext);
+}
+
+// Mirrors preset_extension_for() in src-tauri/src/clips.rs. Used for UI labels
+// so the displayed filename matches the file the backend writes. Smart cut is
+// the one preset that varies by source: it keeps an mp4 source in mp4 and falls
+// back to mkv for everything else. The rule reads the source's NAME, never its
+// contents, precisely so the label can be worked out here without a probe.
+export function clipPresetExtension(
+  format: ClipExportFormat,
+  sourcePaths: string[] = [],
+): string {
   switch (format) {
     case "prores-lt":
     case "prores-hq":
@@ -3783,8 +3806,9 @@ function clipPresetExtension(format: ClipExportFormat): string {
     case "h264-10bit-nvenc":
     case "av1-nvenc":
       return "mp4";
-    case "lossless-cut":
     case "smart-cut":
+      return sourcePaths.length > 0 && sourcePaths.every(isMp4FamilySource) ? "mp4" : "mkv";
+    case "lossless-cut":
       return "mkv";
     default:
       return "mov";
@@ -3923,7 +3947,7 @@ export function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus
       value: "smart-cut",
       label: "Smart cut (frame-accurate, no quality loss)",
       disabled: false,
-      description: "Copies the original like Lossless cut, but re-encodes only the first fraction of a second so the clip starts on the exact frame. H.264/HEVC sources only. Saved as MKV.",
+      description: "Copies the original like Lossless cut, but re-encodes only the first fraction of a second so the clip starts on the exact frame. H.264/HEVC sources only. Keeps the source's format: MP4 in, MP4 out; everything else saves as MKV.",
     },
     {
       value: "prores-lt",
