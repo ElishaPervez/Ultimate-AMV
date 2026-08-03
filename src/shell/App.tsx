@@ -26,6 +26,7 @@ import {
 import { readBackgroundState } from "../lib/background";
 import { APP_THEMES, DEFAULT_BG_STATE } from "../lib/constants";
 import { setDiscordPanel } from "../lib/discord";
+import { recordToolVisit } from "../lib/lastTool";
 import { logFrontend, safeLogValue } from "../lib/log";
 import { applyAppTheme, hasExplicitAccent, isHexColor, readThemeColors } from "../lib/theme";
 import { parseBridgePayload } from "../utils/bridge";
@@ -286,6 +287,12 @@ export function App() {
       setOpenGroups((g) => ({ ...g, media: true }));
     }
   }, []);
+  // Remember the last tool the user opened so Home can offer a one-click way
+  // back. Watching `active` catches every route in — sidebar, icon rail and
+  // Home's own cards — instead of wrapping fourteen separate click handlers.
+  React.useEffect(() => {
+    recordToolVisit(active);
+  }, [active]);
   const activeMeta = panelMeta[active];
   const isHome = active === "home";
   const isAudioExtraction = active === "audio-extraction";

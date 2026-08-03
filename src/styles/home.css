@@ -1,15 +1,20 @@
 /* ============================================================
    HOME / LANDING PANEL
    ------------------------------------------------------------
-   Full-canvas landing page: hero on top, then a tile grid that
-   stretches to fill the remaining workspace height. The hero IS the
-   page title (panels have no generic title header).
+   Full-canvas landing page. Hero on top, then a two-column body:
+   the tool BOARD on the left (tools grouped by the stage of the
+   edit they belong to) and the live status RAIL on the right.
+
+   `.home-body` is the single material carrier for this page —
+   one backdrop element behind both columns, per the one-carrier
+   budget in docs/material-implementation-map.md. Everything
+   inside it uses flat translucent fills, never its own blur.
    ============================================================ */
 
 .home-panel {
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 22px;
   height: 100%;
   min-height: 0;
   padding: 34px 36px 28px;
@@ -39,22 +44,80 @@
   max-width: 70ch;
 }
 
-.home-grid {
+/* ---- Two-column body --------------------------------------- */
+
+.home-body {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  grid-auto-rows: minmax(190px, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) 304px;
+  align-items: start;
+  gap: 20px;
   min-height: 0;
 }
 
-.home-card {
+/* ---- Left: the stage board --------------------------------- */
+
+.home-board {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  gap: 20px;
+  min-width: 0;
+}
+
+.home-stage-head {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  padding: 20px;
-  border-radius: 14px;
+  margin-bottom: 9px;
+}
+
+/* The step number is a real sequence marker: this is the order the
+   tools get used on an edit, so it carries information. */
+.home-stage-step {
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgb(var(--theme-accent-rgb));
+  opacity: 0.8;
+}
+
+.home-stage-label {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: #d6dbe1;
+  white-space: nowrap;
+}
+
+.home-stage-rule {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--theme-accent-rgb) / 0.28),
+    rgba(255, 255, 255, 0.05) 45%,
+    rgba(255, 255, 255, 0)
+  );
+}
+
+.home-stage-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 10px;
+}
+
+/* ---- Tool card --------------------------------------------- */
+
+.home-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  border-radius: var(--radius-lg);
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.025);
   color: inherit;
@@ -66,66 +129,415 @@
 .home-card:hover {
   border-color: rgb(var(--theme-accent-rgb) / 0.45);
   background: rgb(var(--theme-accent-rgb) / 0.06);
-  transform: translateY(-2px);
+  transform: translateY(-1px);
 }
 
-.home-card-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+.home-card:focus-visible,
+.home-resume:focus-visible,
+.home-download:focus-visible,
+.home-rail-action:focus-visible,
+.home-rail-link:focus-visible,
+.home-rail-more:focus-visible {
+  outline: 2px solid rgb(var(--theme-accent-rgb) / 0.75);
+  outline-offset: 2px;
 }
 
 .home-card-icon {
-  width: 46px;
-  height: 46px;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
-  border-radius: 12px;
+  border-radius: 10px;
   background: rgb(var(--theme-accent-rgb) / 0.12);
   color: rgb(var(--theme-accent-rgb));
 }
 
-.home-card-group {
-  font-size: 9.5px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: #6b7280;
-  padding: 3px 7px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+.home-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
 .home-card-title {
-  margin-top: 4px;
-  font-size: 15.5px;
+  font-size: 14px;
   font-weight: 650;
   color: #e9ecef;
 }
 
 .home-card-desc {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: #9ca3af;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #97a0ab;
 }
 
-.home-card-open {
-  margin-top: auto;
-  padding-top: 8px;
+.home-card-arrow {
+  flex-shrink: 0;
+  margin-top: 10px;
+  margin-left: auto;
+  color: rgb(var(--theme-accent-rgb));
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.home-card:hover .home-card-arrow,
+.home-card:focus-visible .home-card-arrow,
+.home-resume:hover .home-card-arrow,
+.home-resume:focus-visible .home-card-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* ---- Right: the live status rail --------------------------- */
+
+.home-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.home-rail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.home-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.home-rail-title {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: #b6bec7;
+}
+
+.home-rail-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+  border-radius: 999px;
+}
+
+.home-rail-badge.is-ok {
+  color: #86efac;
+  background: rgba(74, 222, 128, 0.12);
+}
+
+.home-rail-badge.is-warn {
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.13);
+}
+
+.home-rail-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8d97a2;
+}
+
+/* ---- Readiness checks -------------------------------------- */
+
+.home-check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.home-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+/* Status colours stay semantic — they must not follow the user's accent,
+   or a red theme would paint a healthy machine as broken. */
+.home-check-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+}
+
+.home-check-dot.is-ok {
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+}
+
+.home-check-dot.is-warn {
+  background: #fbbf24;
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.45);
+}
+
+.home-check-dot.is-bad {
+  background: #f87171;
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.5);
+}
+
+.home-check-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.home-check-label {
+  font-size: 12.5px;
+  font-weight: 620;
+  color: #e2e6ea;
+}
+
+.home-check-detail {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #8d97a2;
+}
+
+/* ---- Rail actions ------------------------------------------ */
+
+.home-rail-action {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
+  align-self: flex-start;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgb(var(--theme-accent-rgb) / 0.3);
+  background: rgb(var(--theme-accent-rgb) / 0.08);
   color: rgb(var(--theme-accent-rgb));
-  opacity: 0.55;
-  transition: opacity 160ms ease, gap 160ms ease;
+  font-size: 11.5px;
+  font-weight: 620;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
 }
 
-.home-card:hover .home-card-open {
+.home-rail-action:hover {
+  background: rgb(var(--theme-accent-rgb) / 0.16);
+  border-color: rgb(var(--theme-accent-rgb) / 0.5);
+}
+
+.home-rail-more {
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgb(var(--theme-accent-rgb));
+  opacity: 0.7;
+  cursor: pointer;
+  transition: opacity 150ms ease;
+}
+
+.home-rail-more:hover {
   opacity: 1;
-  gap: 9px;
+}
+
+/* ---- Resume row -------------------------------------------- */
+
+.home-resume {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.home-resume:hover {
+  border-color: rgb(var(--theme-accent-rgb) / 0.4);
+  background: rgb(var(--theme-accent-rgb) / 0.07);
+}
+
+.home-resume-icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgb(var(--theme-accent-rgb) / 0.12);
+  color: rgb(var(--theme-accent-rgb));
+}
+
+.home-resume-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.home-resume-title {
+  font-size: 13px;
+  font-weight: 640;
+  color: #e9ecef;
+}
+
+.home-resume-meta {
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: #8d97a2;
+}
+
+.home-resume .home-card-arrow {
+  margin-top: 0;
+}
+
+/* ---- Recent downloads -------------------------------------- */
+
+.home-download-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.home-download {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.home-download:hover {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.home-download-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.home-download-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #dfe4e9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-download-meta {
+  font-size: 10.5px;
+  color: #838d99;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-download-reveal {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #8d97a2;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.home-download:hover .home-download-reveal,
+.home-download:focus-visible .home-download-reveal {
+  opacity: 1;
+}
+
+/* ---- Rail footer ------------------------------------------- */
+
+.home-rail-footer {
+  display: flex;
+  gap: 8px;
+}
+
+.home-rail-link {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+  color: #b6bec7;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.home-rail-link:hover {
+  color: #e9ecef;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ---- Narrow windows ---------------------------------------- */
+
+/* Below this the rail would squeeze the tool cards into one column and
+   the descriptions would wrap to four lines, so it moves under the board. */
+@media (max-width: 1180px) {
+  .home-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-rail {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    align-items: start;
+  }
+
+  .home-rail-footer {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-card,
+  .home-card-arrow,
+  .home-resume,
+  .home-download,
+  .home-download-reveal,
+  .home-rail-action,
+  .home-rail-link,
+  .home-rail-more {
+    transition: none;
+  }
+
+  .home-card:hover {
+    transform: none;
+  }
 }

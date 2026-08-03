@@ -74,7 +74,7 @@
 :root.has-app-bg .terminal-log,
 :root.has-app-bg .clip-extractor-rail,
 :root.has-app-bg .download-queue-panel,
-:root.has-app-bg .home-grid {
+:root.has-app-bg .home-body {
   background: var(--material-tint);
   backdrop-filter: blur(var(--material-blur)) brightness(var(--material-brightness)) saturate(var(--material-saturate));
   -webkit-backdrop-filter: blur(var(--material-blur)) brightness(var(--material-brightness)) saturate(var(--material-saturate));
@@ -102,7 +102,7 @@
 :root.has-app-bg .youtube-trim,
 :root.has-app-bg .download-history-panel,
 :root.has-app-bg .terminal-log,
-:root.has-app-bg .home-grid {
+:root.has-app-bg .home-body {
   border: 1px solid var(--glass-border);
 }
 
@@ -303,7 +303,7 @@
 }
 
 /* ---- Home (Phase 2.9) --------------------------------------- */
-:root.has-app-bg .home-grid {
+:root.has-app-bg .home-body {
   padding: 16px;
   border-radius: var(--radius-xl);
 }
