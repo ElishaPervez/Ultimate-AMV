@@ -7,9 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] : 2026-08-04
+
+### Added
+- Added Frame Interpolation: generate the in-between frames of a clip to raise its frame rate, with 2x/3x/4x multipliers or a target frame rate you type in. A separate slow-motion mode goes up to 64x and stretches the clip out instead of speeding the playback, so the action plays back slowed down rather than smoother at the same length. You choose the output format, and you can queue several clips and leave them to run.
+- Added a one-click hand-off from the clip grid: send everything you just exported straight into interpolation as a single batch instead of adding clips one at a time.
+- Added Dead Frame Remover: finds frames that are duplicates of the one before them, which anime is full of, and drops them. A sensitivity dial controls how aggressively it judges two frames to be the same, a filmstrip under the dial shows you which frames are about to be cut so you can see the effect before committing, and clips can be queued and exported as a batch.
+- Dead Frame Remover can re-time what survives to a frame rate you pick, so removing duplicates leaves you with a clip that plays at a normal speed instead of a shorter, faster one.
+- Added a Smart cut export preset: cuts clips without re-encoding them, so the export is close to instant and the picture is bit-for-bit identical to your source. Cuts still land on the exact frame you chose.
+- Added Quality, VBR and CBR rate control to every clip export preset that supports it, so you can trade file size against quality per export. The setting is kept when an NVIDIA export falls back to the processor.
+- Added a playback speed control for the clip grid previews, adjustable from 0.25x to 4x and applied live without restarting the previews you are watching.
+
 ### Changed
+- The Home tab is now laid out as the four stages of an edit (get footage, find your cuts, clean up, prep for your editor) instead of a flat menu. All nine tools appear, including Frame Interpolation and Dead Frame Remover, which were missing before, and cards are sized to their contents rather than stretched to fill the row.
+- Home gained a status rail that tells you what will do the work before you start it, whether fast export encoding is available, and whether a required tool is missing. It also reopens the last tool you used and lists your recent downloads, which you can click to reveal on disk.
+- Setting up or switching between processor and graphics-card mode is dramatically faster. Swapping the graphics-card build of PyTorch for the processor one takes roughly 6 seconds instead of 82. Switching back no longer reinstalls the entire audio engine to recover one file, and the checks the setup screen runs now happen at the same time instead of one after another.
 - Smart cut now keeps your source's format instead of always saving as MKV: an MP4 episode gives you MP4 clips, which import straight into Premiere, After Effects and DaVinci with no conversion step. MKV and other sources are unchanged, because they can hold audio an MP4 cannot.
 - HEVC clips saved as MP4 are now labelled so QuickTime and Final Cut will open them.
+- The minimum window size is now 1080x675, so no panel can be squeezed into an unusable layout.
+
+### Fixed
+- Fixed the app opening on the first-run setup wizard even though setup had been finished long ago. An interrupted switch between processor and graphics-card mode could leave a package on disk with the file describing it deleted, which crashed the check the app runs at startup; the app then assumed setup had never happened. Those damaged leftovers are now cleaned up and reinstalled instead of being skipped forever as though the package were fine.
+- Fixed a failed setup showing a wall of raw machine output instead of a readable sentence explaining what went wrong.
+- Fixed the setup log vanishing the moment an install failed, which took away the only record of what broke. It now stays on screen beneath the error, and a long message scrolls in place and can be selected and copied.
+- Fixed vocal and instrumental separation breaking after switching between processor and graphics-card mode, and fixed the switch replacing the tested PyTorch build with the wrong one.
+- Fixed setup dying outright when the faster installer misbehaved; it now falls back to the slower one and finishes.
+- Fixed Dead Frame Remover previews staying black on source formats the preview could not play.
+- Fixed background removal and the clip tools failing to start on some installs by launching them through the same verified Python the rest of the app uses.
+- Fixed the built-in streaming browser drifting out of alignment with its frame when the interface zoom was not 100%.
+- Fixed a set of Smart cut correctness problems found in review, covering clip timing, merging clips that were not compatible, cancelling an export part-way, and leftover temporary files.
 
 ## [0.14.0] : 2026-07-17
 
@@ -279,6 +305,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.15.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.0
 [0.14.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.14.0
 [0.13.3]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.3
 [0.13.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.2
