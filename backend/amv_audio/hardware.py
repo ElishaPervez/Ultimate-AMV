@@ -41,7 +41,10 @@ def _ensure_init(force_cpu=None):
         _ = ort.get_available_providers()
         _CACHE["ort_available"] = True
         try:
-            _CACHE["ort_version"] = version("onnxruntime")
+            # The sound runtime loaded, so it is there. Its record can still be
+            # unreadable, in which case the panel says "installed" instead of
+            # showing a blank where a version belongs.
+            _CACHE["ort_version"] = version("onnxruntime") or "installed"
         except Exception:
             _CACHE["ort_version"] = "installed"
     except Exception:

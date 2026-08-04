@@ -27,6 +27,7 @@ if _tools_dir not in os.environ.get("PATH", ""):
 
 from amv_audio.config import load_config, save_config
 from amv_audio.dependencies import ensure_feature_dependencies, repair_missing_module
+from amv_audio.installer import recorded_version
 from amv_audio.logs import add_log, get_terminal_logs
 from amv_audio.separator import run_separation
 from amv_audio.setup import collect_setup_plan, install_setup
@@ -106,10 +107,13 @@ def _auto_sync_install_mode(cfg):
     # "GPU installed - CPU configured" on a +cu torch and so downstream code
     # that reads clip_extraction_mode (e.g. DownloaderPanel's post-download
     # clip-server warmup) sees the right mode.
-    try:
-        from importlib.metadata import version
-        torch_version = version("torch")
-    except Exception:
+    # A version that cannot be read says nothing about which build is
+    # installed, so leave the stored preferences alone rather than guessing.
+    # Reading it as text instead is what used to kill this command outright,
+    # and with it dead the app decided the user had never finished setup and
+    # threw the first-run wizard at them.
+    torch_version = recorded_version("torch")
+    if not torch_version:
         return cfg, False
 
     if "+cu" in torch_version:

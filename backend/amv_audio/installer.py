@@ -291,12 +291,16 @@ def to_pip_cmd(cmd):
     return out
 
 
-def is_installed(package):
-    """Whether a distribution is recorded as installed.
+def recorded_version(package):
+    """The version a package has on record, or None when that cannot be read.
 
-    Replaces asking pip, which cost a fresh Python process per question and
-    six of those ran every time the setup screen opened. This reads the same
-    records both installers write, so it is correct either way.
+    An install that dies partway leaves the record folder on disk with the
+    file describing the package gone. Python 3.13 answers the version question
+    with nothing at all in that case instead of saying the package is absent,
+    so every caller that went on to search the answer for text crashed and
+    took the whole command down with it. Anything that is not a usable version
+    string comes back as None here, which leaves callers one case to handle:
+    the version is unknown, so treat the package as not installed.
     """
     import importlib
     from importlib.metadata import PackageNotFoundError, version
@@ -307,12 +311,29 @@ def is_installed(package):
     # on work it actually completed.
     importlib.invalidate_caches()
     try:
-        version(package)
-        return True
+        found = version(package)
     except PackageNotFoundError:
-        return False
+        return None
     except Exception:
-        return False
+        return None
+    if not isinstance(found, str):
+        return None
+    found = found.strip()
+    return found or None
+
+
+def is_installed(package):
+    """Whether a distribution is recorded as installed.
+
+    Replaces asking pip, which cost a fresh Python process per question and
+    six of those ran every time the setup screen opened. This reads the same
+    records both installers write, so it is correct either way.
+
+    A package whose record exists but says nothing counts as not installed.
+    Answering yes there tells setup a package it cannot verify is fine, so the
+    install that would repair it never runs.
+    """
+    return recorded_version(package) is not None
 
 
 def prune_cache():

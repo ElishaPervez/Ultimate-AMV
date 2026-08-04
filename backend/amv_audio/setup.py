@@ -15,6 +15,7 @@ from .dependencies import (
     AUDIO_RUNTIME_MODULES,
     _numeric_runtime_ready,
     _prune_stale_numeric_metadata,
+    _prune_unreadable_package_records,
     _prune_unused_package_dirs,
     invalidate_numeric_runtime_probe,
 )
@@ -96,18 +97,14 @@ def _missing_audio_runtime_modules():
             found = importlib.util.find_spec(module) is not None
         except (ImportError, AttributeError, ValueError):
             found = False
+        # These two are pinned, so the module being importable is not enough:
+        # the wrong release loads and then fails deep inside separation. A
+        # version that cannot be read counts as the wrong one, because there
+        # is no way to tell it is the right one.
         if module == "beartype" and found:
-            try:
-                from importlib.metadata import version
-                found = version("beartype").startswith("0.18.")
-            except Exception:
-                found = False
+            found = (installer.recorded_version("beartype") or "").startswith("0.18.")
         if module == "samplerate" and found:
-            try:
-                from importlib.metadata import version
-                found = version("samplerate") == "0.1.0"
-            except Exception:
-                found = False
+            found = installer.recorded_version("samplerate") == "0.1.0"
         if not found:
             missing.append(package)
     return missing
@@ -122,10 +119,11 @@ def _installed_torch_mode():
     # "Install PyTorch with CUDA 12.8" issue. The readiness check already
     # gates on check_nvidia_gpu(), so a +cu wheel on a CPU-only host is
     # still caught : just by the right signal.
-    try:
-        from importlib.metadata import version
-        torch_version = version("torch")
-    except Exception:
+    torch_version = installer.recorded_version("torch")
+    if not torch_version:
+        # A record that cannot be read tells us nothing about which build is
+        # there, so the honest answer is the same one given when PyTorch is
+        # not installed at all: the setup screen offers to install it.
         return "missing", None, False
 
     mode = "gpu" if "+cu" in torch_version else "cpu"
@@ -312,6 +310,20 @@ def apply_success_mode(mode):
     save_config(config)
 
 
+def _clear_broken_package_records():
+    """Keep the record cleanup nonfatal so setup runs either way."""
+    try:
+        return _prune_unreadable_package_records()
+    except Exception as error:
+        add_log(
+            "audio.setup.broken_records.error",
+            "Could not clean up unreadable package records",
+            level="warning",
+            details={"error": str(error)},
+        )
+        return []
+
+
 def _prune_package_cache():
     """Keep cache cleanup nonfatal even if an installer implementation changes."""
     try:
@@ -429,6 +441,10 @@ def install_setup(mode, progress_callback):
     # ships switched off, so a Python that was never prepared imports nothing
     # that gets installed.
     _fix_pth_file()
+    # Do this before the plan is worked out. A package whose record was gutted
+    # reads as installed to both installers, so the plan would skip it and the
+    # user would press Install and get nothing fixed.
+    _clear_broken_package_records()
     plan = collect_setup_plan(mode)
     installs = plan["installs"]
     if not installs:

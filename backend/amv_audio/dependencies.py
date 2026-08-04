@@ -160,30 +160,39 @@ def _module_exists(module_name):
         return False
 
 
-def _package_exists(package_name):
+def _recorded_version(package_name):
+    """The version on record for a package, or None when it cannot be read.
+
+    A record folder left behind empty by an interrupted install makes Python
+    answer with nothing rather than reporting the package as absent, and any
+    caller that then searched the answer for text crashed.
+    """
     try:
-        version(package_name)
-        return True
+        found = version(package_name)
     except PackageNotFoundError:
-        return False
+        return None
     except Exception:
-        return False
+        return None
+    if not isinstance(found, str):
+        return None
+    found = found.strip()
+    return found or None
+
+
+def _package_exists(package_name):
+    return _recorded_version(package_name) is not None
 
 
 def _audio_runtime_missing(module_name, package_name):
     if not _module_exists(module_name):
         return True
+    # Both of these are pinned to one release. A version nobody can read is
+    # treated as the wrong release, so the repair reinstalls it rather than
+    # trusting a record that says nothing.
     if module_name == "beartype":
-        try:
-            current = version("beartype")
-            return not current.startswith("0.18.")
-        except Exception:
-            return True
+        return not (_recorded_version("beartype") or "").startswith("0.18.")
     if module_name == "samplerate":
-        try:
-            return version("samplerate") != "0.1.0"
-        except Exception:
-            return True
+        return _recorded_version("samplerate") != "0.1.0"
     return False
 
 
@@ -463,6 +472,77 @@ def _prune_unused_package_dirs():
         add_log(
             "deps.unused_dirs.pruned",
             "Removed unused package directories",
+            details={"removed": removed},
+        )
+    return removed
+
+
+def _record_is_readable(record_dir):
+    """True when a package record still describes the package it belongs to.
+
+    METADATA is the file that carries the name and version. Without it there
+    is nothing left to identify the install by, which is exactly the state an
+    interrupted mode switch leaves behind.
+    """
+    metadata = record_dir / "METADATA"
+    try:
+        if not metadata.is_file():
+            return False
+        return bool(metadata.read_bytes().strip())
+    except OSError:
+        return False
+
+
+def _prune_unreadable_package_records():
+    """Delete package records that no longer say what they installed.
+
+    A half-finished install can leave the record folder on disk with its
+    description file gone. Two things then go wrong: reading that package's
+    version gives nothing at all, which used to crash the command that opens
+    the app, and both installers still see the folder and skip reinstalling
+    the package, so the damage never repairs itself. Removing the folder is
+    what makes the next install put the package back.
+
+    Only the record folder is ever touched, never the installed code, and a
+    folder that still has a description stays exactly where it is.
+    """
+    site_packages = _site_packages_dir()
+    if not site_packages.is_dir():
+        return []
+
+    try:
+        candidates = sorted(site_packages.glob("*.dist-info"))
+    except OSError as error:
+        add_log(
+            "deps.broken_records.scan_failed",
+            "Could not scan for unreadable package records",
+            level="warning",
+            details={"path": str(site_packages), "error": str(error)},
+        )
+        return []
+
+    removed = []
+    for candidate in candidates:
+        if not candidate.is_dir() or _record_is_readable(candidate):
+            continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError as error:
+            # Setup can still do useful work with the folder in place, so a
+            # locked file must not turn into a failed setup.
+            add_log(
+                "deps.broken_records.prune_failed",
+                "Could not remove an unreadable package record",
+                level="warning",
+                details={"path": str(candidate), "error": str(error)},
+            )
+            continue
+        removed.append(candidate.name)
+
+    if removed:
+        add_log(
+            "deps.broken_records.pruned",
+            "Removed package records that no longer describe their package",
             details={"removed": removed},
         )
     return removed
