@@ -4,7 +4,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::process::Command as AsyncCommand;
 
 use crate::{log_error, log_info, truncate_log_text};
@@ -193,6 +193,25 @@ fn redact_bridge_stdout(args: &[&str], stdout: &str) -> String {
         Some("set-config") | Some("config") => "<config payload redacted>".to_string(),
         _ => truncate_log_text(stdout),
     }
+}
+
+/// A failing Python sidecar's last stdout line is one of its own JSON payloads,
+/// e.g. `{"type":"setup-error","message":"..."}`. Every one of those strings
+/// ends up on screen as the error the user reads, so hand back the sentence the
+/// payload carries instead of the payload itself. Anything that is not JSON
+/// with a `message` string (a stderr tail, a bare exit-code line) is already
+/// plain text and comes back untouched.
+pub(crate) fn bridge_error_text(raw: &str) -> String {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| raw.to_string())
 }
 
 pub(crate) fn run_audio_cli(args: &[&str]) -> Result<String, String> {
@@ -418,6 +437,39 @@ pub(crate) fn run_deadframe_cli(args: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_error_payloads_reach_the_user_as_a_sentence() {
+        assert_eq!(
+            bridge_error_text(
+                r#"{"type":"setup-error","message":"argument of type 'NoneType' is not iterable"}"#
+            ),
+            "argument of type 'NoneType' is not iterable"
+        );
+    }
+
+    #[test]
+    fn non_json_failures_are_passed_through_untouched() {
+        assert_eq!(
+            bridge_error_text("Python process exited with code 1"),
+            "Python process exited with code 1"
+        );
+        let tail = "Traceback (most recent call last):\n  File \"setup.py\"";
+        assert_eq!(bridge_error_text(tail), tail);
+    }
+
+    #[test]
+    fn json_without_a_usable_message_keeps_the_raw_line() {
+        // Better a raw line than an empty red box with nothing in it.
+        assert_eq!(
+            bridge_error_text(r#"{"type":"setup-error","code":3}"#),
+            r#"{"type":"setup-error","code":3}"#
+        );
+        assert_eq!(
+            bridge_error_text(r#"{"type":"setup-error","message":"   "}"#),
+            r#"{"type":"setup-error","message":"   "}"#
+        );
+    }
 
     #[test]
     fn missing_python_names_the_file_and_the_way_out() {

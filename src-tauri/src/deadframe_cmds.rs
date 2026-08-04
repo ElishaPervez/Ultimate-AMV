@@ -12,9 +12,9 @@ use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
 
 use crate::{
-    app_root, apply_python_env, clear_child_pid, cmd, deadframe_cli_path, kill_child_pid,
-    log_error, log_info, python_exe_checked, run_deadframe_cli, store_child_pid, truncate_log_text,
-    DEADFRAME_ACTIVE_OUTPUT, DEADFRAME_CHILD_PID,
+    app_root, apply_python_env, bridge_error_text, clear_child_pid, cmd, deadframe_cli_path,
+    kill_child_pid, log_error, log_info, python_exe_checked, run_deadframe_cli, store_child_pid,
+    truncate_log_text, DEADFRAME_ACTIVE_OUTPUT, DEADFRAME_CHILD_PID,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -40,21 +40,6 @@ fn demux_line(line: &str) -> StreamMessage {
         Some("done") | Some("error") => StreamMessage::Final(value),
         _ => StreamMessage::Ignore,
     }
-}
-
-/// The one-shot bridge hands back the sidecar's own stdout on failure, which is
-/// a `{"type":"error","message":...}` line. The webview only ever shows the
-/// human sentence, so unwrap it here rather than leaking raw JSON into a toast.
-fn bridge_error_text(raw: &str) -> String {
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| raw.to_string())
 }
 
 fn set_active_output(path: Option<PathBuf>) {

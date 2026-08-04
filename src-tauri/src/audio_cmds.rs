@@ -461,17 +461,24 @@ pub(crate) fn run_streaming_audio_cli(
         }
         result
     } else {
-        let error = final_payload.unwrap_or_else(|| {
-            let tail = stderr_tail.trim();
-            if tail.is_empty() {
-                format!(
-                    "Python process exited with code {}",
-                    status.code().unwrap_or(-1)
-                )
-            } else {
-                tail.to_string()
-            }
-        });
+        // This string is what the setup wizard and the audio panels put on
+        // screen verbatim, so unwrap the sentence out of the sidecar's own
+        // payload instead of showing the user a line of JSON. Non-JSON cases
+        // (stderr tail, exit code) are unchanged.
+        let error = final_payload
+            .as_deref()
+            .map(crate::bridge_error_text)
+            .unwrap_or_else(|| {
+                let tail = stderr_tail.trim();
+                if tail.is_empty() {
+                    format!(
+                        "Python process exited with code {}",
+                        status.code().unwrap_or(-1)
+                    )
+                } else {
+                    tail.to_string()
+                }
+            });
         log_error(
             "audio.streaming_bridge.error",
             "Streaming audio bridge process failed",

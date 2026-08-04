@@ -31,10 +31,10 @@ pub(crate) use downloads::{content_fingerprint, sanitize_path_segment, short_sta
 pub(crate) use logging::{append_app_log, app_state_dir, log_error, log_info, log_warn, reset_app_logs, truncate_log_text};
 pub(crate) use preview::serialize_clip_preview_done;
 pub(crate) use python_env::{
-    app_root, apply_python_env, apply_python_env_async, audio_cli_path, clear_child_pid,
-    clip_cli_path, bgremove_cli_path, cmd, deadframe_cli_path, find_tool, interpolate_cli_path,
-    kill_child_pid, python_exe_checked, run_audio_cli, run_bgremove_cli, run_deadframe_cli,
-    run_interpolate_cli, store_child_pid, tools_dir_path,
+    app_root, apply_python_env, apply_python_env_async, audio_cli_path, bridge_error_text,
+    clear_child_pid, clip_cli_path, bgremove_cli_path, cmd, deadframe_cli_path, find_tool,
+    interpolate_cli_path, kill_child_pid, python_exe_checked, run_audio_cli, run_bgremove_cli,
+    run_deadframe_cli, run_interpolate_cli, store_child_pid, tools_dir_path,
 };
 pub(crate) use video_cmds::{
     canonical_input_path, command_available, emit_conversion_progress, ensure_tool, ffmpeg_listing,
