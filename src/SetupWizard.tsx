@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, CheckCircle2, Cpu, FolderOpen, Loader2, Zap } from "lucide-react";
+import { readBridgeError } from "./utils/bridge";
 
 type SetupStep = "hardware" | "recommend" | "folder" | "install" | "complete";
 
@@ -75,7 +76,10 @@ export function SetupWizard({ onComplete }: Props) {
     try {
       await invoke("audio_setup", { mode: selectedMode });
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      // The backend already unwraps its own failure payloads, but a rejection
+      // from anywhere else could still be a raw JSON line. Unwrap defensively
+      // so the user never reads braces and quotes off the screen.
+      setError(readBridgeError(e));
       setInstalling(false);
       unlisten();
       return;
@@ -269,41 +273,45 @@ export function SetupWizard({ onComplete }: Props) {
                 </div>
               </>
             )}
-            {installing && (
+            {(installing || error) && (
               <div className="setup-installing">
-                <div className="setup-progress-status">
-                  <Loader2 size={16} className="audio-spin" />
-                  <span>
-                    {progress
-                      ? `Step ${Math.min(progress.step, progress.total)} / ${progress.total} : ${progress.message}`
-                      : "Starting..."}
-                  </span>
-                </div>
+                {installing && (
+                  <div className="setup-progress-status">
+                    <Loader2 size={16} className="audio-spin" />
+                    <span>
+                      {progress
+                        ? `Step ${Math.min(progress.step, progress.total)} / ${progress.total} : ${progress.message}`
+                        : "Starting..."}
+                    </span>
+                  </div>
+                )}
+                {error && (
+                  <div className="setup-error-msg">
+                    <AlertTriangle size={16} />
+                    <span className="setup-error-text">{error}</span>
+                  </div>
+                )}
+                {/* The log stays on screen after a failure: it is the only
+                    place the user can read and copy what actually broke. */}
                 {logLines.length > 0 && (
                   <pre ref={logRef} className="setup-log">
                     {logLines.join("\n")}
                   </pre>
                 )}
-              </div>
-            )}
-            {error && (
-              <div className="setup-error-block">
-                <div className="setup-error-msg">
-                  <AlertTriangle size={16} />
-                  <span>{error}</span>
-                </div>
-                <div className="setup-nav">
-                  <button
-                    type="button"
-                    className="setup-back-btn"
-                    onClick={() => setStep("folder")}
-                  >
-                    Back
-                  </button>
-                  <button type="button" className="setup-next-btn" onClick={startInstall}>
-                    Retry
-                  </button>
-                </div>
+                {error && (
+                  <div className="setup-nav">
+                    <button
+                      type="button"
+                      className="setup-back-btn"
+                      onClick={() => setStep("folder")}
+                    >
+                      Back
+                    </button>
+                    <button type="button" className="setup-next-btn" onClick={startInstall}>
+                      Retry
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
