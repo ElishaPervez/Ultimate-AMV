@@ -211,6 +211,17 @@ fn setparams_filter(meta: &ColorMetadata) -> String {
     )
 }
 
+// Clip outputs must carry only the streams the editor selected. Chapter
+// metadata is independent of stream mapping, so it needs its own explicit
+// opt-out or a MOV/MP4 muxer can recreate an episode-length data track.
+fn append_clip_stream_maps(args: &mut Vec<String>, streams: &[&str]) {
+    for stream in streams {
+        args.push("-map".to_string());
+        args.push((*stream).to_string());
+    }
+    args.extend(["-map_chapters".to_string(), "-1".to_string()]);
+}
+
 #[tauri::command]
 pub(crate) async fn clip_export(
     window: tauri::Window,
