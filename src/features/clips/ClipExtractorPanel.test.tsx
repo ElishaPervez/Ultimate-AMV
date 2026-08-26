@@ -33,6 +33,34 @@ vi.mock('@tauri-apps/api/webview', () => ({
   }),
 }))
 
+vi.mock('./ClipPreviewTile', async () => {
+  const actual = await vi.importActual<typeof import('./ClipPreviewTile')>('./ClipPreviewTile')
+  return {
+    ...actual,
+    ClipPreviewTile: vi.fn((props: Parameters<typeof actual.ClipPreviewTile>[0]) =>
+      actual.ClipPreviewTile(props)
+    ),
+  }
+})
+
+// jsdom has no layout engine, so the production virtual scroller otherwise
+// renders no rows. Keep the real panel and real tile mounted while replacing
+// only the layout-dependent row calculation for these integration tests.
+vi.mock('react-virtuoso', () => ({
+  Virtuoso: (props: {
+    data: unknown[]
+    itemContent: (index: number, item: unknown) => React.ReactNode
+  }) => React.createElement(
+    'div',
+    { 'data-testid': 'scene-virtual-scroller' },
+    props.data.map((item, index) => React.createElement(
+      React.Fragment,
+      { key: index },
+      props.itemContent(index, item),
+    )),
+  ),
+}))
+
 import React from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -51,6 +79,7 @@ import {
   formatSupportsRateControl,
   collectProxySourcesForActiveClips,
 } from './ClipExtractorPanel'
+import { ClipPreviewTile } from './ClipPreviewTile'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -921,5 +950,283 @@ describe('ClipExtractorPanel — lazy proxy scheduling', () => {
       ...input,
       inFlightSources: new Set(['C:\\episode-1.mkv']),
     })).toEqual([])
+  })
+})
+
+function sceneExtractionResult(input: string, label = 'Scene 1') {
+  return JSON.stringify({
+    type: 'done',
+    mode: 'cpu',
+    input,
+    scenes: [
+      { source: input, start: 1, end: 3, index: 0, label },
+    ],
+    cuts: [],
+    sceneCount: 1,
+    fps: 24,
+    duration: 3,
+    totalSeconds: 0.1,
+  })
+}
+
+function proxyPlaybackPlan() {
+  return {
+    mode: 'proxy' as const,
+    videoCodec: 'hevc',
+    audioCodec: 'aac',
+    width: 1920,
+    height: 1080,
+    pixFmt: 'yuv420p10le',
+    container: 'matroska',
+    inScope: true,
+    reasons: ['codec'],
+  }
+}
+
+function installScenePanelMocks(featherweightPreviews: boolean) {
+  mockInvoke('get_config', () => JSON.stringify({
+    clip_extraction_mode: 'cpu',
+    clip_hover_preview: false,
+    featherweight_previews: featherweightPreviews,
+  }))
+  mockInvoke('video_gpu_status', () => JSON.stringify({
+    hasHevcNvenc: false,
+    hasH264Nvenc: false,
+    hasAv1Nvenc: false,
+  }))
+  mockInvoke('discord_set_state', () => null)
+  mockInvoke('discord_clear', () => null)
+}
+
+describe('ClipExtractorPanel â final review regressions', () => {
+  it('leaves a failed visible proxy tile on its static fallback immediately', async () => {
+    installScenePanelMocks(true)
+    mockInvoke('clip_extract', () => sceneExtractionResult('C:\\episode.mkv'))
+    mockInvoke('clip_playback_plan', () => proxyPlaybackPlan())
+    let rejectProxy!: (reason?: unknown) => void
+    mockInvoke('build_source_proxy', () => new Promise<string>((_resolve, reject) => {
+      rejectProxy = reject
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([command]) => command === 'clip_extract')).toBe(true))
+    await screen.findByText('Scene 1')
+    await waitFor(() => expect(
+      mockInvokeFn.mock.calls.some(([command]) => command === 'build_source_proxy'),
+    ).toBe(true))
+
+    const tile = () => document.querySelector('.clip-preview-tile-wrapper') as HTMLElement
+    expect(tile().querySelector('.clip-video-placeholder.is-loading')).toBeInTheDocument()
+
+    await act(async () => {
+      rejectProxy(new Error('proxy failed'))
+    })
+
+    await waitFor(() => {
+      expect(tile().querySelector('.clip-video-placeholder')).toBeInTheDocument()
+      expect(tile().querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument()
+    })
+  })
+
+  it('ignores old detection results when a replacement source starts a new run', async () => {
+    installScenePanelMocks(false)
+    const detectionResolvers: Array<(value: string) => void> = []
+    mockInvoke('clip_extract', () => new Promise<string>((resolve) => {
+      detectionResolvers.push(resolve)
+    }))
+    mockInvoke('cancel_clip', () => null)
+    mockDialogOpen
+      .mockResolvedValueOnce(['C:\\old.mkv'])
+      .mockResolvedValueOnce(['C:\\new.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(detectionResolvers).toHaveLength(1))
+
+    await user.click(screen.getByRole('button', { name: /change episodes/i }))
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: /extract clips/i }),
+    ).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(detectionResolvers).toHaveLength(2))
+
+    await act(async () => {
+      detectionResolvers[0](sceneExtractionResult('C:\\old.mkv', 'Old scene'))
+    })
+    await waitFor(() => expect(screen.queryByText('Old scene')).not.toBeInTheDocument())
+
+    await act(async () => {
+      detectionResolvers[1](sceneExtractionResult('C:\\new.mkv', 'New scene'))
+    })
+    await waitFor(() => expect(screen.getByText('New scene')).toBeInTheDocument())
+  })
+
+  it('ignores a late proxy event from an old request after the same source restarts', async () => {
+    installScenePanelMocks(true)
+    mockInvoke('clip_extract', () => sceneExtractionResult('C:\\episode.mkv'))
+    mockInvoke('clip_playback_plan', () => proxyPlaybackPlan())
+    const buildResolvers: Array<(value: string) => void> = []
+    const buildRejectors: Array<(reason?: unknown) => void> = []
+    mockInvoke('build_source_proxy', () => new Promise<string>((resolve, reject) => {
+      buildResolvers.push(resolve)
+      buildRejectors.push(reject)
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await screen.findByText('Scene 1')
+    await waitFor(() => expect(buildResolvers).toHaveLength(1))
+    const firstRequest = mockInvokeFn.mock.calls
+      .filter(([command]) => command === 'build_source_proxy')[0]?.[1] as { requestId: string }
+    expect(firstRequest.requestId).toEqual(expect.any(String))
+
+    act(() => {
+      dispatchTauriEvent('proxy-progress', {
+        sourcePath: 'C:\\episode.mkv',
+        requestId: firstRequest.requestId,
+        percent: 24,
+        stage: 'processing',
+      })
+    })
+    expect(screen.getByText('24%')).toBeInTheDocument()
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('scene-preview-height-changed', { detail: { height: 360 } }))
+    })
+    await waitFor(() => expect(buildResolvers).toHaveLength(2))
+    const secondRequest = mockInvokeFn.mock.calls
+      .filter(([command]) => command === 'build_source_proxy')[1]?.[1] as { requestId: string }
+    expect(secondRequest.requestId).not.toBe(firstRequest.requestId)
+
+    act(() => {
+      dispatchTauriEvent('proxy-progress', {
+        sourcePath: 'C:\\episode.mkv',
+        requestId: firstRequest.requestId,
+        percent: 88,
+        stage: 'processing',
+      })
+    })
+    expect(screen.queryByText('88%')).not.toBeInTheDocument()
+
+    act(() => {
+      dispatchTauriEvent('proxy-progress', {
+        sourcePath: 'C:\\episode.mkv',
+        requestId: secondRequest.requestId,
+        percent: 41,
+        stage: 'processing',
+      })
+    })
+    expect(screen.getByText('41%')).toBeInTheDocument()
+
+    await act(async () => {
+      buildRejectors[0](new Error('old request cancelled'))
+      buildRejectors[1](new Error('new request failed'))
+    })
+  })
+
+  it('routes compatibility progress to its modal after a completed export is retained', async () => {
+    installScenePanelMocks(false)
+    let extractionCount = 0
+    mockInvoke('clip_extract', () => {
+      extractionCount += 1
+      return extractionCount === 1
+        ? sceneExtractionResult('C:\\episode.mkv')
+        : Promise.reject(new Error('unsupported source'))
+    })
+    mockInvoke('clip_preview_generate_batch', () => JSON.stringify({ type: 'done', items: [] }))
+    mockInvoke('clip_export', () => JSON.stringify({ type: 'done', output: 'C:\\exports\\1.mov' }))
+    let resolveCompat!: (value: string) => void
+    mockInvoke('clip_compat_convert', () => new Promise<string>((resolve) => {
+      resolveCompat = resolve
+    }))
+    mockDialogOpen
+      .mockResolvedValueOnce(['C:\\episode.mkv'])
+      .mockResolvedValueOnce('C:\\exports')
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await screen.findByText('Scene 1')
+    await user.click(await screen.findByRole('button', { name: /select all clips/i }))
+    await user.click(await screen.findByRole('button', { name: /Export 1 clips/i }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Export progress' })).toHaveTextContent('Exported 1 of 1 clips'))
+
+    fireEvent.click(screen.getByRole('button', { name: /extract again/i }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Unsupported format' })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /Convert to compatible format/i }))
+    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([command]) => command === 'clip_compat_convert')).toBe(true))
+
+    const exportRow = screen.getByRole('list', { name: /per-clip status/i }).querySelector('li') as HTMLElement
+    expect(exportRow).toHaveClass('is-done')
+    act(() => {
+      dispatchTauriEvent('conversion-progress', {
+        stage: 'processing',
+        percent: 64,
+        message: 'Compatibility conversion 64%',
+        clipIndex: 1,
+        clipCount: 1,
+      })
+    })
+    expect(screen.getByText('Compatibility conversion 64%')).toBeInTheDocument()
+    expect(exportRow).toHaveClass('is-done')
+    expect(exportRow).not.toHaveClass('is-active')
+
+    await act(async () => {
+      resolveCompat(JSON.stringify({ type: 'done', output: 'C:\\cache\\episode.mp4', cached: false }))
+    })
+  })
+
+  it('keeps actual rendered tiles mounted while repeated detection progress updates arrive', async () => {
+    installScenePanelMocks(true)
+    const detectionResolvers: Array<(value: string) => void> = []
+    mockInvoke('clip_extract', () => new Promise<string>((resolve) => {
+      detectionResolvers.push(resolve)
+    }))
+    mockInvoke('clip_playback_plan', () => proxyPlaybackPlan())
+    mockInvoke('build_source_proxy', () => Promise.reject(new Error('proxy unavailable')))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode-1.mkv', 'C:\\episode-2.mkv'])
+
+    const user = userEvent.setup()
+    const tileRenderMock = vi.mocked(ClipPreviewTile)
+    tileRenderMock.mockClear()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(detectionResolvers).toHaveLength(1))
+    await act(async () => {
+      detectionResolvers[0](sceneExtractionResult('C:\\episode-1.mkv'))
+    })
+    await screen.findByText('Scene 1')
+    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([command]) => command === 'build_source_proxy')).toBe(true))
+    await waitFor(() => expect(document.querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument())
+    tileRenderMock.mockClear()
+
+    act(() => {
+      for (const percent of [12, 28, 44, 61]) {
+        dispatchTauriEvent('clip-progress', {
+          type: 'progress',
+          stage: 'detecting',
+          percent,
+          message: `Detecting ${percent}%`,
+        })
+      }
+    })
+
+    expect(tileRenderMock).toHaveBeenCalledTimes(0)
+
+    await waitFor(() => expect(detectionResolvers).toHaveLength(2))
+    await act(async () => {
+      detectionResolvers[1](sceneExtractionResult('C:\\episode-2.mkv', 'Scene 2'))
+    })
   })
 })
