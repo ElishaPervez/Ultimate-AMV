@@ -3,7 +3,7 @@ import {
   FAST_SCROLL_VELOCITY_PX_PER_FRAME,
   MAX_GRID_VIDEO_PLAYERS_CEILING,
 } from '../../lib/constants';
-import { UI_ZOOM_CHANGED_EVENT } from '../../lib/uiScale';
+import { UI_ZOOM_CHANGED_EVENT, getUiZoom } from '../../lib/uiScale';
 import {
   type MeasuredClipRow,
   selectClipPlaybackWindow,
@@ -202,7 +202,7 @@ export function useClipPlaybackWindow({
     }
 
     // Check if layout dimensions or zoom changed while hidden before updating lastObserved values
-    const currentZoom = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+    const currentZoom = typeof window !== 'undefined' ? getUiZoom() : 1;
     const widthChangedWhileHidden =
       lastObservedWidthRef.current > 0 &&
       Math.abs(scrollerRect.width - lastObservedWidthRef.current) >= 1;
@@ -334,11 +334,15 @@ export function useClipPlaybackWindow({
 
   // Panel active/inactive transitions
   React.useEffect(() => {
-    if (!panelActive) {
-      // Save anchor clip ID before deactivating
-      const rowIdx = lastCommittedFirstVisibleRowRef.current;
-      if (rowIdx != null && clipRows[rowIdx]?.[0]) {
-        savedHiddenAnchorClipIdRef.current = clipRows[rowIdx][0].id;
+    if (!panelActive || !lightweightEnabled) {
+      if (!lightweightEnabled) {
+        savedHiddenAnchorClipIdRef.current = null;
+      } else {
+        // Save anchor clip ID before deactivating
+        const rowIdx = lastCommittedFirstVisibleRowRef.current;
+        if (rowIdx != null && clipRows[rowIdx]?.[0]) {
+          savedHiddenAnchorClipIdRef.current = clipRows[rowIdx][0].id;
+        }
       }
       cancelPendingRaf();
       clearSettleTimer();
@@ -358,7 +362,7 @@ export function useClipPlaybackWindow({
     } else {
       scheduleMeasurement();
     }
-  }, [panelActive, clipRows, scheduleMeasurement, cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
+  }, [panelActive, lightweightEnabled, clipRows, scheduleMeasurement, cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
 
   // Attach scroll listener (ONLY when lightweightEnabled is true)
   React.useEffect(() => {
@@ -406,7 +410,7 @@ export function useClipPlaybackWindow({
 
   // Observe resize and zoom
   React.useEffect(() => {
-    if (!scrollerEl || !panelActive) return undefined;
+    if (!scrollerEl || !panelActive || !lightweightEnabled) return undefined;
 
     const initialRect = scrollerEl.getBoundingClientRect();
     if (lastObservedWidthRef.current === 0 && initialRect.width > 0) {
@@ -414,7 +418,7 @@ export function useClipPlaybackWindow({
       lastObservedHeightRef.current = initialRect.height;
     }
     if (lastObservedZoomRef.current === 0 && typeof window !== 'undefined') {
-      lastObservedZoomRef.current = window.devicePixelRatio;
+      lastObservedZoomRef.current = getUiZoom();
     }
 
     const handleDimensionChange = (isZoomEvent = false) => {
@@ -488,7 +492,7 @@ export function useClipPlaybackWindow({
       clearResizeTimer();
       cancelPendingRaf();
     };
-  }, [scrollerEl, panelActive, clipRows, clearResizeTimer, clearSettleTimer, scheduleMeasurement, cancelPendingRaf]);
+  }, [scrollerEl, panelActive, lightweightEnabled, clipRows, clearResizeTimer, clearSettleTimer, scheduleMeasurement, cancelPendingRaf]);
 
   // Comprehensive unmount cleanup
   React.useEffect(() => {

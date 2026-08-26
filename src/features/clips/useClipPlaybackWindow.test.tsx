@@ -6,6 +6,7 @@ import {
   type UseClipPlaybackWindowParams,
 } from './useClipPlaybackWindow';
 import { UI_ZOOM_CHANGED_EVENT } from '../../lib/uiScale';
+import * as uiScale from '../../lib/uiScale';
 
 // Controllable ResizeObserver mock
 type ResizeCallback = (entries: ResizeObserverEntry[], observer: ResizeObserver) => void;
@@ -697,6 +698,86 @@ describe('useClipPlaybackWindow', () => {
     expect(result.current.grantedClipIds).toEqual(new Set(['c2', 'c3']));
   });
 
+  it('12b. detects UI zoom change while panel was hidden on reactivation with identical width and triggers layout reset preserving deep anchor', () => {
+    let currentZoom = 1.0;
+    const zoomSpy = vi.spyOn(uiScale, 'getUiZoom').mockImplementation(() => currentZoom);
+
+    const clipRows = [
+      [{ id: 'c0' }],
+      [{ id: 'c1' }],
+      [{ id: 'c2' }],
+      [{ id: 'c3' }],
+      [{ id: 'c4' }],
+      [{ id: 'c5' }],
+      [{ id: 'c6' }],
+    ];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 200, width: 800, height: 200 },
+      rowRects: [
+        { index: 0, top: -500, bottom: -400, height: 100 },
+        { index: 1, top: -400, bottom: -300, height: 100 },
+        { index: 2, top: -300, bottom: -200, height: 100 },
+        { index: 3, top: -200, bottom: -100, height: 100 },
+        { index: 4, top: -100, bottom: 0, height: 100 },
+        { index: 5, top: 0, bottom: 100, height: 100 },
+        { index: 6, top: 100, bottom: 200, height: 100 },
+      ],
+    });
+    const onResetLayout = vi.fn();
+
+    const { result, rerender } = renderHook(
+      (props: { panelActive: boolean }) =>
+        useClipPlaybackWindow({
+          scrollerEl: dom.scroller,
+          panelActive: props.panelActive,
+          lightweightEnabled: true,
+          clipRows,
+          requestedCap: 4,
+          hardCap: 35,
+          marginPx: 0,
+          gridCols: 1,
+          onResetLayout,
+        }),
+      { initialProps: { panelActive: true } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    expect(result.current.grantedClipIds).toEqual(new Set(['c5', 'c6']));
+
+    // Hide panel
+    rerender({ panelActive: false });
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+    expect(result.current.grantedClipIds.size).toBe(0);
+
+    // Application UI zoom changes while width remains strictly identical (800px)
+    currentZoom = 1.25;
+
+    // Reactivate panel
+    rerender({ panelActive: true });
+
+    // Reactivation must not measure synchronously!
+    expect(result.current.grantedClipIds.size).toBe(0);
+    expect(onResetLayout).not.toHaveBeenCalled();
+
+    // Advance to next frame
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    // Deep anchor 'c5' is preserved and reset exactly once
+    expect(onResetLayout).toHaveBeenCalledTimes(1);
+    expect(onResetLayout).toHaveBeenCalledWith('c5');
+    expect(result.current.layoutGeneration).toBe(1);
+    expect(result.current.grantedClipIds).toEqual(new Set(['c5', 'c6']));
+
+    zoomSpy.mockRestore();
+  });
+
   it('13. releases players and does not grant top-of-episode clips when grid is zero-sized, preserving anchor', () => {
     const clipRows = [
       [{ id: 'c0' }],
@@ -900,6 +981,8 @@ describe('useClipPlaybackWindow', () => {
       rowRects: [{ index: 0, top: 0, bottom: 100, height: 100 }],
     });
 
+    const onResetLayout = vi.fn();
+
     const { unmount } = renderHook(() =>
       useClipPlaybackWindow({
         scrollerEl: dom.scroller,
@@ -910,6 +993,7 @@ describe('useClipPlaybackWindow', () => {
         hardCap: 35,
         marginPx: 0,
         gridCols: 1,
+        onResetLayout,
       }),
     );
 
@@ -927,10 +1011,15 @@ describe('useClipPlaybackWindow', () => {
     // Unmount during hold
     unmount();
 
-    // Advancing timers beyond 140ms should not throw or cause warning
+    // Verify all timers are cleared on unmount
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Advancing timers beyond 140ms produces no calls or delayed measurement/reset callbacks
     act(() => {
-      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(500);
     });
+
+    expect(onResetLayout).not.toHaveBeenCalled();
   });
 
   it('17. does not install scroll listeners when lightweightEnabled is false', () => {
@@ -1000,5 +1089,51 @@ describe('useClipPlaybackWindow', () => {
     });
 
     expect(result.current.grantedClipIds).toEqual(new Set(['c0']));
+  });
+
+  it('19. does not install resize observer, zoom listener, or change layout generation when lightweightEnabled is false', () => {
+    const clipRows = [[{ id: 'c0' }], [{ id: 'c1' }]];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
+      rowRects: [{ index: 0, top: 0, bottom: 100, height: 100 }],
+    });
+    const onResetLayout = vi.fn();
+
+    const windowAddEventListenerSpy = vi.spyOn(window, 'addEventListener');
+
+    const { result } = renderHook(() =>
+      useClipPlaybackWindow({
+        scrollerEl: dom.scroller,
+        panelActive: true,
+        lightweightEnabled: false,
+        clipRows,
+        requestedCap: 1,
+        hardCap: 35,
+        marginPx: 0,
+        gridCols: 1,
+        onResetLayout,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    // UI zoom listener not attached
+    expect(windowAddEventListenerSpy).not.toHaveBeenCalledWith(UI_ZOOM_CHANGED_EVENT, expect.any(Function));
+
+    // Simulate width resize
+    dom.scroller.getBoundingClientRect = vi.fn(() => ({
+      top: 0, bottom: 100, left: 0, right: 500, width: 500, height: 100, x: 0, y: 0, toJSON: () => {},
+    }));
+
+    // Advance 300ms
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    // Layout generation remains unchanged, onResetLayout never called
+    expect(result.current.layoutGeneration).toBe(0);
+    expect(onResetLayout).not.toHaveBeenCalled();
   });
 });

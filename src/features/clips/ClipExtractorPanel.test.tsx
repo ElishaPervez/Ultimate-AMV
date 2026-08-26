@@ -64,6 +64,7 @@ vi.mock('react-virtuoso', () => ({
         'data-initial-top-index': initialIndex,
         ref: (node: HTMLDivElement | null) => {
           if (node) {
+            (node as unknown as { __simulateRangeChanged?: (range: { startIndex: number; endIndex: number }) => void }).__simulateRangeChanged = props.rangeChanged;
             node.getBoundingClientRect = () => ({
               top: 0,
               bottom: 800,
@@ -1033,6 +1034,7 @@ function installScenePanelMocks(featherweightPreviews: boolean) {
     hasH264Nvenc: false,
     hasAv1Nvenc: false,
   }))
+  mockInvoke('clip_preview_generate_batch', () => JSON.stringify({ type: 'done', items: [] }))
   mockInvoke('discord_set_state', () => null)
   mockInvoke('discord_clear', () => null)
 }
@@ -1269,32 +1271,28 @@ describe('ClipExtractorPanel â final review regressions', () => {
     })
   })
 
-  it('preserves top visible clip anchor when changing columns in classic preview mode', async () => {
+  it('preserves top visible clip anchor when changing columns in classic preview mode and ignores width resize', async () => {
     installScenePanelMocks(false)
-    mockInvoke('clip_extract', () => sceneExtractionResult('C:\\episode.mkv'))
-    mockDialogOpen.mockResolvedValueOnce(['C:\\episode.mkv'])
-
-    const user = userEvent.setup()
-    render(<ClipExtractorPanel active />)
-    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
-    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
-    await screen.findByText('Scene 1')
-
-    const twoColButton = screen.getByRole('button', { name: /2 columns/i })
-    await user.click(twoColButton)
-
-    const scroller = await screen.findByTestId('scene-virtual-scroller')
-    expect(scroller).toBeInTheDocument()
-    expect(scroller.getAttribute('data-initial-top-index')).toBe('0')
-  })
-
-  it('proves the same granted clip IDs control playback plan probes, proxy builds, loading states, and live player mounting', async () => {
-    installScenePanelMocks(true)
-    mockInvoke('clip_extract', () => sceneExtractionResult('C:\\episode.mkv'))
-    mockInvoke('clip_playback_plan', () => proxyPlaybackPlan())
-    let resolveProxy!: (value: string) => void
-    mockInvoke('build_source_proxy', () => new Promise<string>((resolve) => {
-      resolveProxy = resolve
+    const scenes: Array<{ source: string; start: number; end: number; index: number; label: string }> = []
+    for (let i = 0; i < 40; i += 1) {
+      scenes.push({
+        source: 'C:\\episode.mkv',
+        start: i * 2,
+        end: (i + 1) * 2,
+        index: i,
+        label: `Scene ${i + 1}`,
+      })
+    }
+    mockInvoke('clip_extract', () => JSON.stringify({
+      type: 'done',
+      mode: 'cpu',
+      input: 'C:\\episode.mkv',
+      scenes,
+      cuts: [],
+      sceneCount: 40,
+      fps: 24,
+      duration: 80,
+      totalSeconds: 0.1,
     }))
     mockDialogOpen.mockResolvedValueOnce(['C:\\episode.mkv'])
 
@@ -1304,25 +1302,131 @@ describe('ClipExtractorPanel â final review regressions', () => {
     await user.click(await screen.findByRole('button', { name: /extract clips/i }))
     await screen.findByText('Scene 1')
 
-    // 1. Playback plan probe was invoked for granted clip source
-    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([cmd]) => cmd === 'clip_playback_plan')).toBe(true))
+    const scroller = await screen.findByTestId('scene-virtual-scroller')
+    expect(scroller).toBeInTheDocument()
 
-    // 2. Proxy build was invoked for granted clip source
-    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([cmd]) => cmd === 'build_source_proxy')).toBe(true))
+    // 1 & 2. Put virtual grid at a deep visible row: row 6 (clips 24..27 in 4-col mode, top clip is clip 24)
+    act(() => {
+      const sim = (scroller as unknown as { __simulateRangeChanged?: (range: { startIndex: number; endIndex: number }) => void }).__simulateRangeChanged
+      if (sim) {
+        sim({ startIndex: 6, endIndex: 8 })
+      }
+    })
 
-    // 3. Tile is in loading state during proxy build
-    const tile = () => document.querySelector('.clip-preview-tile-wrapper') as HTMLElement
-    expect(tile().querySelector('.clip-video-placeholder.is-loading')).toBeInTheDocument()
+    // 3. Change column count to 2
+    const twoColButton = screen.getByRole('button', { name: /2 columns/i })
+    await user.click(twoColButton)
 
-    // 4. Resolve proxy
+    // 4. Confirm clip 24 remains the anchor after remounting (in 2-column mode: row 24 / 2 = 12)
+    const scrollerAfterRemount = await screen.findByTestId('scene-virtual-scroller')
+    expect(scrollerAfterRemount).toBeInTheDocument()
+    expect(scrollerAfterRemount.getAttribute('data-initial-top-index')).toBe('12')
+
+    // 5. While still deep in classic mode, simulate a width resize
+    act(() => {
+      scrollerAfterRemount.getBoundingClientRect = () => ({
+        top: 0,
+        bottom: 800,
+        left: 0,
+        right: 900,
+        width: 900,
+        height: 800,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      })
+      window.dispatchEvent(new Event('resize'))
+    })
+
+    // 6. Confirm lightweight layout generation did not change and grid did not remount or jump to row 0
+    expect(scrollerAfterRemount.getAttribute('data-initial-top-index')).toBe('12')
+  })
+
+  it('proves the same granted clip IDs control playback plan probes, proxy builds, loading states, and live player mounting while ungranted clips receive none', async () => {
+    installScenePanelMocks(true)
+
+    const scenes: Array<{ source: string; start: number; end: number; index: number; label: string }> = []
+    for (let i = 0; i < 24; i += 1) {
+      scenes.push({
+        source: 'C:\\episode-1.mkv',
+        start: i * 2,
+        end: (i + 1) * 2,
+        index: i,
+        label: `Scene ${i + 1}`,
+      })
+    }
+    for (let i = 24; i < 32; i += 1) {
+      scenes.push({
+        source: 'C:\\episode-2.mkv',
+        start: (i - 24) * 2,
+        end: (i - 24 + 1) * 2,
+        index: i,
+        label: `Scene ${i + 1}`,
+      })
+    }
+
+    mockInvoke('clip_extract', () => JSON.stringify({
+      type: 'done',
+      mode: 'cpu',
+      input: 'C:\\episode-1.mkv',
+      scenes,
+      cuts: [],
+      sceneCount: 32,
+      fps: 24,
+      duration: 64,
+      totalSeconds: 0.1,
+    }))
+
+    mockInvoke('clip_playback_plan', () => proxyPlaybackPlan())
+    let resolveProxy1!: (value: string) => void
+    mockInvoke('build_source_proxy', (args: { sourcePath: string }) => new Promise<string>((resolve) => {
+      if (args.sourcePath === 'C:\\episode-1.mkv') {
+        resolveProxy1 = resolve
+      }
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode-1.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await screen.findByText('Scene 1')
+
+    // 1. Playback plan probe was invoked for granted source (Ep1) but NOT ungranted source (Ep2)
+    await waitFor(() => expect(
+      mockInvokeFn.mock.calls.some(([cmd, args]) => cmd === 'clip_playback_plan' && (args as { sourcePath?: string } | undefined)?.sourcePath === 'C:\\episode-1.mkv')
+    ).toBe(true))
+    expect(
+      mockInvokeFn.mock.calls.some(([cmd, args]) => cmd === 'clip_playback_plan' && (args as { sourcePath?: string } | undefined)?.sourcePath === 'C:\\episode-2.mkv')
+    ).toBe(false)
+
+    // 2. Proxy build was invoked for granted source (Ep1) but NOT ungranted source (Ep2)
+    await waitFor(() => expect(
+      mockInvokeFn.mock.calls.some(([cmd, args]) => cmd === 'build_source_proxy' && (args as { sourcePath?: string } | undefined)?.sourcePath === 'C:\\episode-1.mkv')
+    ).toBe(true))
+    expect(
+      mockInvokeFn.mock.calls.some(([cmd, args]) => cmd === 'build_source_proxy' && (args as { sourcePath?: string } | undefined)?.sourcePath === 'C:\\episode-2.mkv')
+    ).toBe(false)
+
+    // 3. Granted card shows loading state, ungranted card does not
+    const allTiles = document.querySelectorAll('.clip-preview-tile-wrapper')
+    expect(allTiles.length).toBeGreaterThanOrEqual(25)
+    const grantedTile = allTiles[0]
+    const ungrantedTile = allTiles[allTiles.length - 1]
+
+    expect(grantedTile.querySelector('.clip-video-placeholder.is-loading')).toBeInTheDocument()
+    expect(ungrantedTile.querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument()
+
+    // 4. Resolve proxy for granted source
     await act(async () => {
-      resolveProxy('C:\\cache\\episode-proxy.mp4')
+      resolveProxy1('C:\\cache\\episode-1-proxy.mp4')
     })
 
-    // 5. Video player is mounted for the granted clip
+    // 5. Video player is mounted for the granted clip, but NOT for the ungranted clip
     await waitFor(() => {
-      expect(document.querySelector('.clip-offset-video')).toBeInTheDocument()
-      expect(document.querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument()
+      expect(grantedTile.querySelector('.clip-offset-video')).toBeInTheDocument()
+      expect(grantedTile.querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument()
     })
+    expect(ungrantedTile.querySelector('.clip-offset-video')).not.toBeInTheDocument()
   })
 })
