@@ -3588,15 +3588,6 @@ fn generate_source_proxy(
     let tmp_output = cache_dir.join(format!("{proxy_key}.{}.tmp.mp4", std::process::id()));
     let _ = fs::remove_file(&tmp_output);
 
-    emit_conversion_progress(
-        &window,
-        "starting",
-        Some(0.0),
-        "Building preview proxy...".to_string(),
-        None,
-        None,
-    );
-
     let primary = run_source_proxy_job(
         &window, &ffmpeg, &input, &tmp_output, duration, &source_path, use_nvenc, &color, h,
     );
@@ -3774,9 +3765,9 @@ fn run_source_proxy_job(
     ]);
 
     // Forward a "proxy-progress" side-channel { sourcePath, percent, stage } so
-    // the grid can show which source is building. The per-tick percent rides the
-    // shared progress reader via the tap; we bookend it with a "starting" tick
-    // and a terminal "complete"/"error" tick so the frontend sees the lifecycle.
+    // the grid can show which source is building. The tapped FFmpeg runner
+    // suppresses the shared conversion stream, and this source-specific stream
+    // is bookended with "starting" and terminal "complete"/"error" ticks.
     let _ = window.emit(
         "proxy-progress",
         json!({ "sourcePath": source_path, "percent": 0.0, "stage": "starting" }),
