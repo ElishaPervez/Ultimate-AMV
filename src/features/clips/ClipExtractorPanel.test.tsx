@@ -50,14 +50,26 @@ vi.mock('react-virtuoso', () => ({
   Virtuoso: (props: {
     data: unknown[]
     itemContent: (index: number, item: unknown) => React.ReactNode
+    scrollerRef?: (el: HTMLElement | null) => void
   }) => React.createElement(
     'div',
-    { 'data-testid': 'scene-virtual-scroller' },
-    props.data.map((item, index) => React.createElement(
-      React.Fragment,
-      { key: index },
-      props.itemContent(index, item),
-    )),
+    {
+      'data-testid': 'scene-virtual-scroller',
+      ref: (node: HTMLDivElement | null) => {
+        if (props.scrollerRef) {
+          props.scrollerRef(node)
+        }
+      },
+    },
+    React.createElement(
+      'div',
+      { 'data-testid': 'virtuoso-item-list' },
+      props.data.map((item, index) => React.createElement(
+        'div',
+        { key: index, 'data-index': index },
+        props.itemContent(index, item),
+      )),
+    ),
   ),
 }))
 
@@ -70,7 +82,6 @@ import {
   ClipExtractorPanel,
   GRID_GRAB_DRAG_THRESHOLD_PX,
   isPastDragThreshold,
-  isResizeDrivenGridScroll,
   computeSelectionMarkers,
   clipBitrateDefault,
   clipQualitySpec,
@@ -201,17 +212,6 @@ describe('isPastDragThreshold — click-vs-drag decision', () => {
     expect(isPastDragThreshold(4, 4, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(true)
     // exactly on the threshold is NOT past it (strict >)
     expect(isPastDragThreshold(GRID_GRAB_DRAG_THRESHOLD_PX, 0, GRID_GRAB_DRAG_THRESHOLD_PX)).toBe(false)
-  })
-})
-
-describe('window resize scroll classification', () => {
-  it('does not treat layout movement during the resize grace period as a user fling', () => {
-    expect(isResizeDrivenGridScroll(1_100, 1_240)).toBe(true)
-  })
-
-  it('restores normal fling detection as soon as the resize grace period ends', () => {
-    expect(isResizeDrivenGridScroll(1_240, 1_240)).toBe(false)
-    expect(isResizeDrivenGridScroll(1_241, 1_240)).toBe(false)
   })
 })
 

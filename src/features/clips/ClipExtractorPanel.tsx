@@ -12,26 +12,15 @@ import {
   CLIP_PREVIEW_BATCH_SIZE,
   CLIP_PREVIEW_CPU_BATCH_CONCURRENCY,
   CLIP_PREVIEW_GPU_BATCH_CONCURRENCY,
-  FAST_SCROLL_VELOCITY_PX_PER_FRAME,
   GRID_VIDEO_OVERSCAN_ROWS,
   MAX_GRID_AUTOPLAYERS,
   MAX_GRID_VIDEO_PLAYERS_CEILING,
-  PREVIEW_PLAY_AREA_MARGIN_PX,
 } from "../../lib/constants";
-
-// How long after the scroll velocity drops below the fast-fling threshold the
-// `fastScrolling` flag stays set before clearing (ms). One short settle so the
-// geometry mount set recomputes promptly when the user releases a fling.
-const FAST_SCROLL_SETTLE_MS = 140;
-// Window resizing changes both the row height and Virtuoso's scrollTop. Those
-// layout-driven scroll events can look as fast as a user fling, but holding the
-// old mount set during them leaves the newly exposed rows black. Ignore fling
-// detection briefly while the viewport is being laid out at its new size.
-const VIEWPORT_RESIZE_SCROLL_GRACE_MS = 240;
-/* DEV TOOLS: featherweight tunables — the grid reads margins / max-video cap /
- * the DEV featherweight override from this store. In prod the store equals the
- * baked constants, so reading it is a constant read. */
-import { usePreviewTunables } from "../../dev/previewTunables";
+import {
+  reportGridPlaybackDiagnostics,
+  usePreviewTunables,
+} from "../../dev/previewTunables";
+import { useClipPlaybackWindow } from "./useClipPlaybackWindow";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, fileStem, normalizeSelectedPaths } from "../../lib/paths";
@@ -246,22 +235,6 @@ export function isPastDragThreshold(dx: number, dy: number, threshold: number): 
   return Math.hypot(dx, dy) > threshold;
 }
 
-export function isResizeDrivenGridScroll(nowMs: number, resizeGraceUntilMs: number): boolean {
-  return nowMs < resizeGraceUntilMs;
-}
-
-/**
- * The vertical positions (as a percent of the scroll track height) at which to
- * draw a selected-clip marker on the custom scrollbar overlay. One marker per
- * ROW that contains at least one selected clip (rows collapse duplicates so a
- * fully-selected row shows a single tick, not `gridCols` stacked ticks). The
- * marker sits at the CENTRE of its row's band — ((row + 0.5) / totalRows) — so it
- * lines up with roughly where that row sits in the full scrollable list.
- *
- * Recompute whenever selection OR column count changes: the same clip lands on a
- * different row when the grid re-columns, so its marker must move. Pure (no React)
- * so the position math is unit-testable without a real Virtuoso/layout.
- */
 export function computeSelectionMarkers(params: {
   selectedIds: Set<string>;
   clipIds: string[];
@@ -283,102 +256,6 @@ export function computeSelectionMarkers(params: {
   }
   markers.sort((a, b) => a.row - b.row);
   return markers;
-}
-
-export function computeGeometryMountVideoIds(params: {
-  clipRows: { id: string }[][];
-  cap: number;
-  rowHeightPx: number;
-  viewportHeightPx: number;
-  scrollTopPx: number;
-  rowsInView: number;
-  marginPx: number;
-}): Set<string> {
-  const { clipRows, cap, rowHeightPx, viewportHeightPx, scrollTopPx, rowsInView, marginPx } = params;
-  const ids = new Set<string>();
-  if (clipRows.length <= 0 || cap <= 0) return ids;
-  const lastRow = clipRows.length - 1;
-
-  let firstVisibleRow: number;
-  let lastVisibleRow: number;
-  if (rowHeightPx > 0 && viewportHeightPx > 0) {
-    firstVisibleRow = Math.floor(scrollTopPx / rowHeightPx);
-    lastVisibleRow = Math.ceil((scrollTopPx + viewportHeightPx) / rowHeightPx) - 1;
-  } else {
-    // Geometry not measured yet (initial / pre-mount): fall back to the top
-    // rows that fill the viewport (rowsInView), or the first row at minimum.
-    firstVisibleRow = 0;
-    lastVisibleRow = (rowsInView > 0 ? rowsInView : 1) - 1;
-  }
-
-  // VIEWPORT-AWARE CAP FLOOR. Count the tiles ACTUALLY intersecting the viewport
-  // (the visible-row span × that span's columns, clamped to the real clip count).
-  // The effective cap is floored at this count so EVERY visible tile always
-  // mounts — a tall/dense viewport (~16–24 tiles at 4 cols) is never left with
-  // dark-but-visible tiles when the knob cap (prod 12) sits below the visible
-  // band. The incoming `cap` can only RAISE the cap above this floor (pre-warm
-  // headroom); the caller has already clamped it to MAX_GRID_VIDEO_PLAYERS_CEILING.
-  const clampedFirstVisible = Math.max(0, Math.min(firstVisibleRow, lastRow));
-  const clampedLastVisible = Math.max(clampedFirstVisible, Math.min(lastVisibleRow, lastRow));
-  let visibleTileCount = 0;
-  for (let r = clampedFirstVisible; r <= clampedLastVisible; r += 1) {
-    visibleTileCount += clipRows[r]?.length ?? 0;
-  }
-  // The hard ceiling bounds the top even above the visible-tile floor: in the
-  // pathological case where the viewport shows MORE tiles than the ceiling
-  // (only reachable at a tiny row height / huge viewport), we accept a dead-zone
-  // rather than blow past the decoder safety limit. `cap` is already
-  // ceiling-clamped by the caller; re-clamp here so the floor can't escape it.
-  const effectiveCap = Math.min(
-    MAX_GRID_VIDEO_PLAYERS_CEILING,
-    Math.max(cap, visibleTileCount),
-  );
-
-  // PHASE 1 — grant EVERY VISIBLE tile first. Because effectiveCap is floored at
-  // visibleTileCount, this fits within the cap (except the pathological case
-  // where the viewport itself shows more tiles than the ceiling — then we honor
-  // the ceiling, granting the visible tiles nearest the top first and accepting a
-  // dead-zone rather than exceeding the decoder safety limit). Granting visible
-  // tiles unconditionally — NOT via the center-distance walk — is what guarantees
-  // no still-visible tile is dropped in favor of a nearer-to-center PRE-WARM tile
-  // on an asymmetric band (the DEFECT-A dead-zone).
-  for (let r = clampedFirstVisible; r <= clampedLastVisible; r += 1) {
-    for (const clip of clipRows[r] ?? []) {
-      ids.add(clip.id);
-      if (ids.size >= effectiveCap) return ids;
-    }
-  }
-
-  // PHASE 2 — fill the remaining budget (effectiveCap - visible) with PRE-WARM
-  // tiles. Extend the band by the pre-play margin (250px -> rows) on each side so
-  // a tile is already decoding by the time it scrolls into view, then walk
-  // OUTWARD from the viewport-center row (nearest first) so the discretionary
-  // headroom favors the rows closest to the middle of what the user sees. Visible
-  // rows are skipped here (already granted in phase 1).
-  const marginRows = rowHeightPx > 0 ? Math.ceil(marginPx / rowHeightPx) : 1;
-  const bandFirst = Math.max(0, Math.min(firstVisibleRow - marginRows, lastRow));
-  const bandLast = Math.max(bandFirst, Math.min(lastVisibleRow + marginRows, lastRow));
-  const centerRow = Math.max(
-    bandFirst,
-    Math.min(Math.floor((firstVisibleRow + lastVisibleRow) / 2), bandLast),
-  );
-  for (let offset = 0; bandFirst + offset <= bandLast || centerRow - offset >= bandFirst; offset += 1) {
-    const rowsToVisit = offset === 0 ? [centerRow] : [centerRow - offset, centerRow + offset];
-    let visitedAny = false;
-    for (const r of rowsToVisit) {
-      if (r < bandFirst || r > bandLast) continue;
-      visitedAny = true;
-      // Visible rows are already granted; only pre-warm rows add tiles here.
-      if (r >= clampedFirstVisible && r <= clampedLastVisible) continue;
-      for (const clip of clipRows[r] ?? []) {
-        ids.add(clip.id);
-        if (ids.size >= effectiveCap) return ids;
-      }
-    }
-    // Stop once the outward walk has exhausted the band on both sides.
-    if (!visitedAny && centerRow - offset < bandFirst && centerRow + offset > bandLast) break;
-  }
-  return ids;
 }
 
 export function collectProxySourcesForActiveClips({
@@ -451,29 +328,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     "smart-cut": 0,
   });
   const [visibleRowRange, setVisibleRowRange] = React.useState<{ startIndex: number; endIndex: number } | null>(null);
-  /* DEV TOOLS: measured scroll-viewport geometry for viewport-fill decoder
-   * windowing. Only populated in featherweight mode (the ResizeObserver below
-   * is gated on featherweightActive && hasClips); flag-off these stay 0 and the
-   * video budget falls back to the tunable seed, so behavior is unchanged. */
-  const [viewportHeightPx, setViewportHeightPx] = React.useState(0);
-  const [viewportWidthPx, setViewportWidthPx] = React.useState(0);
-  /* DEV TOOLS (featherweight only): the scroller's current scrollTop, throttled
-   * to one update per rAF. Drives the central geometry-driven mount set (the SOLE
-   * authoritative, capped set of tiles allowed to mount a live offset <video>).
-   * Flag-off this stays 0 and is never read. */
-  const [scrollTopPx, setScrollTopPx] = React.useState(0);
-  /* DEV TOOLS (featherweight only): transient FAST-FLING flag. Set from real
-   * scroll VELOCITY (|scrollTop delta| per rAF frame, NOT Virtuoso's isScrolling,
-   * which is true for slow scroll too). While true the panel grants NO new
-   * offset-<video> mounts (it holds the last committed set) so a fling allocates
-   * no new decoders; cleared ~140ms after velocity drops, at which point the
-   * geometry-based set recomputes immediately (no dead-zone). */
-  const [fastScrolling, setFastScrolling] = React.useState(false);
-  // Held as state (not a ref) so the ResizeObserver effect re-runs the moment
-  // Virtuoso hands us the scroll element via scrollerRef — a ref wouldn't
-  // re-trigger the effect and the first measurement could be missed.
+  // Held as state (not a ref) so useClipPlaybackWindow re-runs the moment
+  // Virtuoso hands us the scroll element via scrollerRef.
   const [scrollerEl, setScrollerEl] = React.useState<HTMLElement | null>(null);
-  const viewportResizeGraceUntilRef = React.useRef(0);
   const [result, setResult] = React.useState<ClipExtractionResult | null>(null);
   const [previewStates, setPreviewStates] = React.useState<Record<string, ClipPreviewState>>({});
   const [error, setError] = React.useState<string | null>(null);
@@ -1413,243 +1270,54 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     };
   }, [scrollerEl, hasClips]);
 
-  /* DEV TOOLS: measure the scroll viewport so the offset-<video> budget can be
-   * sized to FILL the visible area (+ a small overscan) instead of a fixed cap.
-   * Virtuoso's scrollerRef hands us the real scroll element (the
-   * ClipPreviewScroller div). Only observe in featherweight mode with clips —
-   * flag-off this never attaches and the geometry stays 0. */
-  React.useEffect(() => {
-    if (!featherweightActive || !hasClips || !scrollerEl || typeof ResizeObserver === "undefined") {
-      // Reset so a flag flip / cleared grid / lost element can't leave a stale
-      // measurement feeding the budget memo (memo then falls back to tunable).
-      setViewportHeightPx(0);
-      setViewportWidthPx(0);
-      return;
-    }
-    const el = scrollerEl;
-    let lastWidth = el.clientWidth;
-    let lastHeight = el.clientHeight;
-    const markViewportResize = () => {
-      viewportResizeGraceUntilRef.current = performance.now() + VIEWPORT_RESIZE_SCROLL_GRACE_MS;
-      // Release any mount set held for a preceding fling immediately. The next
-      // measured width/height render grants every tile exposed by the new size.
-      setFastScrolling(false);
-    };
-    const measure = () => {
-      const height = el.clientHeight;
-      const width = el.clientWidth;
-      if (width !== lastWidth || height !== lastHeight) {
-        lastWidth = width;
-        lastHeight = height;
-        markViewportResize();
-      }
-      setViewportHeightPx(height);
-      setViewportWidthPx(width);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    // Window resize fires before Virtuoso adjusts scrollTop, so it starts the
-    // grace period early enough to cover the layout-driven scroll event.
-    window.addEventListener("resize", markViewportResize);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", markViewportResize);
-    };
-    // scrollerEl changes when Virtuoso (re)mounts the scroll element — e.g. when
-    // hasClips toggles — so re-running on it picks up the fresh target.
-  }, [featherweightActive, hasClips, scrollerEl]);
-
-  /* DEV TOOLS (featherweight only): track the scroller's scrollTop AND its
-   * per-frame velocity so the central mount set can be computed from real scroll
-   * GEOMETRY and FAST-FLING suppression can key on actual velocity (not
-   * Virtuoso's isScrolling, which is true for slow scroll too).
-   * THROTTLED to one state update per requestAnimationFrame — a raw scroll
-   * handler would re-render the panel on every wheel tick. Flag-off (or before
-   * Virtuoso hands us the element) this never attaches; scrollTop stays 0 and
-   * fastScrolling stays false. */
-  React.useEffect(() => {
-    if (!featherweightActive || !hasClips || !scrollerEl) {
-      setScrollTopPx(0);
-      setFastScrolling(false);
-      return undefined;
-    }
-    const el = scrollerEl;
-    let rafId = 0;
-    let lastTopPx = el.scrollTop;
-    let settleTimer = 0;
-    const clearSettle = () => {
-      if (settleTimer) {
-        window.clearTimeout(settleTimer);
-        settleTimer = 0;
-      }
-    };
-    const onScroll = () => {
-      if (rafId) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = 0;
-        const top = el.scrollTop;
-        // Velocity = px moved since the previous rAF sample. A real fling moves
-        // many px/frame; a careful drag stays well under the threshold.
-        const velocity = Math.abs(top - lastTopPx);
-        lastTopPx = top;
-        setScrollTopPx(top);
-        if (isResizeDrivenGridScroll(performance.now(), viewportResizeGraceUntilRef.current)) {
-          // The window changed size; this scrollTop jump came from layout, not
-          // from the user. Let the new viewport mount set replace the old one.
-          clearSettle();
-          setFastScrolling(false);
-          return;
+  const handleResetLayout = React.useCallback(
+    (anchorClipId: string | null) => {
+      if (anchorClipId) {
+        const idx = displayedClips.findIndex((c) => c.id === anchorClipId);
+        if (idx >= 0) {
+          anchorClipIndexRef.current = idx;
         }
-        if (velocity > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
-          setFastScrolling(true);
-          // Re-arm the settle timer on every fast frame so the flag clears only
-          // ~140ms AFTER the fling actually slows below the threshold.
-          clearSettle();
-          settleTimer = window.setTimeout(() => {
-            settleTimer = 0;
-            setFastScrolling(false);
-          }, FAST_SCROLL_SETTLE_MS);
-        }
-      });
-    };
-    // Seed the resting scrollTop immediately (the element may already be
-    // scrolled when this effect re-attaches after a remount).
-    lastTopPx = el.scrollTop;
-    setScrollTopPx(el.scrollTop);
-    setFastScrolling(false);
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-      if (rafId) cancelAnimationFrame(rafId);
-      clearSettle();
-    };
-  }, [featherweightActive, hasClips, scrollerEl]);
+      }
+    },
+    [displayedClips],
+  );
 
-  /* DEV TOOLS: derive per-row pixel geometry from the real CSS layout so we can
-   * count how many rows fill the viewport. Mirrors src/styles/clips.css:
-   *   .clip-preview-grid-scroller { padding-right: 10px }
-   *   .clip-preview-grid-row { gap: 12px; padding-bottom: 12px }
-   *   .clip-preview-tile { aspect-ratio: 16 / 9 }
-   */
-  // HOISTED out of rowsInView so the viewport-tight visible-row floor can reuse
-  // the same per-row pixel height. 0 when geometry isn't measured yet.
-  const rowHeightPx = React.useMemo(() => {
-    if (viewportHeightPx <= 0 || viewportWidthPx <= 0) return 0;
-    const ROW_GAP = 12; // column gap == row padding-bottom
-    const SCROLLBAR_PAD = 10; // scroller padding-right
-    const usableWidth = viewportWidthPx - SCROLLBAR_PAD;
-    if (usableWidth <= 0) return 0;
-    const tileWidth = (usableWidth - (gridCols - 1) * ROW_GAP) / gridCols;
-    if (tileWidth <= 0) return 0;
-    const tileHeight = (tileWidth * 9) / 16;
-    const rowHeight = tileHeight + ROW_GAP; // tile + padding-bottom between rows
-    return rowHeight > 0 ? rowHeight : 0;
-  }, [viewportHeightPx, viewportWidthPx, gridCols]);
+  const {
+    grantedClipIds,
+    firstVisibleRow,
+    lastVisibleRow,
+    layoutGeneration,
+    diagnostics: playbackDiagnostics,
+  } = useClipPlaybackWindow({
+    scrollerEl,
+    panelActive: active,
+    lightweightEnabled: featherweightActive,
+    clipRows,
+    requestedCap: tunables.maxGridVideoPlayers,
+    hardCap: MAX_GRID_VIDEO_PLAYERS_CEILING,
+    marginPx: tunables.playAreaMarginPx,
+    gridCols,
+    renderedRange: visibleRowRange,
+    onResetLayout: handleResetLayout,
+  });
 
-  const rowsInView = React.useMemo(() => {
-    if (rowHeightPx <= 0 || viewportHeightPx <= 0) return 0;
-    return Math.ceil(viewportHeightPx / rowHeightPx);
-  }, [rowHeightPx, viewportHeightPx]);
-
-  /* DEV TOOLS (featherweight only) — CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount
-   * set. This is the SOLE authority for which tiles may mount a live offset
-   * <video>; it REPLACES the retired per-tile IntersectionObserver mount decision
-   * (useInPlayArea) so the live-<video> union can never exceed a known cap.
-   *
-   * Computed from scroll GEOMETRY (scrollTop + measured rowHeight + viewport
-   * height), NEVER from Virtuoso's inflated overscan range and NEVER from
-   * offsetMetrics.activeCount (which is incremented AFTER a <video> mounts — a
-   * feedback loop). Recomputed CONTINUOUSLY (cheap) so slow scroll pre-warms.
-   *
-   *  1. Eligible band = the visible rows EXTENDED by `marginRows` on each side
-   *     (the 250px pre-play pre-warm preserved as rows).
-   *  2. The effective cap is FLOORED at the visible-tile count so every visible
-   *     tile always mounts (no cap-below-visible dead-zone), and ceiling-bounded
-   *     at the top:
-   *       effectiveCap = min(
-   *         MAX_GRID_VIDEO_PLAYERS_CEILING,
-   *         max(visibleTileCount, max(1, tunables.maxGridVideoPlayers)))
-   *     `tunables.maxGridVideoPlayers` (the repurposed live knob, dialed in the
-   *     DEV panel against the activeCount readout) can only RAISE the cap above
-   *     the visible floor to add pre-warm headroom; the hard ceiling always
-   *     bounds the top. The floor + ceiling clamp lives inside
-   *     computeGeometryMountVideoIds; this memo passes the ceiling-clamped knob.
-   *  3. From the eligible tiles, ORDER by distance from the viewport-CENTER row
-   *     and take the nearest up-to-effectiveCap (so when the cap is below the
-   *     band, the visible tiles — nearest the center — are granted first).
-   *
-   * Fast-fling SUPPRESSION is applied OUTSIDE this memo (see mayMountVideoIds):
-   * while `fastScrolling` is true the panel holds the last committed set so a
-   * fling allocates no NEW decoders; this memo keeps computing eligibility so the
-   * instant the fling clears the visible tiles are granted at once (no dead-zone). */
-  const geometryMountVideoIds = React.useMemo(() => {
-    if (!featherweightActive) return new Set<string>();
-    // Repurpose the (formerly inert) "Max grid players" knob as the LIVE cap,
-    // ceiling-clamped here so it can never push past the absolute hard ceiling
-    // (which, at 35, keeps even the 2x StrictMode transient — plus the play-area
-    // gate's hover +1 — under the decoder safety limit: (35 + 1) × 2 = 72 < 75).
-    // computeGeometryMountVideoIds then FLOORS this at the visible-tile count so
-    // every visible tile mounts (no dead-zone) and re-applies the ceiling at the
-    // top.
-    const cap = Math.min(
-      MAX_GRID_VIDEO_PLAYERS_CEILING,
-      Math.max(1, Math.floor(tunables.maxGridVideoPlayers) || 1),
-    );
-    return computeGeometryMountVideoIds({
-      clipRows,
-      cap,
-      rowHeightPx,
-      viewportHeightPx,
-      scrollTopPx,
-      rowsInView,
-      marginPx: PREVIEW_PLAY_AREA_MARGIN_PX,
-    });
-  }, [featherweightActive, clipRows, rowHeightPx, viewportHeightPx, scrollTopPx, rowsInView, tunables.maxGridVideoPlayers]);
-
-  /* DEV TOOLS (featherweight only) — FAST-FLING HOLD. While `fastScrolling` is
-   * true we do NOT grant new mounts: we return the LAST committed geometry set
-   * (held in a ref) so a fling allocates zero new decoders. The instant
-   * fastScrolling clears (settle timeout), the live geometry set is committed and
-   * returned immediately — the now-visible tiles mount at once, no dead-zone.
-   * Flag-off this is the empty set (geometryMountVideoIds is empty). */
-  const lastCommittedMountIdsRef = React.useRef<Set<string>>(new Set());
-  const mayMountVideoIds = React.useMemo(() => {
-    if (fastScrolling) {
-      // Hold: serve the last set committed before the fling started.
-      return lastCommittedMountIdsRef.current;
+  React.useEffect(() => {
+    if (import.meta.env.DEV) {
+      reportGridPlaybackDiagnostics(playbackDiagnostics);
     }
-    lastCommittedMountIdsRef.current = geometryMountVideoIds;
-    return geometryMountVideoIds;
-  }, [fastScrolling, geometryMountVideoIds]);
+  }, [playbackDiagnostics]);
 
   const activeGridClipIds = React.useMemo(() => {
     const active = new Set<string>();
     if (!gridPreview) return active;
     if (clipRows.length <= 0) return active;
 
-    // Play exactly the rows the user can see, plus one row above and one
-    // below as a scroll buffer so the next row is already animating when
-    // it enters view (avoids the warm-up flash). Scales naturally with
-    // gridCols because Virtuoso reports visible *rows* and the count of
-    // active clips becomes rows × cols. Old logic walked downward until
-    // it hit MAX_GRID_AUTOPLAYERS=100, which meant ~33 rows of animated
-    // WebPs were compositing on every frame at 3 columns — visible cause
-    // of the grid lag at large clip counts. MAX_GRID_AUTOPLAYERS stays
-    // as a hard ceiling for unusually tall viewports but rarely fires.
-    //
-    // OVERSCAN_ROWS == GRID_VIDEO_OVERSCAN_ROWS (both 1) so flag-off behavior is
-    // numerically identical to the old `±1`. In featherweight mode we also floor
-    // the bottom of the window at the measured fill (startRow + rowsInView - 1)
-    // so the active set can never under-report visible rows relative to the
-    // viewport-fill video budget — otherwise the budget couldn't be filled.
     const OVERSCAN_ROWS = GRID_VIDEO_OVERSCAN_ROWS;
     const lastRow = clipRows.length - 1;
     const baseStart = visibleRowRange?.startIndex ?? 0;
     const baseEnd = visibleRowRange?.endIndex ?? baseStart;
     const startRow = Math.max(0, baseStart - OVERSCAN_ROWS);
-    const fillEnd = featherweightActive && rowsInView > 0 ? baseStart + rowsInView - 1 : baseEnd;
-    const endRow = Math.min(lastRow, Math.max(baseEnd, fillEnd) + OVERSCAN_ROWS);
+    const endRow = Math.min(lastRow, baseEnd + OVERSCAN_ROWS);
 
     for (let rowIndex = startRow; rowIndex <= endRow; rowIndex += 1) {
       for (const clip of clipRows[rowIndex] ?? []) {
@@ -1659,7 +1327,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       if (active.size >= MAX_GRID_AUTOPLAYERS) break;
     }
     return active;
-  }, [clipRows, gridCols, gridPreview, visibleRowRange, featherweightActive, rowsInView]);
+  }, [clipRows, gridPreview, visibleRowRange]);
 
   React.useEffect(() => {
     setVisibleRowRange(null);
@@ -1687,32 +1355,23 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, []);
 
   // Single handler both column-count call sites (slider + ticks) route through.
-  // Before the deliberate key={gridCols} remount it captures which clip sits at
+  // Before the deliberate key remount it captures which clip sits at
   // the TOP of the viewport so the fresh list can re-open scrolled to it.
-  const changeGridCols = React.useCallback((next: number) => {
-    const cols = Math.min(4, Math.max(1, next));
-    if (cols === gridCols) return;
-    // Capture which clip sits at the TOP of the viewport BEFORE the remount, reading
-    // the LIVE DOM (the dev-tools/featherweight geometry state is 0 when the flag is off).
-    const el = scrollerEl;
-    if (el && el.scrollTop > 0 && clipRows.length > 0) {
-      const rowEl = el.querySelector<HTMLElement>(".clip-preview-grid-row");
-      const measured = rowEl ? rowEl.getBoundingClientRect().height : 0;
-      let rowHeight = measured;
-      if (rowHeight <= 0) {
-        // No row rendered to measure: derive stride from the scroller's own width.
-        // tile is aspect-ratio 16/9; 12px column gap; scroller has padding-right:10px.
-        const innerWidth = el.clientWidth - 10;
-        const tileW = (innerWidth - 12 * (gridCols - 1)) / gridCols;
-        rowHeight = tileW * (9 / 16) + 12; // +12px row stride (padding-bottom)
+  const changeGridCols = React.useCallback(
+    (next: number) => {
+      const cols = Math.min(4, Math.max(1, next));
+      if (cols === gridCols) return;
+      if (firstVisibleRow != null && clipRows[firstVisibleRow]?.[0]) {
+        const anchorId = clipRows[firstVisibleRow][0].id;
+        const idx = displayedClips.findIndex((c) => c.id === anchorId);
+        anchorClipIndexRef.current = idx >= 0 ? idx : Math.max(0, firstVisibleRow * gridCols);
+      } else {
+        anchorClipIndexRef.current = 0;
       }
-      const topRow = Math.floor(el.scrollTop / rowHeight);
-      anchorClipIndexRef.current = topRow * gridCols; // gridCols = CURRENT cols
-    } else {
-      anchorClipIndexRef.current = 0;
-    }
-    setGridCols(cols);
-  }, [gridCols, scrollerEl, clipRows.length]);
+      setGridCols(cols);
+    },
+    [gridCols, firstVisibleRow, clipRows, displayedClips],
+  );
 
   const changeClipPreviewSpeed = React.useCallback((value: number) => {
     const next = clampNumber(value, 0.25, 4);
@@ -1735,7 +1394,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (!featherweightActive || !hasClips) return;
     const sources = new Set<string>();
     for (const clip of displayedClips) {
-      if (!activeGridClipIds.has(clip.id) || !clip.path) continue;
+      if (!grantedClipIds.has(clip.id) || !clip.path) continue;
       if (playbackPlans[clip.path] || planInFlightRef.current.has(clip.path)) continue;
       sources.add(clip.path);
     }
@@ -1759,7 +1418,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           planInFlightRef.current.delete(source);
         });
     }
-  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, scenePreviewHeight]);
+  }, [featherweightActive, hasClips, displayedClips, grantedClipIds, playbackPlans, scenePreviewHeight]);
 
   /* When the preview-quality cap changes, discard the cached per-source plans and
    * proxy paths so both re-run at the new height: the plan re-probes (a source can
@@ -1851,7 +1510,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (!featherweightActive || !hasClips) return;
     const sources = collectProxySourcesForActiveClips({
       clips: displayedClips,
-      activeClipIds: activeGridClipIds,
+      activeClipIds: grantedClipIds,
       playbackPlans,
       resolvedSources: new Set(Object.keys(sourceProxyPaths)),
       inFlightSources: proxyInFlightRef.current,
@@ -1859,7 +1518,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     for (const source of sources) {
       if (!failedProxySources[source]) kickProxyBuild(source);
     }
-  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths, failedProxySources, kickProxyBuild]);
+  }, [featherweightActive, hasClips, displayedClips, grantedClipIds, playbackPlans, sourceProxyPaths, failedProxySources, kickProxyBuild]);
 
   function startPreviewRenderBatch(batch: ClipPreviewItem[], token: number) {
     const renderable = batch.filter((clip) => clip.path);
@@ -3307,20 +2966,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       <div className="clip-extractor-stage">
         {hasClips ? (
           <Virtuoso
-            /* Remount on column change so Virtuoso discards its per-row size
-             * cache and re-measures from scratch. Without this, switching from
-             * 1 column (tall rows) to multi-column (short rows) leaves every
-             * OFF-SCREEN row cached at the old tall height — only mounted rows
-             * re-measure — so the scroll spacer stays massively over-reserved
-             * (the "deadzone" empty region). A window resize cleared it before
-             * by forcing a full re-measure; this does the same automatically. */
-            key={gridCols}
+            /* Remount on column or width-layout reset so Virtuoso discards its per-row size
+             * cache and re-measures from scratch. */
+            key={`${gridCols}-${layoutGeneration}`}
             ref={virtuosoRef}
             data={clipRows}
-            /* Anchor-preserve across the key={gridCols} remount above: a clip's identity is
-             * stable, only its row index changes with column count. Re-open the fresh list
-             * scrolled so the clip that was at the top stays at the top. null ref (initial
-             * load / no prior column change) -> index 0 -> opens at the top. */
+            /* Anchor-preserve across remount: a clip's identity is stable,
+             * only its row index changes. Re-open the fresh list scrolled so the
+             * clip that was at the top stays at the top. */
             initialTopMostItemIndex={
               anchorClipIndexRef.current == null
                 ? 0
@@ -3337,9 +2990,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             style={virtuosoStyle}
             components={virtuosoComponents}
             computeItemKey={computeRowKey}
-            /* DEV TOOLS: capture the real scroll element so the viewport-fill
-             * video-budget ResizeObserver can measure it. Stable handler (above)
-             * so Virtuoso's scroll-attach effect doesn't loop. */
             scrollerRef={handleScrollerRef}
             rangeChanged={setVisibleRowRange}
             itemContent={(_index, row) => (
@@ -3378,15 +3028,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                    * of spinning forever. Flag-off this is unused (the tile ignores it). */
                   const sourceKey = clipSourceKey(clip);
                   const planForKey = sourceKey != null ? playbackPlans[sourceKey] : undefined;
-                  // FIX A — a probe (plan + proxy) is only ever scheduled for a tile
-                  // that is in activeGridClipIds (both probe effects gate on it). The
-                  // spinner, however, is gated on the IntersectionObserver play area, so
-                  // a tile could be spinner-eligible while NO probe is scheduled for it
-                  // -> permanent spinner. Require `scheduled` on BOTH pending sub-conditions
-                  // so a tile that is NOT slated for a probe reports pending=false (and
-                  // falls to the neutral merged poster) instead of spinning forever; an
-                  // ACTIVE tile whose proxy is genuinely building still reports pending.
-                  const scheduled = activeGridClipIds.has(clip.id);
+                  const scheduled = featherweightActive ? grantedClipIds.has(clip.id) : activeGridClipIds.has(clip.id);
                   const proxyFailed = sourceKey != null && Boolean(failedProxySources[sourceKey]);
                   const proxyExpected =
                     scheduled &&
@@ -3419,13 +3061,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     featherweightEnabled={featherweightActive && !proxyFailed}
                     previewRate={clipPreviewSpeed}
                     playbackPending={playbackPending}
-                    /* DEV TOOLS: CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount gate.
-                     * The panel's own scroll geometry is the SOLE authority for
-                     * which tiles may mount a live offset <video> (the per-tile
-                     * IntersectionObserver was retired from the mount path). The
-                     * set size never exceeds the decoder ceiling, and a fast fling
-                     * grants no new mounts. Flag-off mayMountVideoIds is empty. */
-                    mayMountVideo={mayMountVideoIds.has(clip.id) && !proxyFailed}
+                    /* CENTRAL, MEASURED, HARD-CAPPED mount gate.
+                     * The measured viewport playback window is the SOLE authority for
+                     * which tiles may mount a live offset <video>. The set size never
+                     * exceeds the decoder ceiling, and a fast fling grants no new mounts. */
+                    mayMountVideo={featherweightActive && grantedClipIds.has(clip.id) && !proxyFailed}
                     justMerged={justMergedId === clip.id}
                     onClick={(modifiers) => handleClipClick(clip, modifiers)}
                     onToggleSelect={() =>

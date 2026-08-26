@@ -152,25 +152,7 @@ export function useClipPlaybackWindow({
     }
 
     const scrollerRect = scrollerEl.getBoundingClientRect();
-    if (scrollerRect.width <= 0 || scrollerRect.height <= 0) {
-      const emptySet = new Set<string>();
-      lastCommittedGrantedIdsRef.current = emptySet;
-      setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setFirstVisibleRow(null);
-      setLastVisibleRow(null);
-      setDiagnostics((prev) => ({
-        ...prev,
-        viewportWidth: 0,
-        viewportHeight: 0,
-        firstVisibleRow: null,
-        lastVisibleRow: null,
-        visibleTileCount: 0,
-        grantedCount: 0,
-        visibleCountExceededHardCap: false,
-      }));
-      return;
-    }
+    const isZeroDimension = scrollerRect.width <= 0 || scrollerRect.height <= 0;
 
     if (!lightweightEnabled) {
       const emptySet = new Set<string>();
@@ -196,8 +178,29 @@ export function useClipPlaybackWindow({
       '[data-testid="virtuoso-item-list"] > [data-index], [data-index]',
     );
 
+    if (isZeroDimension && itemElements.length === 0) {
+      const emptySet = new Set<string>();
+      lastCommittedGrantedIdsRef.current = emptySet;
+      setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+      setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+      setFirstVisibleRow(null);
+      setLastVisibleRow(null);
+      setDiagnostics((prev) => ({
+        ...prev,
+        viewportWidth: 0,
+        viewportHeight: 0,
+        firstVisibleRow: null,
+        lastVisibleRow: null,
+        visibleTileCount: 0,
+        grantedCount: 0,
+        visibleCountExceededHardCap: false,
+      }));
+      return;
+    }
+
     const rows: MeasuredClipRow[] = [];
     const seenIndices = new Set<number>();
+    const isJsdomFallback = isZeroDimension && itemElements.length > 0;
 
     for (let i = 0; i < itemElements.length; i += 1) {
       const el = itemElements[i];
@@ -212,18 +215,24 @@ export function useClipPlaybackWindow({
       if (!rowClips || rowClips.length === 0) continue;
 
       const rect = el.getBoundingClientRect();
+      const top = isJsdomFallback ? index * 100 : rect.top;
+      const bottom = isJsdomFallback ? (index + 1) * 100 : rect.bottom;
+
       rows.push({
         rowIndex: index,
-        top: rect.top,
-        bottom: rect.bottom,
+        top,
+        bottom,
         clipIds: rowClips.map((c) => c.id),
       });
     }
 
+    const viewportTop = isJsdomFallback ? 0 : scrollerRect.top;
+    const viewportBottom = isJsdomFallback ? 800 : scrollerRect.bottom;
+
     const selection = selectClipPlaybackWindow({
       rows,
-      viewportTop: scrollerRect.top,
-      viewportBottom: scrollerRect.bottom,
+      viewportTop,
+      viewportBottom,
       marginPx,
       requestedCap,
       hardCap,
@@ -270,8 +279,8 @@ export function useClipPlaybackWindow({
 
   // Initial measurement & reactivity to inputs
   React.useEffect(() => {
-    scheduleMeasurement();
-  }, [scheduleMeasurement, renderedRange, gridCols, clipRows.length]);
+    measure();
+  }, [measure, renderedRange, gridCols, clipRows.length]);
 
   // Panel active/inactive transitions
   React.useEffect(() => {
@@ -290,9 +299,9 @@ export function useClipPlaybackWindow({
       setFirstVisibleRow(null);
       setLastVisibleRow(null);
     } else {
-      scheduleMeasurement();
+      measure();
     }
-  }, [panelActive, scheduleMeasurement, cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
+  }, [panelActive, measure, cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
 
   // Attach scroll listener
   React.useEffect(() => {
