@@ -3,6 +3,7 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicU64, Ordering},
     thread,
 };
 
@@ -208,6 +209,16 @@ fn setparams_filter(meta: &ColorMetadata) -> String {
     let (primaries, transfer, matrix, range) = resolved_color(meta);
     format!(
         "setparams=color_primaries={primaries}:color_trc={transfer}:colorspace={matrix}:range={range}"
+    )
+}
+
+static SOURCE_PROXY_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn generated_source_proxy_request_id() -> String {
+    format!(
+        "proxy-{}-{}",
+        std::process::id(),
+        SOURCE_PROXY_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
     )
 }
 
@@ -3473,12 +3484,14 @@ pub(crate) async fn build_source_proxy(
     source_path: String,
     force: bool,
     height: Option<u32>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     let start = std::time::Instant::now();
+    let request_id = request_id.unwrap_or_else(generated_source_proxy_request_id);
     log_info(
         "clip.source_proxy.start",
         "Building source proxy",
-        json!({ "source": &source_path, "height": height }),
+        json!({ "source": &source_path, "height": height, "requestId": &request_id }),
     );
     // Serialize proxy builds: the single PROXY_CHILD_PID slot can only track one
     // encode, so hold this guard across the supersede-kill below AND the
@@ -3498,8 +3511,9 @@ pub(crate) async fn build_source_proxy(
         .map_err(|error| format!("Could not get app data directory: {error}"))?;
 
     let log_source = source_path.clone();
+    let log_request_id = request_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        generate_source_proxy(window, app_data_dir, source_path, force, height)
+        generate_source_proxy(window, app_data_dir, source_path, force, height, request_id)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -3508,12 +3522,12 @@ pub(crate) async fn build_source_proxy(
         Ok(path) => log_info(
             "clip.source_proxy.complete",
             "Source proxy ready",
-            json!({ "source": log_source, "proxy": path, "elapsed_s": start.elapsed().as_secs_f64() }),
+            json!({ "source": log_source, "proxy": path, "requestId": log_request_id, "elapsed_s": start.elapsed().as_secs_f64() }),
         ),
         Err(error) => log_error(
             "clip.source_proxy.error",
             "Source proxy build failed",
-            json!({ "source": log_source, "error": error, "elapsed_s": start.elapsed().as_secs_f64() }),
+            json!({ "source": log_source, "requestId": log_request_id, "error": error, "elapsed_s": start.elapsed().as_secs_f64() }),
         ),
     }
     result
@@ -3525,6 +3539,7 @@ fn generate_source_proxy(
     source_path: String,
     force: bool,
     height: Option<u32>,
+    request_id: String,
 ) -> Result<String, String> {
     let root = app_root()?;
     let ffmpeg = find_tool(&root, "ffmpeg");
@@ -3589,7 +3604,7 @@ fn generate_source_proxy(
     let _ = fs::remove_file(&tmp_output);
 
     let primary = run_source_proxy_job(
-        &window, &ffmpeg, &input, &tmp_output, duration, &source_path, use_nvenc, &color, h,
+        &window, &ffmpeg, &input, &tmp_output, duration, &source_path, &request_id, use_nvenc, &color, h,
     );
 
     if let Err(error) = primary {
@@ -3608,7 +3623,7 @@ fn generate_source_proxy(
             );
             let _ = fs::remove_file(&tmp_output);
             run_source_proxy_job(
-                &window, &ffmpeg, &input, &tmp_output, duration, &source_path, false, &color, h,
+                &window, &ffmpeg, &input, &tmp_output, duration, &source_path, &request_id, false, &color, h,
             )?;
         } else {
             let _ = fs::remove_file(&tmp_output);
@@ -3629,6 +3644,7 @@ fn run_source_proxy_job(
     output: &Path,
     duration: f64,
     source_path: &str,
+    request_id: &str,
     use_nvenc: bool,
     color: &ColorMetadata,
     height: u32,
@@ -3764,13 +3780,13 @@ fn run_source_proxy_job(
         output.to_string_lossy().to_string(),
     ]);
 
-    // Forward a "proxy-progress" side-channel { sourcePath, percent, stage } so
+    // Forward a "proxy-progress" side-channel { sourcePath, requestId, percent, stage } so
     // the grid can show which source is building. The tapped FFmpeg runner
     // suppresses the shared conversion stream, and this source-specific stream
     // is bookended with "starting" and terminal "complete"/"error" ticks.
     let _ = window.emit(
         "proxy-progress",
-        json!({ "sourcePath": source_path, "percent": 0.0, "stage": "starting" }),
+        json!({ "sourcePath": source_path, "requestId": request_id, "percent": 0.0, "stage": "starting" }),
     );
 
     let label = if use_nvenc {
@@ -3785,13 +3801,13 @@ fn run_source_proxy_job(
         duration,
         label,
         Some(&PROXY_CHILD_PID),
-        Some(("proxy-progress", source_path)),
+        Some(("proxy-progress", source_path, request_id)),
     );
 
     let stage = if result.is_ok() { "complete" } else { "error" };
     let _ = window.emit(
         "proxy-progress",
-        json!({ "sourcePath": source_path, "percent": if result.is_ok() { 100.0 } else { 0.0 }, "stage": stage }),
+        json!({ "sourcePath": source_path, "requestId": request_id, "percent": if result.is_ok() { 100.0 } else { 0.0 }, "stage": stage }),
     );
 
     result

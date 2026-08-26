@@ -526,8 +526,32 @@ pub(crate) fn run_ffmpeg_with_progress(
     run_ffmpeg_with_progress_tap(window, ffmpeg, args, duration, label, pid_slot, None)
 }
 
-fn should_emit_shared_conversion_progress(has_progress_tap: bool) -> bool {
-    !has_progress_tap
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProgressDestination {
+    Shared,
+    Dedicated,
+}
+
+fn progress_destination(has_progress_tap: bool) -> ProgressDestination {
+    if has_progress_tap {
+        ProgressDestination::Dedicated
+    } else {
+        ProgressDestination::Shared
+    }
+}
+
+fn dispatch_progress_destination<Shared, Dedicated>(
+    destination: ProgressDestination,
+    shared: Shared,
+    dedicated: Dedicated,
+) where
+    Shared: FnOnce(),
+    Dedicated: FnOnce(),
+{
+    match destination {
+        ProgressDestination::Shared => shared(),
+        ProgressDestination::Dedicated => dedicated(),
+    }
 }
 
 // Clears a tracked PID slot ONLY if it still holds `own_pid`. A finishing job
@@ -544,10 +568,10 @@ fn clear_child_pid_if_owned(slot: &OnceLock<Mutex<Option<u32>>>, own_pid: u32) {
 }
 
 // Same as run_ffmpeg_with_progress, plus an optional per-tick side-channel
-// event. When `progress_tap` is Some((event_name, source_path)) the tapped run
+// event. When `progress_tap` is Some((event_name, source_path, request_id)) the tapped run
 // owns progress delivery: shared "conversion-progress" events are suppressed,
 // and the determinate percent is forwarded on `event_name` as
-// { sourcePath, percent, stage } so a caller (e.g. the featherweight
+// { sourcePath, requestId, percent, stage } so a caller (e.g. the featherweight
 // source-proxy build) can carry the source identity without competing with the
 // shared stream. All existing callers pass None via the thin wrapper above.
 #[allow(clippy::too_many_arguments)]
@@ -558,10 +582,10 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
     duration: f64,
     label: &str,
     pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
-    progress_tap: Option<(&str, &str)>,
+    progress_tap: Option<(&str, &str, &str)>,
 ) -> Result<(), String> {
     let job_start = std::time::Instant::now();
-    let emit_shared_progress = should_emit_shared_conversion_progress(progress_tap.is_some());
+    let progress_destination = progress_destination(progress_tap.is_some());
     log_info(
         "ffmpeg.start",
         "Starting FFmpeg job",
@@ -629,42 +653,48 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
                             format_seconds(done),
                             format_seconds(duration)
                         );
-                        if emit_shared_progress {
-                            emit_conversion_progress(
+                        dispatch_progress_destination(
+                            progress_destination,
+                            || emit_conversion_progress(
                                 window,
                                 "processing",
                                 Some(percent),
                                 message,
                                 fps.clone(),
                                 speed.clone(),
-                            );
-                        }
-                        if let Some((event, source_path)) = progress_tap {
-                            let _ = window.emit(
-                                event,
-                                json!({ "sourcePath": source_path, "percent": percent, "stage": "processing" }),
-                            );
-                        }
+                            ),
+                            || {
+                                if let Some((event, source_path, request_id)) = progress_tap {
+                                    let _ = window.emit(
+                                        event,
+                                        json!({ "sourcePath": source_path, "requestId": request_id, "percent": percent, "stage": "processing" }),
+                                    );
+                                }
+                            },
+                        );
                     }
                 }
             }
             "progress" if value.trim() == "end" => {
-                if emit_shared_progress {
-                    emit_conversion_progress(
+                dispatch_progress_destination(
+                    progress_destination,
+                    || emit_conversion_progress(
                         window,
                         "finalizing",
                         Some(100.0),
                         "Finalizing output...".to_string(),
                         fps.clone(),
                         speed.clone(),
-                    );
-                }
-                if let Some((event, source_path)) = progress_tap {
-                    let _ = window.emit(
-                        event,
-                        json!({ "sourcePath": source_path, "percent": 100.0, "stage": "finalizing" }),
-                    );
-                }
+                    ),
+                    || {
+                        if let Some((event, source_path, request_id)) = progress_tap {
+                            let _ = window.emit(
+                                event,
+                                json!({ "sourcePath": source_path, "requestId": request_id, "percent": 100.0, "stage": "finalizing" }),
+                            );
+                        }
+                    },
+                );
             }
             _ => {}
         }
@@ -684,16 +714,25 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
             "FFmpeg job completed",
             json!({ "label": label, "elapsed_s": job_start.elapsed().as_secs_f64() }),
         );
-        if emit_shared_progress {
-            emit_conversion_progress(
+        dispatch_progress_destination(
+            progress_destination,
+            || emit_conversion_progress(
                 window,
                 "complete",
                 Some(100.0),
                 "Conversion complete".to_string(),
                 fps,
                 speed,
-            );
-        }
+            ),
+            || {
+                if let Some((event, source_path, request_id)) = progress_tap {
+                    let _ = window.emit(
+                        event,
+                        json!({ "sourcePath": source_path, "requestId": request_id, "percent": 100.0, "stage": "complete" }),
+                    );
+                }
+            },
+        );
         Ok(())
     } else {
         let tail = stderr_tail.trim();
@@ -765,11 +804,24 @@ fn format_seconds(seconds: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::should_emit_shared_conversion_progress;
+    use super::{dispatch_progress_destination, progress_destination, ProgressDestination};
 
     #[test]
-    fn dedicated_progress_tap_suppresses_shared_conversion_events() {
-        assert!(should_emit_shared_conversion_progress(false));
-        assert!(!should_emit_shared_conversion_progress(true));
+    fn progress_dispatch_exercises_exactly_one_destination() {
+        let destinations = std::cell::RefCell::new(Vec::new());
+        dispatch_progress_destination(
+            progress_destination(false),
+            || destinations.borrow_mut().push(ProgressDestination::Shared),
+            || destinations.borrow_mut().push(ProgressDestination::Dedicated),
+        );
+        assert_eq!(*destinations.borrow(), vec![ProgressDestination::Shared]);
+
+        destinations.borrow_mut().clear();
+        dispatch_progress_destination(
+            progress_destination(true),
+            || destinations.borrow_mut().push(ProgressDestination::Shared),
+            || destinations.borrow_mut().push(ProgressDestination::Dedicated),
+        );
+        assert_eq!(*destinations.borrow(), vec![ProgressDestination::Dedicated]);
     }
 }
