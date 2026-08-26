@@ -1766,10 +1766,6 @@ fn run_clip_export(
                     input.to_string_lossy().to_string(),
                     "-t".to_string(),
                     format!("{export_duration:.3}"),
-                    "-map".to_string(),
-                    "0:v:0".to_string(),
-                    "-map".to_string(),
-                    "0:a:0?".to_string(),
                     "-c".to_string(),
                     "copy".to_string(),
                     "-avoid_negative_ts".to_string(),
@@ -1792,6 +1788,11 @@ fn run_clip_export(
             args.push(setparams_filter(&color));
             args.extend(color_tag_args(&color));
         }
+
+        // Keep the finished file to picture + optional audio. Chapter metadata
+        // has a separate mapping switch and can otherwise stretch a MOV's
+        // advertised timeline back to the full source episode.
+        append_clip_stream_maps(&mut args, &["0:v:0", "0:a:0?"]);
 
         args.extend([
             "-progress".to_string(),
@@ -1851,6 +1852,7 @@ fn run_clip_export(
                     "320k".to_string(),
                 ]);
                 fallback_args.extend(color_tag_args(&color));
+                append_clip_stream_maps(&mut fallback_args, &["0:v:0", "0:a:0?"]);
                 fallback_args.extend([
                     "-progress".to_string(),
                     "pipe:1".to_string(),
@@ -2085,12 +2087,11 @@ fn run_clip_export_merged(
     }
     args.push("-filter_complex".to_string());
     args.push(filter_parts.join(";"));
-    args.push("-map".to_string());
-    args.push("[outv]".to_string());
+    let mut output_streams = vec!["[outv]"];
     if any_has_audio {
-        args.push("-map".to_string());
-        args.push("[outa]".to_string());
+        output_streams.push("[outa]");
     }
+    append_clip_stream_maps(&mut args, &output_streams);
 
     let encode_args: Vec<String> = match preset.as_str() {
         "gpu-intra" => {
@@ -2407,9 +2408,9 @@ fn concat_copy_segments(
         "0".to_string(),
         "-i".to_string(),
         list_path.to_string_lossy().to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
     ];
+    append_clip_stream_maps(&mut concat_args, &["0:v:0", "0:a:0?"]);
+    concat_args.extend(["-c".to_string(), "copy".to_string()]);
     if let Some(filter) = bitstream_filter {
         concat_args.extend(["-bsf:v".to_string(), filter.to_string()]);
     }
@@ -2509,33 +2510,33 @@ fn run_smart_cut_clip(
                 None,
             );
             let staged = StagedOutput::new(output);
+            let mut copy_args = vec![
+                "-y".to_string(),
+                "-hide_banner".to_string(),
+                "-nostdin".to_string(),
+                "-loglevel".to_string(),
+                "error".to_string(),
+                "-ss".to_string(),
+                format!("{kf:.6}"),
+                "-i".to_string(),
+                input.to_string_lossy().to_string(),
+                "-t".to_string(),
+                format!("{length:.3}"),
+            ];
+            append_clip_stream_maps(&mut copy_args, &["0:v:0", "0:a:0?"]);
+            copy_args.extend([
+                "-c".to_string(),
+                "copy".to_string(),
+                "-avoid_negative_ts".to_string(),
+                "make_zero".to_string(),
+            ]);
             run_clip_ffmpeg(
                 window,
                 ffmpeg,
-                vec![
-                    "-y".to_string(),
-                    "-hide_banner".to_string(),
-                    "-nostdin".to_string(),
-                    "-loglevel".to_string(),
-                    "error".to_string(),
-                    "-ss".to_string(),
-                    format!("{kf:.6}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{length:.3}"),
-                    "-map".to_string(),
-                    "0:v:0".to_string(),
-                    "-map".to_string(),
-                    "0:a:0?".to_string(),
-                    "-c".to_string(),
-                    "copy".to_string(),
-                    "-avoid_negative_ts".to_string(),
-                    "make_zero".to_string(),
-                ]
-                .into_iter()
-                .chain(tag_args.iter().cloned())
-                .chain([
+                copy_args
+                    .into_iter()
+                    .chain(tag_args.iter().cloned())
+                    .chain([
                     "-progress".to_string(),
                     "pipe:1".to_string(),
                     "-stats_period".to_string(),
@@ -2571,9 +2572,8 @@ fn run_smart_cut_clip(
             input.to_string_lossy().to_string(),
             "-t".to_string(),
             format!("{length:.3}"),
-            "-map".to_string(),
-            "0:v:0".to_string(),
         ];
+        append_clip_stream_maps(&mut args, &["0:v:0"]);
         args.extend(head_encoder.iter().cloned());
         args.push("-vf".to_string());
         args.push(setparams_filter(color));
@@ -2627,29 +2627,31 @@ fn run_smart_cut_clip(
             None,
             None,
         );
+        let mut body_args = vec![
+            "-y".to_string(),
+            "-hide_banner".to_string(),
+            "-nostdin".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-ss".to_string(),
+            format!("{kf:.6}"),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-t".to_string(),
+            format!("{:.3}", end - kf),
+        ];
+        append_clip_stream_maps(&mut body_args, &["0:v:0"]);
+        body_args.extend([
+            "-c".to_string(),
+            "copy".to_string(),
+            "-f".to_string(),
+            "mpegts".to_string(),
+            body.to_string_lossy().to_string(),
+        ]);
         run_clip_ffmpeg(
             window,
             ffmpeg,
-            vec![
-                "-y".to_string(),
-                "-hide_banner".to_string(),
-                "-nostdin".to_string(),
-                "-loglevel".to_string(),
-                "error".to_string(),
-                "-ss".to_string(),
-                format!("{kf:.6}"),
-                "-i".to_string(),
-                input.to_string_lossy().to_string(),
-                "-t".to_string(),
-                format!("{:.3}", end - kf),
-                "-map".to_string(),
-                "0:v:0".to_string(),
-                "-c".to_string(),
-                "copy".to_string(),
-                "-f".to_string(),
-                "mpegts".to_string(),
-                body.to_string_lossy().to_string(),
-            ],
+            body_args,
             end - kf,
             "Smart cut body",
         )?;
@@ -2745,31 +2747,33 @@ fn run_smart_cut_clip(
         None,
         None,
     );
+    let mut audio_args = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-ss".to_string(),
+        format!("{seek_from:.3}"),
+        "-i".to_string(),
+        input.to_string_lossy().to_string(),
+        "-ss".to_string(),
+        format!("{:.3}", start - seek_from),
+        "-t".to_string(),
+        format!("{duration:.3}"),
+    ];
+    append_clip_stream_maps(&mut audio_args, &["0:a:0"]);
+    audio_args.extend([
+        "-c".to_string(),
+        "copy".to_string(),
+        "-avoid_negative_ts".to_string(),
+        "make_zero".to_string(),
+        audio.to_string_lossy().to_string(),
+    ]);
     run_clip_ffmpeg(
         window,
         ffmpeg,
-        vec![
-            "-y".to_string(),
-            "-hide_banner".to_string(),
-            "-nostdin".to_string(),
-            "-loglevel".to_string(),
-            "error".to_string(),
-            "-ss".to_string(),
-            format!("{seek_from:.3}"),
-            "-i".to_string(),
-            input.to_string_lossy().to_string(),
-            "-ss".to_string(),
-            format!("{:.3}", start - seek_from),
-            "-t".to_string(),
-            format!("{duration:.3}"),
-            "-map".to_string(),
-            "0:a:0".to_string(),
-            "-c".to_string(),
-            "copy".to_string(),
-            "-avoid_negative_ts".to_string(),
-            "make_zero".to_string(),
-            audio.to_string_lossy().to_string(),
-        ],
+        audio_args,
         duration,
         "Smart cut audio",
     )?;
@@ -2783,27 +2787,24 @@ fn run_smart_cut_clip(
         None,
     );
     let staged = StagedOutput::new(output);
+    let mut mux_args = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-i".to_string(),
+        video.to_string_lossy().to_string(),
+        "-i".to_string(),
+        audio.to_string_lossy().to_string(),
+    ];
+    append_clip_stream_maps(&mut mux_args, &["0:v:0", "1:a:0"]);
+    mux_args.extend(["-c".to_string(), "copy".to_string()]);
     run_clip_ffmpeg(
         window,
         ffmpeg,
-        vec![
-            "-y".to_string(),
-            "-hide_banner".to_string(),
-            "-nostdin".to_string(),
-            "-i".to_string(),
-            video.to_string_lossy().to_string(),
-            "-i".to_string(),
-            audio.to_string_lossy().to_string(),
-            "-map".to_string(),
-            "0:v:0".to_string(),
-            "-map".to_string(),
-            "1:a:0".to_string(),
-            "-c".to_string(),
-            "copy".to_string(),
-        ]
-        .into_iter()
-        .chain(tag_args.iter().cloned())
-        .chain([
+        mux_args
+            .into_iter()
+            .chain(tag_args.iter().cloned())
+            .chain([
             "-progress".to_string(),
             "pipe:1".to_string(),
             "-stats_period".to_string(),
@@ -2948,7 +2949,7 @@ fn run_lossless_cut_merge(
         total_duration += duration;
 
         let segment = temp_dir.join(format!("seg_{i:04}.mkv"));
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "-y".to_string(),
             "-hide_banner".to_string(),
             "-nostdin".to_string(),
@@ -2960,16 +2961,15 @@ fn run_lossless_cut_merge(
             input.to_string_lossy().to_string(),
             "-t".to_string(),
             format!("{duration:.3}"),
-            "-map".to_string(),
-            "0:v:0".to_string(),
-            "-map".to_string(),
-            "0:a:0?".to_string(),
+        ];
+        append_clip_stream_maps(&mut args, &["0:v:0", "0:a:0?"]);
+        args.extend([
             "-c".to_string(),
             "copy".to_string(),
             "-avoid_negative_ts".to_string(),
             "make_zero".to_string(),
             segment.to_string_lossy().to_string(),
-        ];
+        ]);
         emit_conversion_progress(
             window,
             "decode",
