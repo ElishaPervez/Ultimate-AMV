@@ -1088,6 +1088,30 @@ mod rate_control_tests {
 }
 
 #[cfg(test)]
+mod clip_output_mapping_tests {
+    use super::append_clip_stream_maps;
+
+    #[test]
+    fn exported_clips_keep_optional_audio_and_discard_source_chapters() {
+        let mut args = Vec::new();
+
+        append_clip_stream_maps(&mut args, &["0:v:0", "0:a:0?"]);
+
+        assert_eq!(
+            args,
+            [
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-map_chapters",
+                "-1",
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
 mod smart_cut_tests {
     use super::{
         count_packet_lines, first_keyframe_at_or_after, mp4_codec_tag_args, parse_fps_rational,
