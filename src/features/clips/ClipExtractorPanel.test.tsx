@@ -819,7 +819,18 @@ describe('ClipExtractorPanel — basic render', () => {
 
 describe('ClipExtractorPanel — lazy proxy scheduling', () => {
   it('does not queue proxies for selected episodes before scenes are visible', async () => {
-    let resolveDetection!: (value: string) => void
+    const detectionResolvers: Array<(value: string) => void> = []
+    const detectionResult = (input: string) => JSON.stringify({
+      type: 'done',
+      mode: 'cpu',
+      input,
+      scenes: [],
+      cuts: [],
+      sceneCount: 0,
+      fps: 24,
+      duration: 60,
+      totalSeconds: 1,
+    })
     mockInvoke('get_config', () => JSON.stringify({
       clip_extraction_mode: 'cpu',
       clip_hover_preview: false,
@@ -834,7 +845,7 @@ describe('ClipExtractorPanel — lazy proxy scheduling', () => {
     mockInvoke('discord_clear', () => null)
     mockInvoke('build_source_proxy', () => 'C:\\proxy.mp4')
     mockInvoke('clip_extract', () => new Promise<string>((resolve) => {
-      resolveDetection = resolve
+      detectionResolvers.push(resolve)
     }))
     mockDialogOpen.mockResolvedValueOnce(['C:\\episode-1.mkv', 'C:\\episode-2.mkv'])
 
@@ -848,17 +859,16 @@ describe('ClipExtractorPanel — lazy proxy scheduling', () => {
 
     expect(mockInvokeFn.mock.calls.filter(([command]) => command === 'build_source_proxy')).toHaveLength(0)
 
-    resolveDetection(JSON.stringify({
-      type: 'done',
-      mode: 'cpu',
-      input: 'C:\\episode-1.mkv',
-      scenes: [],
-      cuts: [],
-      sceneCount: 0,
-      fps: 24,
-      duration: 60,
-      totalSeconds: 1,
-    }))
+    await act(async () => {
+      detectionResolvers[0](detectionResult('C:\\episode-1.mkv'))
+    })
+    await waitFor(() => expect(detectionResolvers).toHaveLength(2))
+    await act(async () => {
+      detectionResolvers[1](detectionResult('C:\\episode-2.mkv'))
+    })
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: /extract clips/i }),
+    ).toBeEnabled())
   })
 
   it('requests proxies only for active sources and never duplicates an in-flight source', () => {
