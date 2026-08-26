@@ -63,6 +63,16 @@ import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
 import { ClipPreviewTile, offsetMarginWindow } from "./ClipPreviewTile";
+import { ClipRunProgressMessage, ClipRunStatus } from "./ClipRunStatus";
+import {
+  beginClipRunProgress,
+  getClipRunProgressSnapshot,
+  publishCompatibilityProgress,
+  publishDetectionProgress,
+  publishProxyProgress,
+  removeProxyProgress,
+  resetClipRunProgress,
+} from "./clipRunProgressStore";
 import {
   GRID_GRAB_MOMENTUM_RELEASE_WINDOW_MS,
   sampleGrabVelocity,
@@ -361,6 +371,29 @@ export function computeGeometryMountVideoIds(params: {
   return ids;
 }
 
+export function collectProxySourcesForActiveClips({
+  clips,
+  activeClipIds,
+  playbackPlans,
+  resolvedSources,
+  inFlightSources,
+}: {
+  clips: readonly ClipPreviewItem[];
+  activeClipIds: ReadonlySet<string>;
+  playbackPlans: Readonly<Record<string, PlaybackPlan>>;
+  resolvedSources: ReadonlySet<string>;
+  inFlightSources: ReadonlySet<string>;
+}): string[] {
+  const sources = new Set<string>();
+  for (const clip of clips) {
+    if (!clip.path || !activeClipIds.has(clip.id)) continue;
+    if (!playbackPlans[clip.path]) continue;
+    if (resolvedSources.has(clip.path) || inFlightSources.has(clip.path)) continue;
+    sources.add(clip.path);
+  }
+  return [...sources];
+}
+
 export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [selectedVideos, setSelectedVideos] = React.useState<string[]>([]);
   const [clipMode, setClipMode] = React.useState<"cpu" | "gpu">("gpu");
@@ -431,7 +464,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   // re-trigger the effect and the first measurement could be missed.
   const [scrollerEl, setScrollerEl] = React.useState<HTMLElement | null>(null);
   const viewportResizeGraceUntilRef = React.useRef(0);
-  const [progress, setProgress] = React.useState<ClipProgress | null>(null);
   const [result, setResult] = React.useState<ClipExtractionResult | null>(null);
   const [previewStates, setPreviewStates] = React.useState<Record<string, ClipPreviewState>>({});
   const [error, setError] = React.useState<string | null>(null);
@@ -444,7 +476,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     rawError: string;
   } | null>(null);
   const [isConverting, setIsConverting] = React.useState(false);
-  const [convertMessage, setConvertMessage] = React.useState<string | null>(null);
   // Maps a converted cache path -> the original filename it replaced (for the badge).
   const [convertedSources, setConvertedSources] = React.useState<Record<string, string>>({});
   // Maps a RAW source path -> a converted proxy path used ONLY to feed the GPU
@@ -577,6 +608,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const previewBatchInFlightRef = React.useRef(0);
   const previewTokenRef = React.useRef(0);
   const clipBatchProgressRef = React.useRef<ClipBatchProgressContext | null>(null);
+  const clipProgressGenerationRef = React.useRef(getClipRunProgressSnapshot().generation);
+  const isConvertingRef = React.useRef(isConverting);
+
+  React.useEffect(() => {
+    isConvertingRef.current = isConverting;
+  }, [isConverting]);
 
   React.useEffect(() => {
     void refreshClipMode();
@@ -680,9 +717,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     void listen<ClipProgress>("clip-progress", (event) => {
-      if (!cancelled) {
-        setProgress(mapClipBatchProgress(event.payload, clipBatchProgressRef.current));
-      }
+      if (cancelled || !clipBatchProgressRef.current) return;
+      publishDetectionProgress(
+        clipProgressGenerationRef.current,
+        mapClipBatchProgress(event.payload, clipBatchProgressRef.current),
+      );
     }).then((cleanup) => {
       if (cancelled) {
         cleanup();
@@ -705,8 +744,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const payload = event.payload;
       // Route to the export modal when an export session is active so the
       // per-clip bar and overall bar both reflect real ffmpeg progress.
-      // Otherwise fall through to the legacy inline progress card that the
-      // codec-conversion path still uses.
+      // Otherwise route only compatibility-conversion ticks to the dedicated
+      // channel. Proxy builds use their source-specific progress stream.
       if (exportSessionRef.current) {
         const percent = typeof payload.percent === "number" ? payload.percent : 0;
         const smoothingIndex = typeof payload.clipIndex === "number"
@@ -736,12 +775,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         );
         return;
       }
-      setProgress({
-        type: "progress",
-        stage: payload.stage,
-        percent: typeof payload.percent === "number" ? payload.percent : 0,
-        message: payload.message + (payload.speed ? ` (${payload.speed})` : ""),
-      });
+      if (!isConvertingRef.current) return;
+      publishCompatibilityProgress(payload);
     }).then((cleanup) => {
       if (cancelled) {
         cleanup();
@@ -805,12 +840,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
      * extraction start (startExtraction) and on new source selection (acceptVideos). */
   }, [result?.input]);
 
-  /* DEV TOOLS: listen for proxy-build progress so a finished proxy flips its
-   * tiles from WebP poster to live offset <video>. The terminal "complete" tick
-   * is matched by the source becoming present in sourceProxyPaths (set when the
-   * build_source_proxy promise resolves below); this listener only needs to keep
-   * the build observable. Always mounted but inert until a build emits. */
-  const [proxyProgress, setProxyProgress] = React.useState<Record<string, number>>({});
+  /* DEV TOOLS: listen for proxy-build progress so the status subscriber can show
+   * the slowest active source. Only a source with an in-flight build may publish;
+   * late events from an invalidated build are ignored. */
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
@@ -819,7 +851,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       (event) => {
         if (cancelled) return;
         const { sourcePath, percent } = event.payload;
-        setProxyProgress((current) => ({ ...current, [sourcePath]: percent }));
+        if (!proxyInFlightRef.current.has(sourcePath)) return;
+        publishProxyProgress(sourcePath, percent);
       },
     ).then((cleanup) => {
       if (cancelled) cleanup();
@@ -838,7 +871,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setMergeOrder([]);
     setResult(null);
     setPreviewStates({});
-    setProgress(null);
+    clipBatchProgressRef.current = null;
+    clipProgressGenerationRef.current = resetClipRunProgress();
     setError(null);
     setMergeMode(false);
     setCompatModal(null);
@@ -851,8 +885,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
      * these, so a new source must clear them here. */
     setPlaybackPlans({});
     setSourceProxyPaths({});
-    setProxyProgress({});
-    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) {
+      bumpSourceEpoch(s);
+      removeProxyProgress(s);
+    }
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
@@ -1696,7 +1732,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   React.useEffect(() => {
     if (prevScenePreviewHeightRef.current === scenePreviewHeight) return;
     prevScenePreviewHeightRef.current = scenePreviewHeight;
-    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) {
+      bumpSourceEpoch(s);
+      removeProxyProgress(s);
+    }
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
@@ -1705,8 +1744,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, [scenePreviewHeight]);
 
   /* Kick exactly ONE build_source_proxy for a source, deduping on the in-flight
-   * ref. Used both by the lazy on-scroll effect below AND by startExtraction to
-   * overlap the build with scene detection. Dedup is proxyInFlightRef-only (a ref,
+   * ref. Used by the lazy on-scroll effect below. Dedup is proxyInFlightRef-only (a ref,
    * always current); it deliberately does NOT read sourceProxyPaths (that would
    * need it as a dep / could be stale) — callers that can skip an already-built
    * source do their own sourceProxyPaths check before calling. */
@@ -1722,18 +1760,16 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       .then((proxyPath) => {
         if (currentSourceEpoch(source) !== epoch) return;
         if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
+        removeProxyProgress(source);
       })
       .catch((proxyError) => {
         if (currentSourceEpoch(source) !== epoch) return;
         // A FAILED build is terminal: mark it so the graceful-poster decision
         // no longer counts this source as "pending" (otherwise a pinned
-        // proxyProgress entry would spin forever), and drop its stale progress
+        // progress entry would otherwise spin forever, and drop its stale tick
         // tick so nothing else reads it as an in-flight build.
         failedProxiesRef.current.add(source);
-        setProxyProgress((cur) => {
-          const { [source]: _dropped, ...rest } = cur;
-          return rest;
-        });
+        removeProxyProgress(source);
         logFrontend("warn", "frontend.clip.source_proxy.warning", "Could not build source proxy", {
           source,
           error: safeLogValue(proxyError),
@@ -1742,28 +1778,26 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       .finally(() => {
         if (currentSourceEpoch(source) !== epoch) return;
         proxyInFlightRef.current.delete(source);
+        removeProxyProgress(source);
         // One-shot: the forced rebuild has happened (or failed); drop the mark
         // so subsequent builds for this source cache normally.
         forceProxyRebuildRef.current.delete(source);
       });
   }, []);
 
-  /* DEV TOOLS: for proxy-mode sources with an active visible tile, kick exactly
-   * ONE build_source_proxy per source on first interaction. The proxy-progress
+  /* DEV TOOLS: for sources with an active visible tile and a resolved playback
+   * plan, kick exactly ONE build_source_proxy per source. The proxy-progress
    * listener tracks the build; on resolve we record the proxy path which flips
    * those tiles from WebP poster to live offset <video>. Never pre-warmed. */
   React.useEffect(() => {
     if (!featherweightActive || !hasClips) return;
-    const sources = new Set<string>();
-    for (const clip of displayedClips) {
-      if (!activeGridClipIds.has(clip.id) || !clip.path) continue;
-      // Featherweight previews always use the lightweight proxy (even for "direct"
-      // sources) — concurrent full-res decoders starve rVFC and the loop overshoots
-      // its margin. Build once the plan has resolved (so we skip unprobeable files).
-      if (!playbackPlans[clip.path]) continue;
-      if (sourceProxyPaths[clip.path] || proxyInFlightRef.current.has(clip.path)) continue;
-      sources.add(clip.path);
-    }
+    const sources = collectProxySourcesForActiveClips({
+      clips: displayedClips,
+      activeClipIds: activeGridClipIds,
+      playbackPlans,
+      resolvedSources: new Set(Object.keys(sourceProxyPaths)),
+      inFlightSources: proxyInFlightRef.current,
+    });
     for (const source of sources) kickProxyBuild(source);
   }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths, kickProxyBuild]);
 
@@ -1893,6 +1927,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (videos.length === 0 || isExtracting) return;
     const force = options?.force ?? false;
     const proxies = options?.proxies ?? detectorProxies;
+    clipBatchProgressRef.current = null;
+    clipProgressGenerationRef.current = beginClipRunProgress();
 
     // "Extract again" (force) must be a COMPLETE redo: scene detection already
     // bypasses its cache via the force flag below, but the source proxy has its
@@ -1910,8 +1946,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // is cleared too so a prior terminal failure doesn't poison the new build.
     setPlaybackPlans({});
     setSourceProxyPaths({});
-    setProxyProgress({});
-    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) {
+      bumpSourceEpoch(s);
+      removeProxyProgress(s);
+    }
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
     failedProxiesRef.current.clear();
@@ -1948,7 +1986,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setMergeMode(false);
     setActiveGridItems(null);
     setUnifiedPreviews({});
-    setProgress({
+    publishDetectionProgress(clipProgressGenerationRef.current, {
       type: "progress",
       stage: "starting",
       percent: 0,
@@ -1960,7 +1998,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     try {
       if (clipMode === "gpu") {
         setServerStatus("warming");
-        setProgress({
+        publishDetectionProgress(clipProgressGenerationRef.current, {
           type: "progress",
           stage: "dependencies",
           percent: 0,
@@ -1972,15 +2010,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             error: safeLogValue(warmupError),
           });
         });
-      }
-
-      // Overlap: start the source-proxy build(s) concurrently with detection. The proxy
-      // (NVDEC+NVENC) and TransNet detection (tensor cores) mostly use different GPU
-      // silicon; they only share the decoder. Fire-and-forget — do NOT await — so the
-      // ~23s proxy overlaps the ~21s detection instead of running after it. force is
-      // honored via forceProxyRebuildRef (set above on "extract again").
-      if (featherweightActive) {
-        for (const video of videos) kickProxyBuild(video);
       }
 
       const results: ClipExtractionResult[] = [];
@@ -1996,7 +2025,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           total: videos.length,
           inputPath: rawPath,
         };
-        setProgress({
+        publishDetectionProgress(clipProgressGenerationRef.current, {
           type: "progress",
           stage: "starting",
           percent: Math.round((index / videos.length) * 100),
@@ -2031,7 +2060,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           : rawPayload;
         results.push(payload);
         setResult(combineClipResults(results, clipMode));
-        setProgress({
+        publishDetectionProgress(clipProgressGenerationRef.current, {
           type: "progress",
           stage: "complete",
           percent: Math.round(((index + 1) / videos.length) * 100),
@@ -2043,7 +2072,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       if (results.length === 0) return;
       const payload = combineClipResults(results, clipMode);
       setResult(payload);
-      setProgress({
+      publishDetectionProgress(clipProgressGenerationRef.current, {
         type: "progress",
         stage: "complete",
         percent: 100,
@@ -2072,11 +2101,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   async function handleConvertCompat() {
     if (!compatModal || isConverting) return;
     const { failedPath } = compatModal;
+    isConvertingRef.current = true;
     setIsConverting(true);
-    setConvertMessage("Converting to compatible format...");
     setError(null);
-    setProgress({
-      type: "progress",
+    publishCompatibilityProgress({
       stage: "starting",
       percent: 0,
       message: `Converting ${fileName(failedPath)} to compatible format...`,
@@ -2095,15 +2123,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       setConvertedSources((current) => ({ ...current, [failedPath]: originalName }));
       setDetectorProxies(nextProxies);
       setCompatModal(null);
-      setConvertMessage(null);
+      publishCompatibilityProgress(null);
+      isConvertingRef.current = false;
       setIsConverting(false);
       // selectedVideos already holds the raw at failedIndex; just re-run.
       void startExtraction(selectedVideos, { force: true, proxies: nextProxies });
     } catch (convertError) {
       const errorText = readBridgeError(convertError);
       setError(errorText);
-      setProgress(null);
-      setConvertMessage(null);
+      publishDetectionProgress(clipProgressGenerationRef.current, null);
+      publishCompatibilityProgress(null);
+      isConvertingRef.current = false;
       setIsConverting(false);
       setCompatModal((current) =>
         current ? { ...current, rawError: errorText } : current,
@@ -2116,6 +2146,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   function dismissCompatModal() {
     if (isConverting) return;
+    publishCompatibilityProgress(null);
     setCompatModal(null);
   }
 
@@ -2872,91 +2903,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
   }
 
-  /* DEV TOOLS: surface an in-flight proxy build in the featherweight status line.
-   * A source is building when proxy-progress has emitted a percent for it but its
-   * resolved path isn't in sourceProxyPaths yet; once built it reverts to the
-   * normal ready text. Pick the lowest percent so the line reflects the slowest
-   * build still finishing. */
-  const proxyBuildPct = React.useMemo(() => {
-    if (!featherweightActive) return null;
-    let lowest: number | null = null;
-    for (const [source, percent] of Object.entries(proxyProgress)) {
-      if (sourceProxyPaths[source]) continue;
-      if (lowest === null || percent < lowest) lowest = percent;
-    }
-    return lowest;
-  }, [featherweightActive, proxyProgress, sourceProxyPaths]);
-
-  /* The prep bar carries the proxy-build / WebP-cache progress now, so this
-   * caption is just the scene-ready summary — no duplicated build % or cached
-   * count. Featherweight bakes nothing, so it reads "live previews". */
-  const runMessage = error
-    ?? (result
-      ? (featherweightActive
-          ? `${displayedClips.length} scenes ready - live previews`
-          : `${result.sceneCount} scenes ready`)
-      : progress?.message ?? "");
-
-  /* Per-task progress bars. The detection feed and the secondary preview-prep
-   * task run CONCURRENTLY, so each bar is driven SOLELY by its own signal and
-   * never fights the other. There is no synthetic roll-up: two purpose-built
-   * bars already convey state, and a fixed-weight blend of two parallel tasks
-   * with no fixed cost ratio reads as broken (Overall at 60% while detection is
-   * 100% above it) and pulls a completed bar backward when a post-detection lazy
-   * proxy build kicks. Each task simply shows its own honest fraction.
-   *
-   * - detection: progress.percent (already cross-episode overall via
-   *   mapClipBatchProgress). Indeterminate while extracting before any percent.
-   * - prep (exactly one runs per mode — proxy ON / WebP OFF):
-   *     featherweight ON  -> source-proxy build (proxyBuildPct). Bar appears
-   *       only while a build is in flight or has resolved; absent otherwise so
-   *       a non-running stage hides rather than showing 0%. proxyBuildPct===null
-   *       with resolved paths => done (100%); building with no percent yet =>
-   *       indeterminate. Failed sources are already excluded from proxyBuildPct.
-   *     featherweight OFF -> WebP preview bake (settledPreviewCount / clips).
-   *       Cache hits flip clips to ready immediately so the bar renders complete;
-   *       errors count as settled so a single failure can't peg the bar < 100%.
-   */
-  const proxyResolvedCount = Object.keys(sourceProxyPaths).length;
-  const prepBar = React.useMemo<{
-    label: string;
-    percent: number;
-    indeterminate: boolean;
-  } | null>(() => {
-    if (featherweightActive) {
-      // No proxy in flight and none resolved => no build ran this mode: hide.
-      if (proxyBuildPct === null && proxyResolvedCount === 0) return null;
-      if (proxyBuildPct === null) {
-        return { label: "Preview proxy", percent: 100, indeterminate: false };
-      }
-      return {
-        label: "Building preview proxy",
-        percent: Math.max(0, Math.min(100, proxyBuildPct)),
-        // No percent yet (cache-miss build just kicked) => indeterminate sweep.
-        indeterminate: proxyBuildPct <= 0,
-      };
-    }
-    // WebP bake only runs with a visible grid and at least one clip; otherwise
-    // there is no prep task to report, so hide the bar rather than show 0%.
-    if (!gridPreview || displayedClips.length === 0) return null;
-    return {
-      label: `Caching previews (${readyPreviewCount}/${displayedClips.length})`,
-      // Drive the fill off SETTLED (ready + error) previews so a permanently
-      // failed bake can't keep the bar below 100% once all work has finished.
-      percent: Math.round((settledPreviewCount / displayedClips.length) * 100),
-      indeterminate: false,
-    };
-  }, [
-    featherweightActive,
-    proxyBuildPct,
-    proxyResolvedCount,
-    gridPreview,
-    displayedClips.length,
-    readyPreviewCount,
-    settledPreviewCount,
-  ]);
-
-  const detectionIndeterminate = isExtracting && (!progress || progress.percent <= 0);
+  const resolvedProxySources = React.useMemo(
+    () => Object.keys(sourceProxyPaths),
+    [sourceProxyPaths],
+  );
 
   return (
     <section
@@ -3218,36 +3168,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           )}
         </div>
 
-        {!exportSession && (progress || error || result) && (
-          <div className={`clip-run-card glass ${error ? "is-error" : ""}`}>
-            {/* Scene detection — always present; the core task. */}
-            {(progress || error) && (
-              <div className="clip-bar-row">
-                <div className="clip-run-line">
-                  <strong>{error ? "Extraction failed" : formatClipProgressStage(progress?.stage)}</strong>
-                  {progress && !error && <span>{Math.round(progress.percent)}%</span>}
-                </div>
-                {progress && !error && (
-                  <div className={`clip-progress-track ${detectionIndeterminate ? "is-indeterminate" : ""}`}>
-                    <span className="spring-motion" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} />
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Preview prep — exactly one of proxy build / WebP bake, only when it actually runs. */}
-            {!error && prepBar && (
-              <div className="clip-bar-row">
-                <div className="clip-run-line">
-                  <strong>{prepBar.label}</strong>
-                  {!prepBar.indeterminate && <span>{prepBar.percent}%</span>}
-                </div>
-                <div className={`clip-progress-track ${prepBar.indeterminate ? "is-indeterminate" : ""}`}>
-                  <span className="spring-motion" style={{ width: `${prepBar.percent}%` }} />
-                </div>
-              </div>
-            )}
-            <p>{runMessage}</p>
-          </div>
+        {!exportSession && (
+          <ClipRunStatus
+            error={error}
+            sceneCount={result?.sceneCount ?? 0}
+            displayedClipCount={displayedClips.length}
+            hasResult={Boolean(result)}
+            isExtracting={isExtracting}
+            featherweightActive={featherweightActive}
+            resolvedProxySources={resolvedProxySources}
+            gridPreview={gridPreview}
+            readyPreviewCount={readyPreviewCount}
+            settledPreviewCount={settledPreviewCount}
+          />
         )}
 
         <div className="clip-format-note">
@@ -3353,7 +3286,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                    *  - the plan resolved as PROXY mode and the proxy is genuinely
                    *    expected: no proxy path yet AND the build has not FAILED.
                    *    (The build being actively running / queued — proxyInFlightRef
-                   *    or a live proxyProgress tick — also keeps it pending, but a
+                   *    or a live proxy-progress tick — also keeps it pending, but a
                    *    FAILED build, which drops its progress entry and is recorded
                    *    in failedProxiesRef, no longer counts.)
                    *
@@ -3522,7 +3455,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           <div className="clip-empty-state">
             {isExtracting ? <Loader2 className="is-spinning" size={36} strokeWidth={1.8} /> : <Clapperboard size={36} strokeWidth={1.7} />}
             <h2>{isExtracting ? "Extracting clips" : "Clip extractor"}</h2>
-            <p>{progress?.message ?? error ?? (selectedVideos.length > 0 ? "Ready for RTX TransNetV2." : "No clips yet.")}</p>
+            <p>
+              <ClipRunProgressMessage
+                fallback={error ?? (selectedVideos.length > 0 ? "Ready for RTX TransNetV2." : "No clips yet.")}
+              />
+            </p>
           </div>
         )}
 
@@ -3531,7 +3468,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           failedPath={compatModal?.failedPath ?? null}
           rawError={compatModal?.rawError ?? null}
           isConverting={isConverting}
-          convertMessage={isConverting ? (progress?.message ?? convertMessage) : convertMessage}
           onConvert={() => void handleConvertCompat()}
           onCancel={dismissCompatModal}
         />
@@ -3667,35 +3603,6 @@ function mapClipBatchProgress(progress: ClipProgress, context: ClipBatchProgress
     percent: Math.max(0, Math.min(100, aggregatePercent)),
     message: `Episode ${context.activeIndex + 1}/${context.total} · ${fileName(context.inputPath)} · ${progress.message}`,
   };
-}
-
-function formatClipProgressStage(stage?: string): string {
-  switch (stage) {
-    case "starting":
-      return "Starting";
-    case "dependencies":
-      return "Checking Dependencies";
-    case "probe":
-      return "Reading Source";
-    case "decode":
-      return "Decoding";
-    case "analyze":
-      return "Analyzing";
-    case "scenes":
-      return "Building Scenes";
-    case "complete":
-      return "Complete";
-    default:
-      return stage ? titleCaseStage(stage) : "Ready";
-  }
-}
-
-function titleCaseStage(stage: string): string {
-  return stage
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 // Short, stable per-episode tag for multi-episode runs. The full source

@@ -36,7 +36,7 @@ vi.mock('@tauri-apps/api/webview', () => ({
 import React from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
+import { dispatchTauriEvent, mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
 import { mockDialogOpen } from '../../../tests/setup/dialog'
 import {
   ClipExtractorPanel,
@@ -49,6 +49,7 @@ import {
   clipExportOptions,
   clipPresetExtension,
   formatSupportsRateControl,
+  collectProxySourcesForActiveClips,
 } from './ClipExtractorPanel'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -813,5 +814,102 @@ describe('ClipExtractorPanel — basic render', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /extract clips/i })).toBeDisabled()
     )
+  })
+})
+
+describe('ClipExtractorPanel — lazy proxy scheduling', () => {
+  it('does not queue proxies for selected episodes before scenes are visible', async () => {
+    let resolveDetection!: (value: string) => void
+    mockInvoke('get_config', () => JSON.stringify({
+      clip_extraction_mode: 'cpu',
+      clip_hover_preview: false,
+      featherweight_previews: true,
+    }))
+    mockInvoke('video_gpu_status', () => JSON.stringify({
+      hasHevcNvenc: false,
+      hasH264Nvenc: false,
+      hasAv1Nvenc: false,
+    }))
+    mockInvoke('discord_set_state', () => null)
+    mockInvoke('discord_clear', () => null)
+    mockInvoke('build_source_proxy', () => 'C:\\proxy.mp4')
+    mockInvoke('clip_extract', () => new Promise<string>((resolve) => {
+      resolveDetection = resolve
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode-1.mkv', 'C:\\episode-2.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(
+      mockInvokeFn.mock.calls.some(([command]) => command === 'clip_extract'),
+    ).toBe(true))
+
+    expect(mockInvokeFn.mock.calls.filter(([command]) => command === 'build_source_proxy')).toHaveLength(0)
+
+    resolveDetection(JSON.stringify({
+      type: 'done',
+      mode: 'cpu',
+      input: 'C:\\episode-1.mkv',
+      scenes: [],
+      cuts: [],
+      sceneCount: 0,
+      fps: 24,
+      duration: 60,
+      totalSeconds: 1,
+    }))
+  })
+
+  it('requests proxies only for active sources and never duplicates an in-flight source', () => {
+    const baseClip = {
+      index: 0,
+      label: 'Scene 1',
+      range: '00:01 - 00:03',
+      sourceName: 'episode',
+      sourceSrc: 'asset',
+      sourceStart: 1,
+      sourceEnd: 3,
+      previewStart: 1,
+      previewEnd: 3,
+      fps: 24,
+    }
+    const episode1Clip = {
+      ...baseClip,
+      id: 'episode-1-scene-1',
+      path: 'C:\\episode-1.mkv',
+    }
+    const episode2Clip = {
+      ...baseClip,
+      id: 'episode-2-scene-1',
+      path: 'C:\\episode-2.mkv',
+    }
+    const plan = {
+      mode: 'proxy' as const,
+      videoCodec: 'hevc',
+      audioCodec: 'aac',
+      width: 1920,
+      height: 1080,
+      pixFmt: 'yuv420p10le',
+      container: 'matroska',
+      inScope: true,
+      reasons: ['codec'],
+    }
+    const input = {
+      clips: [episode1Clip, episode2Clip],
+      activeClipIds: new Set([episode1Clip.id]),
+      playbackPlans: {
+        'C:\\episode-1.mkv': plan,
+        'C:\\episode-2.mkv': plan,
+      },
+      resolvedSources: new Set<string>(),
+      inFlightSources: new Set<string>(),
+    }
+
+    expect(collectProxySourcesForActiveClips(input)).toEqual(['C:\\episode-1.mkv'])
+    expect(collectProxySourcesForActiveClips({
+      ...input,
+      inFlightSources: new Set(['C:\\episode-1.mkv']),
+    })).toEqual([])
   })
 })
