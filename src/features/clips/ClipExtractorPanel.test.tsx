@@ -51,26 +51,65 @@ vi.mock('react-virtuoso', () => ({
     data: unknown[]
     itemContent: (index: number, item: unknown) => React.ReactNode
     scrollerRef?: (el: HTMLElement | null) => void
-  }) => React.createElement(
-    'div',
-    {
-      'data-testid': 'scene-virtual-scroller',
-      ref: (node: HTMLDivElement | null) => {
-        if (props.scrollerRef) {
-          props.scrollerRef(node)
-        }
-      },
-    },
-    React.createElement(
+    initialTopMostItemIndex?: number | { index: number; align?: string }
+    rangeChanged?: (range: { startIndex: number; endIndex: number }) => void
+  }) => {
+    const initialIndex = typeof props.initialTopMostItemIndex === 'object'
+      ? props.initialTopMostItemIndex.index
+      : (props.initialTopMostItemIndex ?? 0);
+    return React.createElement(
       'div',
-      { 'data-testid': 'virtuoso-item-list' },
-      props.data.map((item, index) => React.createElement(
+      {
+        'data-testid': 'scene-virtual-scroller',
+        'data-initial-top-index': initialIndex,
+        ref: (node: HTMLDivElement | null) => {
+          if (node) {
+            node.getBoundingClientRect = () => ({
+              top: 0,
+              bottom: 800,
+              left: 0,
+              right: 1200,
+              width: 1200,
+              height: 800,
+              x: 0,
+              y: 0,
+              toJSON: () => {},
+            });
+          }
+          if (props.scrollerRef) {
+            props.scrollerRef(node)
+          }
+        },
+      },
+      React.createElement(
         'div',
-        { key: index, 'data-index': index },
-        props.itemContent(index, item),
-      )),
-    ),
-  ),
+        { 'data-testid': 'virtuoso-item-list' },
+        props.data.map((item, index) => React.createElement(
+          'div',
+          {
+            key: index,
+            'data-index': index,
+            ref: (rowNode: HTMLDivElement | null) => {
+              if (rowNode) {
+                rowNode.getBoundingClientRect = () => ({
+                  top: index * 150,
+                  bottom: (index + 1) * 150,
+                  left: 0,
+                  right: 1200,
+                  width: 1200,
+                  height: 150,
+                  x: 0,
+                  y: index * 150,
+                  toJSON: () => {},
+                });
+              }
+            },
+          },
+          props.itemContent(index, item),
+        )),
+      ),
+    )
+  },
 }))
 
 import React from 'react'
@@ -1227,6 +1266,63 @@ describe('ClipExtractorPanel â final review regressions', () => {
     await waitFor(() => expect(detectionResolvers).toHaveLength(2))
     await act(async () => {
       detectionResolvers[1](sceneExtractionResult('C:\\episode-2.mkv', 'Scene 2'))
+    })
+  })
+
+  it('preserves top visible clip anchor when changing columns in classic preview mode', async () => {
+    installScenePanelMocks(false)
+    mockInvoke('clip_extract', () => sceneExtractionResult('C:\\episode.mkv'))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await screen.findByText('Scene 1')
+
+    const twoColButton = screen.getByRole('button', { name: /2 columns/i })
+    await user.click(twoColButton)
+
+    const scroller = await screen.findByTestId('scene-virtual-scroller')
+    expect(scroller).toBeInTheDocument()
+    expect(scroller.getAttribute('data-initial-top-index')).toBe('0')
+  })
+
+  it('proves the same granted clip IDs control playback plan probes, proxy builds, loading states, and live player mounting', async () => {
+    installScenePanelMocks(true)
+    mockInvoke('clip_extract', () => sceneExtractionResult('C:\\episode.mkv'))
+    mockInvoke('clip_playback_plan', () => proxyPlaybackPlan())
+    let resolveProxy!: (value: string) => void
+    mockInvoke('build_source_proxy', () => new Promise<string>((resolve) => {
+      resolveProxy = resolve
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\episode.mkv'])
+
+    const user = userEvent.setup()
+    render(<ClipExtractorPanel active />)
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await screen.findByText('Scene 1')
+
+    // 1. Playback plan probe was invoked for granted clip source
+    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([cmd]) => cmd === 'clip_playback_plan')).toBe(true))
+
+    // 2. Proxy build was invoked for granted clip source
+    await waitFor(() => expect(mockInvokeFn.mock.calls.some(([cmd]) => cmd === 'build_source_proxy')).toBe(true))
+
+    // 3. Tile is in loading state during proxy build
+    const tile = () => document.querySelector('.clip-preview-tile-wrapper') as HTMLElement
+    expect(tile().querySelector('.clip-video-placeholder.is-loading')).toBeInTheDocument()
+
+    // 4. Resolve proxy
+    await act(async () => {
+      resolveProxy('C:\\cache\\episode-proxy.mp4')
+    })
+
+    // 5. Video player is mounted for the granted clip
+    await waitFor(() => {
+      expect(document.querySelector('.clip-offset-video')).toBeInTheDocument()
+      expect(document.querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument()
     })
   })
 })

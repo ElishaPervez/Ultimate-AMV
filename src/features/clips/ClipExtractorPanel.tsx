@@ -1302,10 +1302,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   });
 
   React.useEffect(() => {
-    if (import.meta.env.DEV) {
+    if (import.meta.env.DEV && featherweightActive) {
       reportGridPlaybackDiagnostics(playbackDiagnostics);
     }
-  }, [playbackDiagnostics]);
+  }, [playbackDiagnostics, featherweightActive]);
 
   const activeGridClipIds = React.useMemo(() => {
     const active = new Set<string>();
@@ -1361,16 +1361,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     (next: number) => {
       const cols = Math.min(4, Math.max(1, next));
       if (cols === gridCols) return;
-      if (firstVisibleRow != null && clipRows[firstVisibleRow]?.[0]) {
-        const anchorId = clipRows[firstVisibleRow][0].id;
+      const topRow = (featherweightActive && firstVisibleRow != null)
+        ? firstVisibleRow
+        : (visibleRowRange?.startIndex ?? 0);
+      if (clipRows[topRow]?.[0]) {
+        const anchorId = clipRows[topRow][0].id;
         const idx = displayedClips.findIndex((c) => c.id === anchorId);
-        anchorClipIndexRef.current = idx >= 0 ? idx : Math.max(0, firstVisibleRow * gridCols);
+        anchorClipIndexRef.current = idx >= 0 ? idx : Math.max(0, topRow * gridCols);
       } else {
         anchorClipIndexRef.current = 0;
       }
       setGridCols(cols);
     },
-    [gridCols, firstVisibleRow, clipRows, displayedClips],
+    [gridCols, featherweightActive, firstVisibleRow, visibleRowRange, clipRows, displayedClips],
   );
 
   const changeClipPreviewSpeed = React.useCallback((value: number) => {

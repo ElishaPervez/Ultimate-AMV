@@ -90,15 +90,27 @@ export function useClipPlaybackWindow({
     anchorClipId: null,
   }));
 
+  const isMountedRef = React.useRef<boolean>(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const lastCommittedGrantedIdsRef = React.useRef<Set<string>>(new Set());
   const lastCommittedVisibleIdsRef = React.useRef<Set<string>>(new Set());
   const lastCommittedFirstVisibleRowRef = React.useRef<number | null>(null);
   const lastCommittedLastVisibleRowRef = React.useRef<number | null>(null);
+
   const resizeAnchorClipIdRef = React.useRef<string | null>(null);
+  const savedHiddenAnchorClipIdRef = React.useRef<string | null>(null);
 
   const lastObservedWidthRef = React.useRef<number>(0);
   const lastObservedHeightRef = React.useRef<number>(0);
-  const lastScrollTopRef = React.useRef<number>(0);
+  const lastObservedZoomRef = React.useRef<number>(0);
+
+  const lastFrameSampledScrollTopRef = React.useRef<number>(0);
   const fastScrollingRef = React.useRef<boolean>(false);
 
   const rafIdRef = React.useRef<number | null>(null);
@@ -131,83 +143,122 @@ export function useClipPlaybackWindow({
 
   // Measure DOM row positions and derive visibility & player grants
   const measure = React.useCallback(() => {
-    if (!panelActive || !scrollerEl) {
+    if (!isMountedRef.current || !panelActive || !scrollerEl) {
       const emptySet = new Set<string>();
       lastCommittedGrantedIdsRef.current = emptySet;
-      setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setFirstVisibleRow(null);
-      setLastVisibleRow(null);
-      setDiagnostics((prev) => ({
-        ...prev,
-        viewportWidth: 0,
-        viewportHeight: 0,
-        firstVisibleRow: null,
-        lastVisibleRow: null,
-        visibleTileCount: 0,
-        grantedCount: 0,
-        visibleCountExceededHardCap: false,
-      }));
+      if (isMountedRef.current) {
+        setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+        setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+        setFirstVisibleRow(null);
+        setLastVisibleRow(null);
+        setDiagnostics((prev) => ({
+          ...prev,
+          viewportWidth: 0,
+          viewportHeight: 0,
+          firstVisibleRow: null,
+          lastVisibleRow: null,
+          visibleTileCount: 0,
+          grantedCount: 0,
+          visibleCountExceededHardCap: false,
+        }));
+      }
       return;
     }
-
-    const scrollerRect = scrollerEl.getBoundingClientRect();
-    const isZeroDimension = scrollerRect.width <= 0 || scrollerRect.height <= 0;
 
     if (!lightweightEnabled) {
       const emptySet = new Set<string>();
       lastCommittedGrantedIdsRef.current = emptySet;
-      setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setFirstVisibleRow(null);
-      setLastVisibleRow(null);
-      setDiagnostics((prev) => ({
-        ...prev,
-        viewportWidth: scrollerRect.width,
-        viewportHeight: scrollerRect.height,
-        firstVisibleRow: null,
-        lastVisibleRow: null,
-        visibleTileCount: 0,
-        grantedCount: 0,
-        visibleCountExceededHardCap: false,
-      }));
+      if (isMountedRef.current) {
+        setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+        setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+        setFirstVisibleRow(null);
+        setLastVisibleRow(null);
+      }
       return;
     }
 
-    const itemElements = scrollerEl.querySelectorAll<HTMLElement>(
-      '[data-testid="virtuoso-item-list"] > [data-index], [data-index]',
-    );
-
-    if (isZeroDimension && itemElements.length === 0) {
+    const scrollerRect = scrollerEl.getBoundingClientRect();
+    if (scrollerRect.width <= 0 || scrollerRect.height <= 0) {
+      // Grid is zero-sized. Release players, retain anchor, do NOT grant top clips
       const emptySet = new Set<string>();
       lastCommittedGrantedIdsRef.current = emptySet;
-      setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
-      setFirstVisibleRow(null);
-      setLastVisibleRow(null);
-      setDiagnostics((prev) => ({
-        ...prev,
-        viewportWidth: 0,
-        viewportHeight: 0,
-        firstVisibleRow: null,
-        lastVisibleRow: null,
-        visibleTileCount: 0,
-        grantedCount: 0,
-        visibleCountExceededHardCap: false,
-      }));
+      if (isMountedRef.current) {
+        setGrantedClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+        setVisibleClipIds((prev) => (prev.size === 0 ? prev : emptySet));
+        setFirstVisibleRow(null);
+        setLastVisibleRow(null);
+        setDiagnostics((prev) => ({
+          ...prev,
+          viewportWidth: 0,
+          viewportHeight: 0,
+          firstVisibleRow: null,
+          lastVisibleRow: null,
+          visibleTileCount: 0,
+          grantedCount: 0,
+          visibleCountExceededHardCap: false,
+        }));
+      }
       return;
     }
+
+    // Check if layout dimensions or zoom changed while hidden before updating lastObserved values
+    const currentZoom = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+    const widthChangedWhileHidden =
+      lastObservedWidthRef.current > 0 &&
+      Math.abs(scrollerRect.width - lastObservedWidthRef.current) >= 1;
+    const zoomChangedWhileHidden =
+      lastObservedZoomRef.current > 0 &&
+      Math.abs(currentZoom - lastObservedZoomRef.current) >= 0.01;
+
+    if (widthChangedWhileHidden || zoomChangedWhileHidden) {
+      const anchorToPreserve = savedHiddenAnchorClipIdRef.current;
+      savedHiddenAnchorClipIdRef.current = null;
+      setLayoutGeneration((g) => g + 1);
+      if (onResetLayoutRef.current) {
+        onResetLayoutRef.current(anchorToPreserve);
+      }
+    } else {
+      savedHiddenAnchorClipIdRef.current = null;
+    }
+
+    lastObservedWidthRef.current = scrollerRect.width;
+    lastObservedHeightRef.current = scrollerRect.height;
+    lastObservedZoomRef.current = currentZoom;
+
+    // Check frame scroll movement
+    const currentScrollTop = scrollerEl.scrollTop;
+    const frameScrollDelta = Math.abs(currentScrollTop - lastFrameSampledScrollTopRef.current);
+    lastFrameSampledScrollTopRef.current = currentScrollTop;
+
+    if (frameScrollDelta > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
+      if (!fastScrollingRef.current) {
+        fastScrollingRef.current = true;
+        if (isMountedRef.current) setFastScrolling(true);
+      }
+      clearSettleTimer();
+      settleTimerRef.current = setTimeout(() => {
+        settleTimerRef.current = null;
+        if (!isMountedRef.current) return;
+        fastScrollingRef.current = false;
+        setFastScrolling(false);
+        scheduleMeasurement();
+      }, FAST_SCROLL_SETTLE_MS);
+    }
+
+    // Direct row wrappers under [data-testid="virtuoso-item-list"] > [data-index]
+    const itemElements = scrollerEl.querySelectorAll<HTMLElement>(
+      '[data-testid="virtuoso-item-list"] > [data-index]',
+    );
 
     const rows: MeasuredClipRow[] = [];
     const seenIndices = new Set<number>();
-    const isJsdomFallback = isZeroDimension && itemElements.length > 0;
 
     for (let i = 0; i < itemElements.length; i += 1) {
       const el = itemElements[i];
       const indexAttr = el.getAttribute('data-index');
-      if (indexAttr == null) continue;
-      const index = parseInt(indexAttr, 10);
-      if (!Number.isFinite(index) || index < 0 || index >= clipRows.length) continue;
+      if (indexAttr == null || !/^\d+$/.test(indexAttr)) continue;
+      const index = Number(indexAttr);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= clipRows.length) continue;
       if (seenIndices.has(index)) continue;
       seenIndices.add(index);
 
@@ -215,24 +266,18 @@ export function useClipPlaybackWindow({
       if (!rowClips || rowClips.length === 0) continue;
 
       const rect = el.getBoundingClientRect();
-      const top = isJsdomFallback ? index * 100 : rect.top;
-      const bottom = isJsdomFallback ? (index + 1) * 100 : rect.bottom;
-
       rows.push({
         rowIndex: index,
-        top,
-        bottom,
+        top: rect.top,
+        bottom: rect.bottom,
         clipIds: rowClips.map((c) => c.id),
       });
     }
 
-    const viewportTop = isJsdomFallback ? 0 : scrollerRect.top;
-    const viewportBottom = isJsdomFallback ? 800 : scrollerRect.bottom;
-
     const selection = selectClipPlaybackWindow({
       rows,
-      viewportTop,
-      viewportBottom,
+      viewportTop: scrollerRect.top,
+      viewportBottom: scrollerRect.bottom,
       marginPx,
       requestedCap,
       hardCap,
@@ -249,77 +294,101 @@ export function useClipPlaybackWindow({
       lastCommittedLastVisibleRowRef.current = selection.lastVisibleRow;
     }
 
-    setGrantedClipIds((prev) => (areSetsEqual(prev, grantedToCommit) ? prev : grantedToCommit));
-    setVisibleClipIds((prev) => (areSetsEqual(prev, selection.visibleIds) ? prev : selection.visibleIds));
-    setFirstVisibleRow(selection.firstVisibleRow);
-    setLastVisibleRow(selection.lastVisibleRow);
+    if (isMountedRef.current) {
+      setGrantedClipIds((prev) => (areSetsEqual(prev, grantedToCommit) ? prev : grantedToCommit));
+      setVisibleClipIds((prev) => (areSetsEqual(prev, selection.visibleIds) ? prev : selection.visibleIds));
+      setFirstVisibleRow(selection.firstVisibleRow);
+      setLastVisibleRow(selection.lastVisibleRow);
 
-    setDiagnostics({
-      viewportWidth: scrollerRect.width,
-      viewportHeight: scrollerRect.height,
-      firstVisibleRow: selection.firstVisibleRow,
-      lastVisibleRow: selection.lastVisibleRow,
-      visibleTileCount: selection.visibleIds.size,
-      grantedCount: grantedToCommit.size,
-      hardCap,
-      fastScrolling: fastScrollingRef.current,
-      layoutGeneration,
-      visibleCountExceededHardCap: selection.visibleCountExceededHardCap,
-      anchorClipId: resizeAnchorClipIdRef.current,
-    });
-  }, [panelActive, scrollerEl, lightweightEnabled, clipRows, marginPx, requestedCap, hardCap, layoutGeneration]);
+      setDiagnostics({
+        viewportWidth: scrollerRect.width,
+        viewportHeight: scrollerRect.height,
+        firstVisibleRow: selection.firstVisibleRow,
+        lastVisibleRow: selection.lastVisibleRow,
+        visibleTileCount: selection.visibleIds.size,
+        grantedCount: grantedToCommit.size,
+        hardCap,
+        fastScrolling: fastScrollingRef.current,
+        layoutGeneration,
+        visibleCountExceededHardCap: selection.visibleCountExceededHardCap,
+        anchorClipId: resizeAnchorClipIdRef.current ?? savedHiddenAnchorClipIdRef.current,
+      });
+    }
+  }, [panelActive, scrollerEl, lightweightEnabled, clipRows, marginPx, requestedCap, hardCap, layoutGeneration, clearSettleTimer]);
+
+  const measureRef = React.useRef(measure);
+  measureRef.current = measure;
 
   const scheduleMeasurement = React.useCallback(() => {
     if (rafIdRef.current !== null) return;
     rafIdRef.current = requestAnimationFrame(() => {
       rafIdRef.current = null;
-      measure();
+      measureRef.current();
     });
-  }, [measure]);
+  }, []);
 
-  // Initial measurement & reactivity to inputs
+  // Initial measurement & reactivity to inputs (always through scheduleMeasurement!)
   React.useEffect(() => {
-    measure();
-  }, [measure, renderedRange, gridCols, clipRows.length]);
+    scheduleMeasurement();
+  }, [scheduleMeasurement, renderedRange, gridCols, clipRows, scrollerEl]);
 
   // Panel active/inactive transitions
   React.useEffect(() => {
     if (!panelActive) {
+      // Save anchor clip ID before deactivating
+      const rowIdx = lastCommittedFirstVisibleRowRef.current;
+      if (rowIdx != null && clipRows[rowIdx]?.[0]) {
+        savedHiddenAnchorClipIdRef.current = clipRows[rowIdx][0].id;
+      }
       cancelPendingRaf();
       clearSettleTimer();
       clearResizeTimer();
       if (fastScrollingRef.current) {
         fastScrollingRef.current = false;
-        setFastScrolling(false);
+        if (isMountedRef.current) setFastScrolling(false);
       }
       const emptySet = new Set<string>();
       lastCommittedGrantedIdsRef.current = emptySet;
-      setGrantedClipIds(emptySet);
-      setVisibleClipIds(emptySet);
-      setFirstVisibleRow(null);
-      setLastVisibleRow(null);
+      if (isMountedRef.current) {
+        setGrantedClipIds(emptySet);
+        setVisibleClipIds(emptySet);
+        setFirstVisibleRow(null);
+        setLastVisibleRow(null);
+      }
     } else {
-      measure();
+      scheduleMeasurement();
     }
-  }, [panelActive, measure, cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
+  }, [panelActive, clipRows, scheduleMeasurement, cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
 
-  // Attach scroll listener
+  // Attach scroll listener (ONLY when lightweightEnabled is true)
   React.useEffect(() => {
-    if (!scrollerEl || !panelActive) return undefined;
+    if (!scrollerEl || !panelActive || !lightweightEnabled) return undefined;
 
-    lastScrollTopRef.current = scrollerEl.scrollTop;
+    lastFrameSampledScrollTopRef.current = scrollerEl.scrollTop;
 
     const handleScroll = () => {
-      const currentTop = scrollerEl.scrollTop;
-      const delta = Math.abs(currentTop - lastScrollTopRef.current);
-      lastScrollTopRef.current = currentTop;
-
-      if (delta > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
-        fastScrollingRef.current = true;
-        setFastScrolling(true);
+      if (fastScrollingRef.current) {
         clearSettleTimer();
         settleTimerRef.current = setTimeout(() => {
           settleTimerRef.current = null;
+          if (!isMountedRef.current) return;
+          fastScrollingRef.current = false;
+          setFastScrolling(false);
+          scheduleMeasurement();
+        }, FAST_SCROLL_SETTLE_MS);
+      }
+
+      const currentScrollTop = scrollerEl.scrollTop;
+      const deltaSinceLastFrame = Math.abs(currentScrollTop - lastFrameSampledScrollTopRef.current);
+      if (deltaSinceLastFrame > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
+        if (!fastScrollingRef.current) {
+          fastScrollingRef.current = true;
+          if (isMountedRef.current) setFastScrolling(true);
+        }
+        clearSettleTimer();
+        settleTimerRef.current = setTimeout(() => {
+          settleTimerRef.current = null;
+          if (!isMountedRef.current) return;
           fastScrollingRef.current = false;
           setFastScrolling(false);
           scheduleMeasurement();
@@ -333,22 +402,26 @@ export function useClipPlaybackWindow({
     return () => {
       scrollerEl.removeEventListener('scroll', handleScroll);
     };
-  }, [scrollerEl, panelActive, clearSettleTimer, scheduleMeasurement]);
+  }, [scrollerEl, panelActive, lightweightEnabled, clearSettleTimer, scheduleMeasurement]);
 
   // Observe resize and zoom
   React.useEffect(() => {
     if (!scrollerEl || !panelActive) return undefined;
 
     const initialRect = scrollerEl.getBoundingClientRect();
-    lastObservedWidthRef.current = initialRect.width;
-    lastObservedHeightRef.current = initialRect.height;
+    if (lastObservedWidthRef.current === 0 && initialRect.width > 0) {
+      lastObservedWidthRef.current = initialRect.width;
+      lastObservedHeightRef.current = initialRect.height;
+    }
+    if (lastObservedZoomRef.current === 0 && typeof window !== 'undefined') {
+      lastObservedZoomRef.current = window.devicePixelRatio;
+    }
 
     const handleDimensionChange = (isZoomEvent = false) => {
-      // Any resize cancels fast scrolling hold
       clearSettleTimer();
       if (fastScrollingRef.current) {
         fastScrollingRef.current = false;
-        setFastScrolling(false);
+        if (isMountedRef.current) setFastScrolling(false);
       }
 
       const rect = scrollerEl.getBoundingClientRect();
@@ -377,6 +450,7 @@ export function useClipPlaybackWindow({
         clearResizeTimer();
         resizeTimerRef.current = setTimeout(() => {
           resizeTimerRef.current = null;
+          if (!isMountedRef.current) return;
           const anchorToPreserve = resizeAnchorClipIdRef.current;
           setLayoutGeneration((g) => g + 1);
           if (onResetLayoutRef.current) {
@@ -415,6 +489,15 @@ export function useClipPlaybackWindow({
       cancelPendingRaf();
     };
   }, [scrollerEl, panelActive, clipRows, clearResizeTimer, clearSettleTimer, scheduleMeasurement, cancelPendingRaf]);
+
+  // Comprehensive unmount cleanup
+  React.useEffect(() => {
+    return () => {
+      cancelPendingRaf();
+      clearSettleTimer();
+      clearResizeTimer();
+    };
+  }, [cancelPendingRaf, clearSettleTimer, clearResizeTimer]);
 
   return {
     grantedClipIds,

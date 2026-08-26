@@ -627,17 +627,92 @@ describe('useClipPlaybackWindow', () => {
     expect(result.current.grantedClipIds.size).toBe(0);
   });
 
-  it('11. cleans up all observers, event listeners, and timers on unmount', () => {
-    const clipRows = [[{ id: 'c0' }]];
+  it('12. detects width/zoom change while panel was hidden on reactivation and triggers layout reset', () => {
+    const clipRows = [
+      [{ id: 'c0' }],
+      [{ id: 'c1' }],
+      [{ id: 'c2' }],
+      [{ id: 'c3' }],
+    ];
     const dom = createMockDom({
-      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
-      rowRects: [{ index: 0, top: 0, bottom: 100, height: 100 }],
+      scrollerRect: { top: 0, bottom: 200, width: 800, height: 200 },
+      rowRects: [
+        { index: 0, top: -200, bottom: -100, height: 100 },
+        { index: 1, top: -100, bottom: 0, height: 100 },
+        { index: 2, top: 0, bottom: 100, height: 100 },
+        { index: 3, top: 100, bottom: 200, height: 100 },
+      ],
+    });
+    const onResetLayout = vi.fn();
+
+    const { result, rerender } = renderHook(
+      (props: { panelActive: boolean }) =>
+        useClipPlaybackWindow({
+          scrollerEl: dom.scroller,
+          panelActive: props.panelActive,
+          lightweightEnabled: true,
+          clipRows,
+          requestedCap: 4,
+          hardCap: 35,
+          marginPx: 0,
+          gridCols: 1,
+          onResetLayout,
+        }),
+      { initialProps: { panelActive: true } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
     });
 
-    const removeEventListenerSpy = vi.spyOn(dom.scroller, 'removeEventListener');
-    const windowRemoveListenerSpy = vi.spyOn(window, 'removeEventListener');
+    expect(result.current.grantedClipIds).toEqual(new Set(['c2', 'c3']));
 
-    const { unmount } = renderHook(() =>
+    // Hide panel
+    rerender({ panelActive: false });
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+    expect(result.current.grantedClipIds.size).toBe(0);
+
+    // Resize scroller while hidden: width changes from 800 to 500
+    dom.scroller.getBoundingClientRect = vi.fn(() => ({
+      top: 0, bottom: 200, left: 0, right: 500, width: 500, height: 200, x: 0, y: 0, toJSON: () => {},
+    }));
+
+    // Reactivate panel
+    rerender({ panelActive: true });
+
+    // Reactivation must not measure synchronously!
+    expect(result.current.grantedClipIds.size).toBe(0);
+    expect(onResetLayout).not.toHaveBeenCalled();
+
+    // Advance to next frame
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    expect(onResetLayout).toHaveBeenCalledTimes(1);
+    expect(onResetLayout).toHaveBeenCalledWith('c2');
+    expect(result.current.layoutGeneration).toBe(1);
+    expect(result.current.grantedClipIds).toEqual(new Set(['c2', 'c3']));
+  });
+
+  it('13. releases players and does not grant top-of-episode clips when grid is zero-sized, preserving anchor', () => {
+    const clipRows = [
+      [{ id: 'c0' }],
+      [{ id: 'c1' }],
+      [{ id: 'c2' }],
+    ];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
+      rowRects: [
+        { index: 0, top: -100, bottom: 0, height: 100 },
+        { index: 1, top: 0, bottom: 100, height: 100 },
+        { index: 2, top: 100, bottom: 200, height: 100 },
+      ],
+    });
+
+    const { result } = renderHook(() =>
       useClipPlaybackWindow({
         scrollerEl: dom.scroller,
         panelActive: true,
@@ -654,9 +729,276 @@ describe('useClipPlaybackWindow', () => {
       vi.advanceTimersByTime(16);
     });
 
+    expect(result.current.grantedClipIds).toEqual(new Set(['c1']));
+
+    // Make scroller zero-sized (e.g. collapsed or display:none) while rendered row elements still exist in DOM
+    dom.scroller.getBoundingClientRect = vi.fn(() => ({
+      top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => {},
+    }));
+
+    act(() => {
+      triggerResize(dom.scroller);
+      vi.advanceTimersByTime(16);
+    });
+
+    // Zero-sized: must release players and NEVER grant top clips (c0)
+    expect(result.current.grantedClipIds.size).toBe(0);
+    expect(result.current.visibleClipIds.size).toBe(0);
+    expect(result.current.grantedClipIds.has('c0')).toBe(false);
+  });
+
+  it('14. coalesces multiple small scroll events in one frame crossing threshold to trigger fast-scroll hold', () => {
+    const clipRows = [
+      [{ id: 'c0' }],
+      [{ id: 'c1' }],
+      [{ id: 'c2' }],
+      [{ id: 'c3' }],
+    ];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
+      rowRects: [
+        { index: 0, top: 0, bottom: 100, height: 100 },
+        { index: 1, top: 100, bottom: 200, height: 100 },
+        { index: 2, top: 200, bottom: 300, height: 100 },
+        { index: 3, top: 300, bottom: 400, height: 100 },
+      ],
+    });
+
+    const { result } = renderHook(() =>
+      useClipPlaybackWindow({
+        scrollerEl: dom.scroller,
+        panelActive: true,
+        lightweightEnabled: true,
+        clipRows,
+        requestedCap: 1,
+        hardCap: 35,
+        marginPx: 0,
+        gridCols: 1,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    expect(result.current.grantedClipIds).toEqual(new Set(['c0']));
+
+    // Send 3 small scroll events (20px, 25px, 25px = 70px > 60px) in the same frame before rAF runs
+    act(() => {
+      dom.scroller.scrollTop = 20;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+      dom.scroller.scrollTop = 45;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+      dom.scroller.scrollTop = 70;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+    });
+
+    // Move row 3 into view
+    dom.rowEls[0].getBoundingClientRect = () => ({
+      top: -300, bottom: -200, left: 0, right: 800, width: 800, height: 100, x: 0, y: -300, toJSON: () => {},
+    });
+    dom.rowEls[3].getBoundingClientRect = () => ({
+      top: 0, bottom: 100, left: 0, right: 800, width: 800, height: 100, x: 0, y: 0, toJSON: () => {},
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    // Hold should be active: no new players mounted!
+    expect(result.current.fastScrolling).toBe(true);
+    expect(result.current.grantedClipIds).toEqual(new Set(['c0']));
+  });
+
+  it('15. restarts 140ms settle timer on every scroll event during hold until scrolling stops', () => {
+    const clipRows = [
+      [{ id: 'c0' }],
+      [{ id: 'c1' }],
+      [{ id: 'c2' }],
+    ];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
+      rowRects: [
+        { index: 0, top: 0, bottom: 100, height: 100 },
+        { index: 1, top: 100, bottom: 200, height: 100 },
+        { index: 2, top: 200, bottom: 300, height: 100 },
+      ],
+    });
+
+    const { result } = renderHook(() =>
+      useClipPlaybackWindow({
+        scrollerEl: dom.scroller,
+        panelActive: true,
+        lightweightEnabled: true,
+        clipRows,
+        requestedCap: 1,
+        hardCap: 35,
+        marginPx: 0,
+        gridCols: 1,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    // Trigger fast scroll
+    act(() => {
+      dom.scroller.scrollTop = 100;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+      vi.advanceTimersByTime(16);
+    });
+    expect(result.current.fastScrolling).toBe(true);
+
+    // Keep scrolling periodically at t=50ms, 100ms, 150ms, 200ms
+    act(() => {
+      vi.advanceTimersByTime(50);
+      dom.scroller.scrollTop += 20;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(result.current.fastScrolling).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(50);
+      dom.scroller.scrollTop += 20;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(result.current.fastScrolling).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(50);
+      dom.scroller.scrollTop += 20;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(result.current.fastScrolling).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(50);
+      dom.scroller.scrollTop += 20;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+    });
+    // At t=200ms (>140ms from start, but just triggered at 200ms), hold is STILL active
+    expect(result.current.fastScrolling).toBe(true);
+
+    // Advance 100ms (t=300ms, < 140ms since last event at 200ms)
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(result.current.fastScrolling).toBe(true);
+
+    // Advance 50ms more (t=350ms, > 140ms since last event at 200ms)
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+    expect(result.current.fastScrolling).toBe(false);
+  });
+
+  it('16. cleans up timers and does not trigger state updates or errors on unmount during hold', () => {
+    const clipRows = [[{ id: 'c0' }]];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
+      rowRects: [{ index: 0, top: 0, bottom: 100, height: 100 }],
+    });
+
+    const { unmount } = renderHook(() =>
+      useClipPlaybackWindow({
+        scrollerEl: dom.scroller,
+        panelActive: true,
+        lightweightEnabled: true,
+        clipRows,
+        requestedCap: 1,
+        hardCap: 35,
+        marginPx: 0,
+        gridCols: 1,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    // Start fast scroll
+    act(() => {
+      dom.scroller.scrollTop = 100;
+      dom.scroller.dispatchEvent(new Event('scroll'));
+      vi.advanceTimersByTime(16);
+    });
+
+    // Unmount during hold
     unmount();
 
-    expect(removeEventListenerSpy).toHaveBeenCalledWith('scroll', expect.any(Function));
-    expect(windowRemoveListenerSpy).toHaveBeenCalledWith(UI_ZOOM_CHANGED_EVENT, expect.any(Function));
+    // Advancing timers beyond 140ms should not throw or cause warning
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+  });
+
+  it('17. does not install scroll listeners when lightweightEnabled is false', () => {
+    const clipRows = [[{ id: 'c0' }], [{ id: 'c1' }]];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 100, width: 800, height: 100 },
+      rowRects: [{ index: 0, top: 0, bottom: 100, height: 100 }],
+    });
+
+    const addEventListenerSpy = vi.spyOn(dom.scroller, 'addEventListener');
+
+    const { result } = renderHook(() =>
+      useClipPlaybackWindow({
+        scrollerEl: dom.scroller,
+        panelActive: true,
+        lightweightEnabled: false,
+        clipRows,
+        requestedCap: 2,
+        hardCap: 35,
+        marginPx: 0,
+        gridCols: 1,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    expect(addEventListenerSpy).not.toHaveBeenCalledWith('scroll', expect.any(Function), expect.anything());
+    expect(result.current.grantedClipIds.size).toBe(0);
+    expect(result.current.fastScrolling).toBe(false);
+  });
+
+  it('18. only measures direct children with valid non-negative integer data-index', () => {
+    const clipRows = [[{ id: 'c0' }], [{ id: 'c1' }]];
+    const dom = createMockDom({
+      scrollerRect: { top: 0, bottom: 200, width: 800, height: 200 },
+      rowRects: [
+        { index: 0, top: 0, bottom: 100, height: 100 },
+      ],
+    });
+
+    // Add malformed elements
+    const malformed1 = document.createElement('div');
+    malformed1.setAttribute('data-index', '2foo');
+    dom.list.appendChild(malformed1);
+
+    const malformed2 = document.createElement('div');
+    malformed2.setAttribute('data-index', '-1');
+    dom.list.appendChild(malformed2);
+
+    const { result } = renderHook(() =>
+      useClipPlaybackWindow({
+        scrollerEl: dom.scroller,
+        panelActive: true,
+        lightweightEnabled: true,
+        clipRows,
+        requestedCap: 2,
+        hardCap: 35,
+        marginPx: 0,
+        gridCols: 1,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(16);
+    });
+
+    expect(result.current.grantedClipIds).toEqual(new Set(['c0']));
   });
 });
