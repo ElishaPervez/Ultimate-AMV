@@ -15,6 +15,7 @@
 import React from "react";
 import { MAX_GRID_VIDEO_PLAYERS_CEILING } from "../lib/constants";
 import {
+  getGridPlaybackDiagnostics,
   getOffsetMetricsSummary,
   setPreviewTunables,
   usePreviewTunables,
@@ -23,12 +24,14 @@ import {
 export function PreviewDevTools({ onClose }: { onClose: () => void }) {
   const tunables = usePreviewTunables();
   const [summary, setSummary] = React.useState(() => getOffsetMetricsSummary());
+  const [diagnostics, setDiagnostics] = React.useState(() => getGridPlaybackDiagnostics());
 
   // Poll the (non-reactive) live-metrics registry. 10 Hz is plenty for a
   // human-readable readout and keeps the hot path free of React churn.
   React.useEffect(() => {
     const id = window.setInterval(() => {
       setSummary(getOffsetMetricsSummary());
+      setDiagnostics(getGridPlaybackDiagnostics());
     }, 100);
     return () => window.clearInterval(id);
   }, []);
@@ -151,7 +154,34 @@ export function PreviewDevTools({ onClose }: { onClose: () => void }) {
               v={`${summary.maxOvershootMs.toFixed(1)} ms`}
               danger={summary.maxOvershootMs > 80}
             />
+            <Row
+              k="scrolling panel size"
+              v={`${Math.round(diagnostics.viewportWidth)} × ${Math.round(diagnostics.viewportHeight)} px`}
+            />
+            <Row
+              k="visible rows"
+              v={
+                diagnostics.firstVisibleRow != null && diagnostics.lastVisibleRow != null
+                  ? `Row ${diagnostics.firstVisibleRow} – ${diagnostics.lastVisibleRow}`
+                  : "—"
+              }
+            />
+            <Row k="visible tile count" v={String(diagnostics.visibleTileCount)} />
+            <Row k="granted player count" v={String(diagnostics.grantedCount)} />
+            <Row k="hard decoder ceiling" v={String(diagnostics.hardCap)} />
+            <Row
+              k="fast-scroll hold"
+              v={diagnostics.fastScrolling ? "Active (holding)" : "Inactive"}
+              danger={diagnostics.fastScrolling}
+            />
+            <Row k="layout generation" v={String(diagnostics.layoutGeneration)} />
+            <Row
+              k="visible count > hard cap"
+              v={diagnostics.visibleCountExceededHardCap ? "YES (capped to center)" : "No"}
+              danger={diagnostics.visibleCountExceededHardCap}
+            />
           </div>
+
         </div>
       </div>
     </div>
