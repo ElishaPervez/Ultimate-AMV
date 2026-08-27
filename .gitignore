@@ -5,8 +5,8 @@ reference/
 # document the vault API — reference only. MUST NOT be committed to the public repo.
 Tsukyio-AE-Extension-development/
 
-# Local agent/editor state. docs/agent/ holds the workflow rules split
-# out of CLAUDE.md — same privacy as CLAUDE.md itself, keep local-only.
+# Local agent/editor state and internal working documents. Keep these local;
+# they are not part of the shipped project.
 .claude/
 .vscode/
 .idea/
@@ -14,9 +14,7 @@ Tsukyio-AE-Extension-development/
 .antigravitycli/
 CLAUDE.md
 AGENTS.md
-docs/agent/
-# Agent notes doc — same privacy as CLAUDE.md, keep local-only.
-docs/CLAUDE-NOTES.md
+/docs/
 # Project-manager tool sidecar metadata. Local-only.
 .pm.json
 # Local LLM scratch dump. Not part of the project.
@@ -43,12 +41,6 @@ temp.md
 /TEST_SUMMARY.md
 /regression-report.html
 /review-report.html
-
-# Agent-generated decision-aid / explainer HTML — the per-bug, per-feature
-# visualizations generated for review (see CLAUDE.md), not shipped product
-# docs. Same privacy as docs/agent/. These all live directly under docs/;
-# the root index.html app entry and experiments/ HTML are unaffected.
-docs/*.html
 
 # Per-release agent changelog scratch (e.g. CHANGELOG-0.13.0.md). The
 # canonical CHANGELOG.md (no version suffix) stays tracked.
@@ -129,10 +121,5 @@ graphify-out/
 **/graphify-out/
 .graphify_*
 
-# Experimental artifacts.
-experiments/*.png
-experiments/*.jpg
-experiments/*.jpeg
-experiments/*.webp
-experiments/debug_*/
-experiments/_scratch_*/
+# Experimental code and artifacts. Nothing under this folder is shipped.
+/experiments/
