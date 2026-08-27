@@ -45,6 +45,8 @@ temp.md
 # Per-release agent changelog scratch (e.g. CHANGELOG-0.13.0.md). The
 # canonical CHANGELOG.md (no version suffix) stays tracked.
 /CHANGELOG-*.md
+/EXTRACTION_LOG.md
+/FINDINGS.md
 
 # Python.
 __pycache__/
