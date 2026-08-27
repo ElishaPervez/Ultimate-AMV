@@ -125,6 +125,8 @@ graphify-out/
 /experiments/
 
 # Local-only setup, cleanup, and release infrastructure.
-/manager.bat
 /bundle-deps.ps1
+/cacheclean.bat
+/dev-uninstall.bat
+/manager.bat
 /.github/
