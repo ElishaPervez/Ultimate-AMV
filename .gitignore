@@ -123,3 +123,8 @@ graphify-out/
 
 # Experimental code and artifacts. Nothing under this folder is shipped.
 /experiments/
+
+# Local-only setup, cleanup, and release infrastructure.
+/manager.bat
+/bundle-deps.ps1
+/.github/
