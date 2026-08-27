@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] : 2026-08-27
+
+### Changed
+- Scene Splitter preview playback now follows the measured visible grid, so changing columns, resizing the window, and switching preview modes keeps the tiles aligned and responsive.
+- Preview work is now limited to the clips that need it, while fast scrolling avoids starting new decoders until the grid settles.
+- Scene detection, proxy previews, and conversion now report progress separately, so a later run is not overwritten by stale progress from an earlier run.
+
+### Fixed
+- Exported clips no longer retain source chapter and timed-text timelines that made the player scrubber show the full episode after the media had ended.
+- Replacing a source or starting a new extraction no longer lets late results from the previous run change the current clip grid.
+
 ## [0.15.0] : 2026-08-04
 
 ### Added
@@ -305,6 +316,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.15.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.1
 [0.15.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.0
 [0.14.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.14.0
 [0.13.3]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.3
