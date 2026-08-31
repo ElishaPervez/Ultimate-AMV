@@ -1,9 +1,21 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Film, Music, FileAudio } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  Check,
+  Copy,
+  Film,
+  Music,
+  FileAudio,
+  LogOut,
+  ShieldCheck,
+  Sparkles,
+  User,
+} from "lucide-react";
 import type { AppConfig } from "../../types/app";
 import { Dropdown } from "../../components/Dropdown";
 import { VideoOutputControl } from "../video/VideoOutputControl";
+import { useTsukyioAuth } from "../tsukyio/useTsukyioAuth";
 
 const GRID_PREVIEW_SPEED_SPEC = {
   label: "Grid preview speed",
@@ -35,6 +47,8 @@ export function FeatureSettings({
   setLocalDownloadPath,
   currentMode,
 }: FeatureSettingsProps) {
+  const { authState, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect } = useTsukyioAuth();
+  const [copiedCode, setCopiedCode] = React.useState(false);
   // Local draft of the Tsukyio key so we don't fire a config write on every
   // keystroke; persist on Save (matching how the download path persists on a
   // discrete action rather than per-character).
@@ -121,42 +135,140 @@ export function FeatureSettings({
 
       <div className="settings-group glass">
         <div className="settings-group-header">Tsukyio Vault</div>
-        <div className="setting-row">
-          <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>
-            <span className="setting-label">API key</span>
-            <span className="setting-desc">
-              Connect the Tsukyio anime asset vault to browse and download clips in-app.
-              Get a free key at{" "}
-              <a href="https://tsukyio.com" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
-                tsukyio.com
-              </a>
-              . Powered by Tsukyio.
-            </span>
+        
+        {authState.isAuthenticated && authState.user ? (
+          <div className="setting-row">
+            <div className="tsukyio-settings-account-card">
+              <div className="tsukyio-settings-account-left">
+                {authState.user.image ? (
+                  <img src={authState.user.image} alt={authState.user.username} className="tsukyio-settings-avatar" />
+                ) : (
+                  <div className="tsukyio-settings-avatar placeholder">
+                    <User size={18} />
+                  </div>
+                )}
+                <div className="tsukyio-settings-user-info">
+                  <div className="tsukyio-settings-name-row">
+                    <span className="tsukyio-settings-user-name">@{authState.user.username}</span>
+                    {((authState.user.premiumPlan || authState.user.premium_plan) && (authState.user.premiumPlan || authState.user.premium_plan) !== "FREE") && (
+                      <span className={`tsukyio-tier-badge is-${((authState.user.premiumPlan || authState.user.premium_plan) as string).toLowerCase()}`}>
+                        <ShieldCheck size={11} />
+                        <span>{((authState.user.premiumPlan || authState.user.premium_plan) as string).replace("_", " ")}</span>
+                      </span>
+                    )}
+                  </div>
+                  <span className="tsukyio-settings-user-handle">Connected via Tsukyio OAuth</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="install-btn is-secondary"
+                onClick={() => void disconnect()}
+              >
+                <LogOut size={14} />
+                <span>Disconnect</span>
+              </button>
+            </div>
           </div>
-        </div>
-        <div className="settings-download-path-row">
-          <input
-            type="password"
-            className="settings-path-input"
-            value={tsukyioKey}
-            placeholder="tsk_..."
-            spellCheck={false}
-            autoComplete="off"
-            onChange={(e) => setTsukyioKey(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void saveTsukyioKey();
-            }}
-            aria-label="Tsukyio API key"
-          />
-          <button
-            type="button"
-            className="settings-path-browse-btn spring-motion"
-            disabled={tsukyioKey.trim() === (backendConfig?.tsukyio_api_key ?? "").trim()}
-            onClick={() => void saveTsukyioKey()}
-          >
-            {tsukyioSaved ? "Saved" : "Save key"}
-          </button>
-        </div>
+        ) : (
+          <>
+            <div className="setting-row">
+              <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>
+                <span className="setting-label">Tsukyio Account</span>
+                <span className="setting-desc">
+                  Connect the Tsukyio anime asset vault to browse and download clips in-app.
+                  Get a free account at{" "}
+                  <a href="https://tsukyio.com" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                    tsukyio.com
+                  </a>
+                  . Powered by Tsukyio.
+                </span>
+              </div>
+              <button
+                type="button"
+                className="install-btn is-primary"
+                onClick={() => void startDeviceAuth()}
+              >
+                <Sparkles size={15} />
+                <span>Connect Tsukyio</span>
+              </button>
+            </div>
+
+            {(deviceFlow.status === "prompt" || deviceFlow.status === "polling") && (
+              <div className="tsukyio-device-auth-box in-settings">
+                <div className="tsukyio-device-code-label">ENTER THIS CODE ON TSUKYIO:</div>
+                <div className="tsukyio-device-code-display">
+                  <span className="tsukyio-device-code-text">{deviceFlow.userCode}</span>
+                  <button
+                    type="button"
+                    className="tsukyio-device-code-copy"
+                    title="Copy code"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(deviceFlow.userCode);
+                      setCopiedCode(true);
+                      setTimeout(() => setCopiedCode(false), 2000);
+                    }}
+                  >
+                    {copiedCode ? <Check size={16} color="#63e6a2" /> : <Copy size={16} />}
+                  </button>
+                </div>
+                <div className="tsukyio-device-instructions">
+                  Browser opened to{" "}
+                  <a
+                    href={`https://tsukyio.com/activate?code=${deviceFlow.userCode}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void openUrl(`https://tsukyio.com/activate?code=${deviceFlow.userCode}`);
+                    }}
+                  >
+                    tsukyio.com/activate
+                  </a>
+                  . Waiting for authorization…
+                </div>
+                <div className="tsukyio-device-actions">
+                  <span className="tsukyio-spinner sm" aria-hidden="true" />
+                  <button type="button" className="install-btn is-secondary" onClick={cancelDeviceAuth}>
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="setting-row" style={{ marginTop: 10 }}>
+              <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>
+                <span className="setting-label">Manual API Key (Legacy / Custom)</span>
+                <span className="setting-desc">
+                  Alternatively, paste a Tsukyio API key or OAuth access token directly.
+                </span>
+              </div>
+            </div>
+            <div className="settings-download-path-row">
+              <input
+                type="password"
+                className="settings-path-input"
+                value={tsukyioKey}
+                placeholder="tsk_..."
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(e) => setTsukyioKey(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void saveTsukyioKey();
+                }}
+                aria-label="Tsukyio API key"
+              />
+              <button
+                type="button"
+                className="settings-path-browse-btn spring-motion"
+                disabled={tsukyioKey.trim() === (backendConfig?.tsukyio_api_key ?? "").trim()}
+                onClick={() => void saveTsukyioKey()}
+              >
+                {tsukyioSaved ? "Saved" : "Save key"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="settings-group glass">

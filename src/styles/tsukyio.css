@@ -88,6 +88,242 @@
   opacity: 0.85;
 }
 
+/* ---- OAuth Device Auth & User Badges ---- */
+.tsukyio-device-auth-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 440px;
+  padding: 20px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--accent-border, rgba(72, 215, 255, 0.25));
+  margin-top: 10px;
+}
+
+.tsukyio-device-auth-box.in-settings {
+  margin-top: 12px;
+  align-self: center;
+}
+
+.tsukyio-device-code-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.tsukyio-device-code-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed var(--accent);
+  padding: 8px 18px;
+  border-radius: 10px;
+}
+
+.tsukyio-device-code-text {
+  font-family: var(--font-mono, monospace);
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+  color: var(--accent);
+}
+
+.tsukyio-device-code-copy {
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+
+.tsukyio-device-code-copy:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tsukyio-device-instructions {
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.tsukyio-device-instructions a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.tsukyio-device-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tsukyio-device-error-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(255, 109, 145, 0.08);
+  border: 1px solid rgba(255, 109, 145, 0.3);
+}
+
+.tsukyio-device-error-text {
+  color: var(--rose, #ff6d91);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* ---- User Pill & Tier Badges ---- */
+.tsukyio-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tsukyio-user-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+}
+
+.tsukyio-user-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.tsukyio-user-avatar.placeholder {
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft, rgba(72, 215, 255, 0.15));
+  color: var(--accent);
+  overflow: hidden;
+}
+
+.tsukyio-user-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tsukyio-tier-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tsukyio-tier-badge.is-super_supporter {
+  background: linear-gradient(135deg, rgba(255, 170, 0, 0.2), rgba(255, 109, 145, 0.2));
+  border: 1px solid rgba(255, 170, 0, 0.4);
+  color: #ffaa00;
+}
+
+.tsukyio-tier-badge.is-supporter {
+  background: rgba(99, 230, 162, 0.12);
+  border: 1px solid rgba(99, 230, 162, 0.35);
+  color: #63e6a2;
+}
+
+.tsukyio-user-logout {
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  transition: color 0.15s ease;
+}
+
+.tsukyio-user-logout:hover {
+  color: var(--rose, #ff6d91);
+}
+
+/* Settings account card */
+.tsukyio-settings-account-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--glass-border);
+}
+
+.tsukyio-settings-account-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tsukyio-settings-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.tsukyio-settings-avatar.placeholder {
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft, rgba(72, 215, 255, 0.15));
+  color: var(--accent);
+}
+
+.tsukyio-settings-user-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tsukyio-settings-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tsukyio-settings-user-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.tsukyio-settings-user-handle {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* ---- Header ---- */
 .tsukyio-header {
   display: flex;

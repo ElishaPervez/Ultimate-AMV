@@ -29,19 +29,21 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
     },
-    time::Instant,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager, UriSchemeContext, UriSchemeResponder, Window, Wry};
 
-use crate::{log_error, log_info, log_warn, sanitize_path_segment};
+use crate::{app_state_dir, log_error, log_info, log_warn, sanitize_path_segment};
 
 const TSUKYIO_BASE: &str = "https://tsukyio.com/api";
 /// Bare public origin, for proxied non-API resources (thumbnails).
 const TSUKYIO_ORIGIN: &str = "https://tsukyio.com";
 const USER_AGENT: &str = "UltimateAMV-Tsukyio/1.0";
+const OAUTH_CLIENT_ID: &str = "tsk_app_a2d677604024cf60bb12ea846991dd1a";
 
 /// Custom URI scheme the preview media loads from. On Windows the webview maps
 /// `tsukyio://stream/<id>` to `http://tsukyio.localhost/stream/<id>`; the CSP
@@ -67,47 +69,147 @@ const PROXY_MAX_FULL_BODY: u64 = 256 * 1024 * 1024;
 /// than buffered.
 const THUMB_MAX_BODY: usize = 20 * 1024 * 1024;
 
-/// Holds the current Tsukyio Bearer key for the proxy protocol handler. The
-/// frontend pushes the key here via `tsukyio_set_session_key` whenever it loads
-/// the config / on the config-changed event, so the streaming handler never has
-/// to shell out to the Python config CLI (too slow for per-Range requests) and
-/// the key never appears in any URL the DOM can see.
-#[derive(Default)]
-pub(crate) struct TsukyioSession {
-    key: Mutex<Option<String>>,
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub(crate) struct TsukyioUserProfile {
+    pub id: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    pub role: String,
+    #[serde(rename = "premiumPlan")]
+    pub premium_plan: String,
 }
 
-impl TsukyioSession {
-    fn get(&self) -> Option<String> {
-        self.key
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-    }
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub(crate) struct TsukyioTokens {
+    pub access_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    pub expires_at: u64, // Unix timestamp in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<TsukyioUserProfile>,
+}
 
-    fn set(&self, key: Option<String>) {
-        if let Ok(mut guard) = self.key.lock() {
-            *guard = key
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty());
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub(crate) struct TsukyioAuthState {
+    #[serde(rename = "isAuthenticated")]
+    pub is_authenticated: boolean_alias::Bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<TsukyioUserProfile>,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+}
+
+mod boolean_alias {
+    pub type Bool = bool;
+}
+
+fn tokens_file_path() -> PathBuf {
+    app_state_dir().join("tsukyio_oauth.json")
+}
+
+fn load_persisted_tokens() -> Option<TsukyioTokens> {
+    let path = tokens_file_path();
+    if !path.exists() {
+        return None;
+    }
+    let data = fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<TsukyioTokens>(&data).ok()
+}
+
+fn save_persisted_tokens(tokens: &TsukyioTokens) {
+    let path = tokens_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json_str) = serde_json::to_string_pretty(tokens) {
+        let _ = fs::write(&path, json_str);
+    }
+}
+
+fn delete_persisted_tokens() {
+    let path = tokens_file_path();
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn current_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Holds the current Tsukyio Bearer key / OAuth tokens for the proxy protocol handler.
+pub(crate) struct TsukyioSession {
+    tokens: Mutex<Option<TsukyioTokens>>,
+}
+
+impl Default for TsukyioSession {
+    fn default() -> Self {
+        Self {
+            tokens: Mutex::new(load_persisted_tokens()),
         }
     }
 }
 
-/// Pushes the current Bearer key into managed session state so the `tsukyio://`
-/// proxy can authenticate stream requests without the key ever touching the DOM.
-/// Called by the panel whenever it reads the config / on the config-changed
-/// event. An empty/whitespace key clears the stored key (so a removed key makes
-/// the proxy reply 401 rather than serving stale media).
+impl TsukyioSession {
+    pub(crate) fn get(&self) -> Option<String> {
+        let guard = self.tokens.lock().ok()?;
+        let t = guard.as_ref()?;
+        let token = t.access_token.trim();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        }
+    }
+
+    pub(crate) fn get_tokens(&self) -> Option<TsukyioTokens> {
+        self.tokens.lock().ok()?.clone()
+    }
+
+    pub(crate) fn set_tokens(&self, tokens: Option<TsukyioTokens>) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            *guard = tokens.clone();
+        }
+        if let Some(t) = tokens {
+            save_persisted_tokens(&t);
+        } else {
+            delete_persisted_tokens();
+        }
+    }
+
+    pub(crate) fn set_legacy_key(&self, key: Option<String>) {
+        let key_clean = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+        if let Some(k) = key_clean {
+            let tokens = TsukyioTokens {
+                access_token: k,
+                refresh_token: None,
+                expires_at: current_timestamp() + 365 * 24 * 3600,
+                user: None,
+            };
+            self.set_tokens(Some(tokens));
+        } else {
+            self.set_tokens(None);
+        }
+    }
+}
+
+/// Pushes a token into managed session state.
 #[tauri::command]
 pub(crate) fn tsukyio_set_session_key(
     state: tauri::State<'_, TsukyioSession>,
     key: Option<String>,
 ) {
-    state.set(key);
+    state.set_legacy_key(key);
 }
+
 
 /// Shared reqwest client for every Tsukyio call (JSON API, downloads, the
 /// stream/thumbnail proxies). Built once so its connection pool + TLS session
@@ -168,6 +270,259 @@ fn status_error(status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
+/// Fetches user info using the provided access token.
+async fn fetch_user_info(access_token: &str) -> Result<TsukyioUserProfile, String> {
+    let client = shared_client()?;
+    let auth = bearer_value(access_token)?;
+    let response = client
+        .get(format!("{TSUKYIO_BASE}/oauth/userinfo"))
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach userinfo: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(status_error(status, &text));
+    }
+
+    let val: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
+    let id = val.get("id").or_else(|| val.get("sub")).and_then(Value::as_str).unwrap_or("").to_string();
+    let username = val.get("username").and_then(Value::as_str).unwrap_or("").to_string();
+    let name = val.get("name").and_then(Value::as_str).map(|s| s.to_string());
+    let email = val.get("email").and_then(Value::as_str).map(|s| s.to_string());
+    let image = val.get("image").and_then(Value::as_str).map(|s| s.to_string());
+    let role = val.get("role").and_then(Value::as_str).unwrap_or("user").to_string();
+    let premium_plan = val.get("premium_plan").or_else(|| val.get("premiumPlan")).and_then(Value::as_str).unwrap_or("FREE").to_string();
+
+    Ok(TsukyioUserProfile {
+        id,
+        username,
+        name,
+        email,
+        image,
+        role,
+        premium_plan,
+    })
+}
+
+/// Automatically refreshes the OAuth token if expired or close to expiry (within 60s).
+async fn refresh_token_if_needed(state: &TsukyioSession) -> Result<String, String> {
+    let existing = state.get_tokens();
+    let tokens = match existing {
+        Some(t) => t,
+        None => return Err("No Tsukyio authentication credentials found.".to_string()),
+    };
+
+    let now = current_timestamp();
+    // If token is still valid for > 60 seconds, reuse it
+    if tokens.expires_at > now + 60 {
+        return Ok(tokens.access_token);
+    }
+
+    let refresh_token = match &tokens.refresh_token {
+        Some(rt) if !rt.trim().is_empty() => rt.clone(),
+        _ => return Ok(tokens.access_token), // Static key or no refresh token
+    };
+
+    let client = shared_client()?;
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("client_id", OAUTH_CLIENT_ID),
+        ("refresh_token", &refresh_token),
+    ];
+
+    let response = client
+        .post(format!("{TSUKYIO_BASE}/oauth/token"))
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        log_warn("tsukyio.oauth.refresh_failed", "OAuth token refresh failed", json!({ "status": status.as_u16(), "body": &text }));
+        // If refresh fails due to revocation, clear the stale tokens
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::BAD_REQUEST {
+            state.set_tokens(None);
+        }
+        return Err(status_error(status, &text));
+    }
+
+    let data: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
+    let new_access = data.get("access_token").and_then(Value::as_str).ok_or("Missing access_token")?.to_string();
+    let new_refresh = data.get("refresh_token").and_then(Value::as_str).map(|s| s.to_string()).or(tokens.refresh_token.clone());
+    let expires_in = data.get("expires_in").and_then(Value::as_u64).unwrap_or(900);
+
+    let updated_tokens = TsukyioTokens {
+        access_token: new_access.clone(),
+        refresh_token: new_refresh,
+        expires_at: now + expires_in,
+        user: tokens.user.clone(),
+    };
+
+    state.set_tokens(Some(updated_tokens));
+    Ok(new_access)
+}
+
+/// Resolves an effective Bearer token, giving precedence to the active OAuth session or explicit fallback.
+async fn resolve_token(state: &TsukyioSession, explicit_token: Option<&str>) -> Result<String, String> {
+    if let Some(tok) = explicit_token.filter(|t| !t.trim().is_empty()) {
+        return Ok(tok.trim().to_string());
+    }
+    refresh_token_if_needed(state).await
+}
+
+#[tauri::command]
+pub(crate) async fn tsukyio_start_device_auth() -> Result<Value, String> {
+    let client = shared_client()?;
+    let body = json!({
+        "client_id": OAUTH_CLIENT_ID,
+        "scope": "profile:read vault:read stats:read",
+    });
+
+    let response = client
+        .post(format!("{TSUKYIO_BASE}/oauth/device/code"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to initiate device authentication: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(status_error(status, &text));
+    }
+
+    serde_json::from_str::<Value>(&text).map_err(|e| format!("Parse error: {e}"))
+}
+
+#[tauri::command]
+pub(crate) async fn tsukyio_poll_device_auth(
+    state: tauri::State<'_, TsukyioSession>,
+    device_code: String,
+) -> Result<Value, String> {
+    let client = shared_client()?;
+    let params = [
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ("client_id", OAUTH_CLIENT_ID),
+        ("device_code", device_code.as_str()),
+    ];
+
+    let response = client
+        .post(format!("{TSUKYIO_BASE}/oauth/token"))
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to poll device token: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        let val: Value = serde_json::from_str(&text).unwrap_or_default();
+        let error_code = val.get("error").and_then(Value::as_str).unwrap_or("error");
+        let error_desc = val.get("error_description").or_else(|| val.get("message")).and_then(Value::as_str).unwrap_or("Authentication pending.");
+
+        return Ok(json!({
+            "status": "pending",
+            "error": error_code,
+            "message": error_desc,
+        }));
+    }
+
+    let val: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
+    let access_token = val.get("access_token").and_then(Value::as_str).ok_or("Missing access_token")?.to_string();
+    let refresh_token = val.get("refresh_token").and_then(Value::as_str).map(|s| s.to_string());
+    let expires_in = val.get("expires_in").and_then(Value::as_u64).unwrap_or(900);
+
+    // Fetch user profile immediately
+    let user_profile = fetch_user_info(&access_token).await.ok();
+
+    let tokens = TsukyioTokens {
+        access_token: access_token.clone(),
+        refresh_token,
+        expires_at: current_timestamp() + expires_in,
+        user: user_profile.clone(),
+    };
+
+    state.set_tokens(Some(tokens));
+
+    Ok(json!({
+        "status": "success",
+        "user": user_profile,
+        "access_token": access_token,
+    }))
+}
+
+#[tauri::command]
+pub(crate) async fn tsukyio_get_auth_state(
+    state: tauri::State<'_, TsukyioSession>,
+) -> Result<TsukyioAuthState, String> {
+    if let Some(tokens) = state.get_tokens() {
+        let now = current_timestamp();
+        // If expired, try refreshing
+        if tokens.expires_at <= now {
+            if (refresh_token_if_needed(&state).await).is_ok() {
+                if let Some(updated) = state.get_tokens() {
+                    return Ok(TsukyioAuthState {
+                        is_authenticated: true,
+                        user: updated.user,
+                        expires_at: Some(updated.expires_at),
+                    });
+                }
+            }
+        }
+
+        // If user profile is missing, try populating it
+        let user = if tokens.user.is_none() {
+            if let Ok(profile) = fetch_user_info(&tokens.access_token).await {
+                let mut updated_tokens = tokens.clone();
+                updated_tokens.user = Some(profile.clone());
+                state.set_tokens(Some(updated_tokens));
+                Some(profile)
+            } else {
+                None
+            }
+        } else {
+            tokens.user
+        };
+
+        return Ok(TsukyioAuthState {
+            is_authenticated: true,
+            user,
+            expires_at: Some(tokens.expires_at),
+        });
+    }
+
+    Ok(TsukyioAuthState {
+        is_authenticated: false,
+        user: None,
+        expires_at: None,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn tsukyio_disconnect(
+    state: tauri::State<'_, TsukyioSession>,
+) -> Result<(), String> {
+    if let Some(tokens) = state.get_tokens() {
+        // Attempt to revoke upstream
+        let client = shared_client().ok();
+        if let Some(c) = client {
+            let body = json!({
+                "client_id": OAUTH_CLIENT_ID,
+                "token": tokens.access_token,
+            });
+            let _ = c.post(format!("{TSUKYIO_BASE}/oauth/revoke")).json(&body).send().await;
+        }
+    }
+    state.set_tokens(None);
+    Ok(())
+}
+
 /// Performs an authenticated GET against a full Tsukyio URL and returns the
 /// parsed JSON body. The vault always replies `{ "success": bool, "data": ... }`,
 /// so callers get the whole object back and read `.data` on the frontend.
@@ -193,10 +548,14 @@ async fn get_json(api_key: &str, url: &str) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub(crate) async fn tsukyio_test_connection(api_key: String) -> Result<Value, String> {
+pub(crate) async fn tsukyio_test_connection(
+    state: tauri::State<'_, TsukyioSession>,
+    api_key: Option<String>,
+) -> Result<Value, String> {
     log_info("tsukyio.test.start", "Testing Tsukyio connection", Value::Null);
+    let token = resolve_token(&state, api_key.as_deref()).await?;
     let url = format!("{TSUKYIO_BASE}/stats/global");
-    let result = get_json(&api_key, &url).await;
+    let result = get_json(&token, &url).await;
     match &result {
         Ok(_) => log_info("tsukyio.test.complete", "Tsukyio connection OK", Value::Null),
         Err(error) => log_warn(
@@ -210,7 +569,8 @@ pub(crate) async fn tsukyio_test_connection(api_key: String) -> Result<Value, St
 
 #[tauri::command]
 pub(crate) async fn tsukyio_browse(
-    api_key: String,
+    state: tauri::State<'_, TsukyioSession>,
+    api_key: Option<String>,
     category: Option<String>,
     path: Option<String>,
     limit: Option<u32>,
@@ -218,8 +578,9 @@ pub(crate) async fn tsukyio_browse(
 ) -> Result<Value, String> {
     let limit = limit.unwrap_or(24);
     let offset = offset.unwrap_or(0);
+    let token = resolve_token(&state, api_key.as_deref()).await?;
     let client = shared_client()?;
-    let auth = bearer_value(&api_key)?;
+    let auth = bearer_value(&token)?;
     // Use reqwest's query builder so values are percent-encoded correctly
     // (relPaths carry spaces and slashes).
     let mut query: Vec<(&str, String)> = vec![
@@ -259,13 +620,16 @@ pub(crate) async fn tsukyio_browse(
 
 #[tauri::command]
 pub(crate) async fn tsukyio_search(
-    api_key: String,
+    state: tauri::State<'_, TsukyioSession>,
+    api_key: Option<String>,
     q: String,
     category: Option<String>,
 ) -> Result<Value, String> {
+    let token = resolve_token(&state, api_key.as_deref()).await?;
     let client = shared_client()?;
-    let auth = bearer_value(&api_key)?;
+    let auth = bearer_value(&token)?;
     let mut query: Vec<(&str, String)> = vec![("q", q.clone())];
+
     if let Some(cat) = category.as_deref().filter(|c| !c.trim().is_empty() && *c != "all") {
         query.push(("category", cat.to_string()));
     }
@@ -294,9 +658,14 @@ pub(crate) async fn tsukyio_search(
 }
 
 #[tauri::command]
-pub(crate) async fn tsukyio_deep_search(api_key: String, q: String) -> Result<Value, String> {
+pub(crate) async fn tsukyio_deep_search(
+    state: tauri::State<'_, TsukyioSession>,
+    api_key: Option<String>,
+    q: String,
+) -> Result<Value, String> {
+    let token = resolve_token(&state, api_key.as_deref()).await?;
     let client = shared_client()?;
-    let auth = bearer_value(&api_key)?;
+    let auth = bearer_value(&token)?;
     log_info(
         "tsukyio.deep_search.start",
         "Deep-searching Tsukyio clips",
@@ -377,8 +746,9 @@ pub(crate) fn tsukyio_cancel_download() {
 /// Returns the saved file path on success.
 #[tauri::command]
 pub(crate) async fn tsukyio_download(
+    state: tauri::State<'_, TsukyioSession>,
     window: Window,
-    api_key: String,
+    api_key: Option<String>,
     asset_id: String,
     name: String,
     category: Option<String>,
@@ -386,8 +756,9 @@ pub(crate) async fn tsukyio_download(
     dest_dir: Option<String>,
 ) -> Result<String, String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
+    let token = resolve_token(&state, api_key.as_deref()).await?;
     let client = shared_client()?;
-    let auth = bearer_value(&api_key)?;
+    let auth = bearer_value(&token)?;
 
     let base = resolve_vault_root(dest_dir.as_deref());
     let category_folder = category
@@ -1237,15 +1608,16 @@ mod tests {
     #[test]
     fn session_key_trims_and_clears() {
         let session = TsukyioSession::default();
+        session.set_tokens(None);
         assert_eq!(session.get(), None);
-        session.set(Some("  tsk_abc  ".to_string()));
+        session.set_legacy_key(Some("  tsk_abc  ".to_string()));
         assert_eq!(session.get().as_deref(), Some("tsk_abc"));
         // Empty/whitespace clears.
-        session.set(Some("   ".to_string()));
+        session.set_legacy_key(Some("   ".to_string()));
         assert_eq!(session.get(), None);
-        session.set(Some("tsk_xyz".to_string()));
+        session.set_legacy_key(Some("tsk_xyz".to_string()));
         assert_eq!(session.get().as_deref(), Some("tsk_xyz"));
-        session.set(None);
+        session.set_legacy_key(None);
         assert_eq!(session.get(), None);
     }
 }

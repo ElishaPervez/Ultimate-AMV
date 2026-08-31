@@ -89,6 +89,16 @@ function statsPayload() {
 
 function setupConnectedMocks(): void {
   mockConfig({ tsukyio_api_key: API_KEY, download_path: "C:\\downloads" });
+  mockInvoke("tsukyio_get_auth_state", async () => ({
+    isAuthenticated: true,
+    user: {
+      id: "usr_1",
+      username: "tsukyiocreator",
+      name: "Tsukyio Creator",
+      role: "creator",
+      premiumPlan: "SUPER_SUPPORTER",
+    },
+  }));
   mockInvoke("tsukyio_set_session_key", async () => undefined);
   mockInvoke("tsukyio_test_connection", async () => statsPayload());
   mockInvoke("frontend_log", async () => undefined);
@@ -177,6 +187,7 @@ describe("TsukyioPanel", () => {
   describe("API key gating", () => {
     it("shows the connect card and never queries the vault without an API key", async () => {
       mockConfig({});
+      mockInvoke("tsukyio_get_auth_state", async () => ({ isAuthenticated: false, user: null }));
       const sessionSpy = vi.fn(async () => undefined);
       mockInvoke("tsukyio_set_session_key", sessionSpy);
       const browseSpy = vi.fn(async () => ({ success: true, data: { items: [] } }));
@@ -189,17 +200,17 @@ describe("TsukyioPanel", () => {
       render(<TsukyioPanel active onOpenSettings={onOpenSettings} />);
 
       expect(await screen.findByText("Connect the Tsukyio Vault")).toBeInTheDocument();
-      // A missing key is pushed as null so the streaming proxy stops authing.
-      await waitFor(() => expect(sessionSpy).toHaveBeenCalledWith({ key: null }));
+      expect(screen.getByRole("button", { name: "Log in with Tsukyio" })).toBeInTheDocument();
       expect(browseSpy).not.toHaveBeenCalled();
       expect(searchSpy).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole("button", { name: "Add API key in Settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "Use API Key" }));
       expect(onOpenSettings).toHaveBeenCalledTimes(1);
     });
 
     it("connects without a remount when the key arrives via tsukyio-config-changed", async () => {
       mockConfig({});
+      mockInvoke("tsukyio_get_auth_state", async () => ({ isAuthenticated: false, user: null }));
       mockInvoke("tsukyio_set_session_key", async () => undefined);
       mockInvoke("tsukyio_test_connection", async () => statsPayload());
       mockInvoke("frontend_log", async () => undefined);
@@ -229,7 +240,7 @@ describe("TsukyioPanel", () => {
 
       await waitFor(() => expect(statsSpy).toHaveBeenCalledWith({ apiKey: API_KEY }));
       expect(sessionSpy).toHaveBeenCalledWith({ key: API_KEY });
-      expect(screen.getByText(/40,000 assets across 9 categories/)).toBeInTheDocument();
+      expect(screen.getByText(/40,000 assets across 8 categories/)).toBeInTheDocument();
       // The discovery home renders tiles, not a browse grid: no fetch yet.
       expect(browseCalls).toHaveLength(0);
     });
