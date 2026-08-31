@@ -12,21 +12,15 @@ import {
   CLIP_PREVIEW_BATCH_SIZE,
   CLIP_PREVIEW_CPU_BATCH_CONCURRENCY,
   CLIP_PREVIEW_GPU_BATCH_CONCURRENCY,
-  FAST_SCROLL_VELOCITY_PX_PER_FRAME,
   GRID_VIDEO_OVERSCAN_ROWS,
   MAX_GRID_AUTOPLAYERS,
   MAX_GRID_VIDEO_PLAYERS_CEILING,
-  PREVIEW_PLAY_AREA_MARGIN_PX,
 } from "../../lib/constants";
-
-// How long after the scroll velocity drops below the fast-fling threshold the
-// `fastScrolling` flag stays set before clearing (ms). One short settle so the
-// geometry mount set recomputes promptly when the user releases a fling.
-const FAST_SCROLL_SETTLE_MS = 140;
-/* DEV TOOLS: featherweight tunables — the grid reads margins / max-video cap /
- * the DEV featherweight override from this store. In prod the store equals the
- * baked constants, so reading it is a constant read. */
-import { usePreviewTunables } from "../../dev/previewTunables";
+import {
+  reportGridPlaybackDiagnostics,
+  usePreviewTunables,
+} from "../../dev/previewTunables";
+import { useClipPlaybackWindow } from "./useClipPlaybackWindow";
 import { setDiscordJob } from "../../lib/discord";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { fileName, fileStem, normalizeSelectedPaths } from "../../lib/paths";
@@ -34,14 +28,26 @@ import { clampNumber } from "../../lib/numbers";
 import { extensionAccept, useFileDrop } from "../../lib/useFileDrop";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import { VideoOutputControl } from "../video/VideoOutputControl";
+import { ClipRateControl } from "./ClipRateControl";
 
 const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi"];
 const clipInputAccept = extensionAccept(CLIP_INPUT_EXTENSIONS);
+
+let sceneProxyRequestSequence = 0;
+function createSceneProxyRequestId(): string {
+  sceneProxyRequestSequence += 1;
+  return `scene-proxy-${Date.now()}-${sceneProxyRequestSequence}`;
+}
+
+type ActiveClipBatchProgressContext = ClipBatchProgressContext & { generation: number };
+type ActiveProxyRequest = { epoch: number; requestId: string };
+
 import type { AppConfig } from "../../types/app";
 import type {
   ClipAudioSettings,
   ClipBatchProgressContext,
   ClipExportFormat,
+  ClipExportRateMode,
   ClipExtractionResult,
   ClipPreviewBatchResult,
   ClipPreviewItem,
@@ -56,6 +62,21 @@ import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
 import { ClipPreviewTile, offsetMarginWindow } from "./ClipPreviewTile";
+import { ClipRunProgressMessage, ClipRunStatus } from "./ClipRunStatus";
+import {
+  beginClipRunProgress,
+  getClipRunProgressSnapshot,
+  publishCompatibilityProgress,
+  publishDetectionProgress,
+  publishProxyProgress,
+  removeProxyProgress,
+  resetClipRunProgress,
+} from "./clipRunProgressStore";
+import {
+  GRID_GRAB_MOMENTUM_RELEASE_WINDOW_MS,
+  sampleGrabVelocity,
+  stepGrabMomentum,
+} from "./grabMomentum";
 import { SceneViewerModal } from "./SceneViewerModal";
 
 // Currently dead code : see FINDINGS.md. Moved here unchanged during the
@@ -196,100 +217,68 @@ function contiguousMergeWindow(
  * deterministically across a scripted fast-fling (jsdom has no real Virtuoso
  * geometry). The `geometryMountVideoIds` memo calls this verbatim.
  */
-export function computeGeometryMountVideoIds(params: {
-  clipRows: { id: string }[][];
-  cap: number;
-  rowHeightPx: number;
-  viewportHeightPx: number;
-  scrollTopPx: number;
-  rowsInView: number;
-  marginPx: number;
-}): Set<string> {
-  const { clipRows, cap, rowHeightPx, viewportHeightPx, scrollTopPx, rowsInView, marginPx } = params;
-  const ids = new Set<string>();
-  if (clipRows.length <= 0 || cap <= 0) return ids;
-  const lastRow = clipRows.length - 1;
+/**
+ * Grab-and-scroll movement threshold (px). The pointer must travel farther than
+ * this between press and release for the gesture to count as a pan (scroll) that
+ * SUPPRESSES the click; below it the press is a normal click (select / open
+ * viewer). ~5px is the standard "was this a drag or a tap" slop.
+ */
+export const GRID_GRAB_DRAG_THRESHOLD_PX = 5;
 
-  let firstVisibleRow: number;
-  let lastVisibleRow: number;
-  if (rowHeightPx > 0 && viewportHeightPx > 0) {
-    firstVisibleRow = Math.floor(scrollTopPx / rowHeightPx);
-    lastVisibleRow = Math.ceil((scrollTopPx + viewportHeightPx) / rowHeightPx) - 1;
-  } else {
-    // Geometry not measured yet (initial / pre-mount): fall back to the top
-    // rows that fill the viewport (rowsInView), or the first row at minimum.
-    firstVisibleRow = 0;
-    lastVisibleRow = (rowsInView > 0 ? rowsInView : 1) - 1;
-  }
+/**
+ * True once the pointer has moved far enough from its press origin to be treated
+ * as a drag rather than a click. Straight-line distance, so a diagonal wiggle
+ * counts the same as a pure vertical drag. Pure (no React / DOM) so the
+ * click-vs-drag decision is unit-testable without a real pointer.
+ */
+export function isPastDragThreshold(dx: number, dy: number, threshold: number): boolean {
+  return Math.hypot(dx, dy) > threshold;
+}
 
-  // VIEWPORT-AWARE CAP FLOOR. Count the tiles ACTUALLY intersecting the viewport
-  // (the visible-row span × that span's columns, clamped to the real clip count).
-  // The effective cap is floored at this count so EVERY visible tile always
-  // mounts — a tall/dense viewport (~16–24 tiles at 4 cols) is never left with
-  // dark-but-visible tiles when the knob cap (prod 12) sits below the visible
-  // band. The incoming `cap` can only RAISE the cap above this floor (pre-warm
-  // headroom); the caller has already clamped it to MAX_GRID_VIDEO_PLAYERS_CEILING.
-  const clampedFirstVisible = Math.max(0, Math.min(firstVisibleRow, lastRow));
-  const clampedLastVisible = Math.max(clampedFirstVisible, Math.min(lastVisibleRow, lastRow));
-  let visibleTileCount = 0;
-  for (let r = clampedFirstVisible; r <= clampedLastVisible; r += 1) {
-    visibleTileCount += clipRows[r]?.length ?? 0;
+export function computeSelectionMarkers(params: {
+  selectedIds: Set<string>;
+  clipIds: string[];
+  gridCols: number;
+  totalRows: number;
+}): { row: number; topPct: number }[] {
+  const { selectedIds, clipIds, gridCols, totalRows } = params;
+  if (selectedIds.size === 0 || clipIds.length === 0 || totalRows <= 0 || gridCols <= 0) {
+    return [];
   }
-  // The hard ceiling bounds the top even above the visible-tile floor: in the
-  // pathological case where the viewport shows MORE tiles than the ceiling
-  // (only reachable at a tiny row height / huge viewport), we accept a dead-zone
-  // rather than blow past the decoder safety limit. `cap` is already
-  // ceiling-clamped by the caller; re-clamp here so the floor can't escape it.
-  const effectiveCap = Math.min(
-    MAX_GRID_VIDEO_PLAYERS_CEILING,
-    Math.max(cap, visibleTileCount),
-  );
+  const rows = new Set<number>();
+  for (let i = 0; i < clipIds.length; i += 1) {
+    if (selectedIds.has(clipIds[i])) rows.add(Math.floor(i / gridCols));
+  }
+  const markers: { row: number; topPct: number }[] = [];
+  for (const row of rows) {
+    const topPct = Math.max(0, Math.min(100, ((row + 0.5) / totalRows) * 100));
+    markers.push({ row, topPct });
+  }
+  markers.sort((a, b) => a.row - b.row);
+  return markers;
+}
 
-  // PHASE 1 — grant EVERY VISIBLE tile first. Because effectiveCap is floored at
-  // visibleTileCount, this fits within the cap (except the pathological case
-  // where the viewport itself shows more tiles than the ceiling — then we honor
-  // the ceiling, granting the visible tiles nearest the top first and accepting a
-  // dead-zone rather than exceeding the decoder safety limit). Granting visible
-  // tiles unconditionally — NOT via the center-distance walk — is what guarantees
-  // no still-visible tile is dropped in favor of a nearer-to-center PRE-WARM tile
-  // on an asymmetric band (the DEFECT-A dead-zone).
-  for (let r = clampedFirstVisible; r <= clampedLastVisible; r += 1) {
-    for (const clip of clipRows[r] ?? []) {
-      ids.add(clip.id);
-      if (ids.size >= effectiveCap) return ids;
-    }
+export function collectProxySourcesForActiveClips({
+  clips,
+  activeClipIds,
+  playbackPlans,
+  resolvedSources,
+  inFlightSources,
+}: {
+  clips: readonly ClipPreviewItem[];
+  activeClipIds: ReadonlySet<string>;
+  playbackPlans: Readonly<Record<string, PlaybackPlan>>;
+  resolvedSources: ReadonlySet<string>;
+  inFlightSources: ReadonlySet<string>;
+}): string[] {
+  const sources = new Set<string>();
+  for (const clip of clips) {
+    if (!clip.path || !activeClipIds.has(clip.id)) continue;
+    if (!playbackPlans[clip.path]) continue;
+    if (resolvedSources.has(clip.path) || inFlightSources.has(clip.path)) continue;
+    sources.add(clip.path);
   }
-
-  // PHASE 2 — fill the remaining budget (effectiveCap - visible) with PRE-WARM
-  // tiles. Extend the band by the pre-play margin (250px -> rows) on each side so
-  // a tile is already decoding by the time it scrolls into view, then walk
-  // OUTWARD from the viewport-center row (nearest first) so the discretionary
-  // headroom favors the rows closest to the middle of what the user sees. Visible
-  // rows are skipped here (already granted in phase 1).
-  const marginRows = rowHeightPx > 0 ? Math.ceil(marginPx / rowHeightPx) : 1;
-  const bandFirst = Math.max(0, Math.min(firstVisibleRow - marginRows, lastRow));
-  const bandLast = Math.max(bandFirst, Math.min(lastVisibleRow + marginRows, lastRow));
-  const centerRow = Math.max(
-    bandFirst,
-    Math.min(Math.floor((firstVisibleRow + lastVisibleRow) / 2), bandLast),
-  );
-  for (let offset = 0; bandFirst + offset <= bandLast || centerRow - offset >= bandFirst; offset += 1) {
-    const rowsToVisit = offset === 0 ? [centerRow] : [centerRow - offset, centerRow + offset];
-    let visitedAny = false;
-    for (const r of rowsToVisit) {
-      if (r < bandFirst || r > bandLast) continue;
-      visitedAny = true;
-      // Visible rows are already granted; only pre-warm rows add tiles here.
-      if (r >= clampedFirstVisible && r <= clampedLastVisible) continue;
-      for (const clip of clipRows[r] ?? []) {
-        ids.add(clip.id);
-        if (ids.size >= effectiveCap) return ids;
-      }
-    }
-    // Stop once the outward walk has exhausted the band on both sides.
-    if (!visitedAny && centerRow - offset < bandFirst && centerRow + offset > bandLast) break;
-  }
-  return ids;
+  return [...sources];
 }
 
 export function ClipExtractorPanel({ active }: { active: boolean }) {
@@ -310,40 +299,38 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([]);
   const [selectedClipIds, setSelectedClipIds] = React.useState<Set<string>>(() => new Set());
   const [exportFormat, setExportFormat] = React.useState<ClipExportFormat>("prores-lt");
+  const [smoothExport, setSmoothExport] = React.useState(false);
+  const [rateMode, setRateMode] = React.useState<ClipExportRateMode>("quality");
+  const [exportBitrate, setExportBitrate] = React.useState<Record<ClipExportFormat, number>>({
+    "gpu-intra": 60,
+    "h264-nvenc": 20,
+    "h264-10bit-nvenc": 20,
+    "av1-nvenc": 8,
+    "h264-cpu": 20,
+    "h264-10bit-cpu": 20,
+    "hevc-cpu": 12,
+    "prores-lt": 20,
+    "prores-hq": 20,
+    "lossless-cut": 20,
+    "smart-cut": 20,
+  });
   const [exportQuality, setExportQuality] = React.useState<Record<ClipExportFormat, number>>({
     "gpu-intra": 16,
     "h264-nvenc": 18,
+    "h264-10bit-nvenc": 18,
     "av1-nvenc": 24,
     "h264-cpu": 18,
+    "h264-10bit-cpu": 18,
     "hevc-cpu": 18,
     "prores-lt": 0,
     "prores-hq": 0,
     "lossless-cut": 0,
+    "smart-cut": 0,
   });
   const [visibleRowRange, setVisibleRowRange] = React.useState<{ startIndex: number; endIndex: number } | null>(null);
-  /* DEV TOOLS: measured scroll-viewport geometry for viewport-fill decoder
-   * windowing. Only populated in featherweight mode (the ResizeObserver below
-   * is gated on featherweightActive && hasClips); flag-off these stay 0 and the
-   * video budget falls back to the tunable seed, so behavior is unchanged. */
-  const [viewportHeightPx, setViewportHeightPx] = React.useState(0);
-  const [viewportWidthPx, setViewportWidthPx] = React.useState(0);
-  /* DEV TOOLS (featherweight only): the scroller's current scrollTop, throttled
-   * to one update per rAF. Drives the central geometry-driven mount set (the SOLE
-   * authoritative, capped set of tiles allowed to mount a live offset <video>).
-   * Flag-off this stays 0 and is never read. */
-  const [scrollTopPx, setScrollTopPx] = React.useState(0);
-  /* DEV TOOLS (featherweight only): transient FAST-FLING flag. Set from real
-   * scroll VELOCITY (|scrollTop delta| per rAF frame, NOT Virtuoso's isScrolling,
-   * which is true for slow scroll too). While true the panel grants NO new
-   * offset-<video> mounts (it holds the last committed set) so a fling allocates
-   * no new decoders; cleared ~140ms after velocity drops, at which point the
-   * geometry-based set recomputes immediately (no dead-zone). */
-  const [fastScrolling, setFastScrolling] = React.useState(false);
-  // Held as state (not a ref) so the ResizeObserver effect re-runs the moment
-  // Virtuoso hands us the scroll element via scrollerRef — a ref wouldn't
-  // re-trigger the effect and the first measurement could be missed.
+  // Held as state (not a ref) so useClipPlaybackWindow re-runs the moment
+  // Virtuoso hands us the scroll element via scrollerRef.
   const [scrollerEl, setScrollerEl] = React.useState<HTMLElement | null>(null);
-  const [progress, setProgress] = React.useState<ClipProgress | null>(null);
   const [result, setResult] = React.useState<ClipExtractionResult | null>(null);
   const [previewStates, setPreviewStates] = React.useState<Record<string, ClipPreviewState>>({});
   const [error, setError] = React.useState<string | null>(null);
@@ -356,7 +343,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     rawError: string;
   } | null>(null);
   const [isConverting, setIsConverting] = React.useState(false);
-  const [convertMessage, setConvertMessage] = React.useState<string | null>(null);
   // Maps a converted cache path -> the original filename it replaced (for the badge).
   const [convertedSources, setConvertedSources] = React.useState<Record<string, string>>({});
   // Maps a RAW source path -> a converted proxy path used ONLY to feed the GPU
@@ -370,8 +356,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
    * below ever populate and the grid renders byte-for-byte as before.
    *  - playbackPlans:    sourcePath -> PlaybackPlan (probe once per distinct source).
    *  - sourceProxyPaths: sourcePath -> resolved proxy file path (proxy plans only).
-   * Mirrors the detectorProxies Record state pattern. */
+  * Mirrors the detectorProxies Record state pattern. */
   const [featherweightPreviews, setFeatherweightPreviews] = React.useState(false);
+  const [clipPreviewSpeed, setClipPreviewSpeed] = React.useState(1);
+  const previewSpeedSaveTimerRef = React.useRef(0);
   /* Max preview-proxy height (Settings "Preview quality"). 0 = Source/unlimited.
    * Threaded into clip_playback_plan + build_source_proxy as the `height` invoke
    * arg. kickProxyBuild is a []-deps useCallback that reads only refs, so mirror
@@ -383,6 +371,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, [scenePreviewHeight]);
   const [playbackPlans, setPlaybackPlans] = React.useState<Record<string, PlaybackPlan>>({});
   const [sourceProxyPaths, setSourceProxyPaths] = React.useState<Record<string, string>>({});
+  // A failed proxy is terminal for the current source/quality request. Keep the
+  // result in state so the tile redraws immediately; the Set ref mirrors it for
+  // async scheduling guards without making every proxy tick a React update.
+  const [failedProxySources, setFailedProxySources] = React.useState<Record<string, true>>({});
   // In-flight guards so we kick exactly one plan / one proxy build per source.
   const planInFlightRef = React.useRef<Set<string>>(new Set());
   const proxyInFlightRef = React.useRef<Set<string>>(new Set());
@@ -391,6 +383,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
    * must treat these as settled-with-no-source -> static merged poster, not an
    * indefinite spinner. Cleared whenever the per-source maps reset. */
   const failedProxiesRef = React.useRef<Set<string>>(new Set());
+  const activeProxyRequestsRef = React.useRef<Map<string, ActiveProxyRequest>>(new Map());
   /* Sources whose proxy must be REBUILT (not cache-hit) on the next build —
    * populated by "extract again" (force) so a stale/buggy proxy can't survive a
    * full re-extraction. Consumed (one-shot) when that source's proxy build fires. */
@@ -486,7 +479,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const previewInFlightRef = React.useRef<Set<string>>(new Set());
   const previewBatchInFlightRef = React.useRef(0);
   const previewTokenRef = React.useRef(0);
-  const clipBatchProgressRef = React.useRef<ClipBatchProgressContext | null>(null);
+  const clipBatchProgressRef = React.useRef<ActiveClipBatchProgressContext | null>(null);
+  const clipProgressGenerationRef = React.useRef(getClipRunProgressSnapshot().generation);
+  const isConvertingRef = React.useRef(isConverting);
+  const exportProgressActiveRef = React.useRef(false);
+
+  React.useEffect(() => {
+    isConvertingRef.current = isConverting;
+  }, [isConverting]);
 
   React.useEffect(() => {
     void refreshClipMode();
@@ -535,6 +535,20 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return () => window.removeEventListener("scene-preview-height-changed", handler);
   }, []);
 
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const speed = (e as CustomEvent<{ speed: number }>).detail.speed;
+      setClipPreviewSpeed(clampNumber(speed, 0.25, 4));
+    };
+    window.addEventListener("clip-preview-speed-changed", handler);
+    return () => window.removeEventListener("clip-preview-speed-changed", handler);
+  }, []);
+
+  React.useEffect(
+    () => () => window.clearTimeout(previewSpeedSaveTimerRef.current),
+    [],
+  );
+
   async function refreshClipMode() {
     try {
       const raw = await invoke<string>("get_config");
@@ -545,6 +559,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
        * by the Settings toggle routes back to the classic WebP/scene_clip path. */
       setFeatherweightPreviews(payload.featherweight_previews ?? true);
       setScenePreviewHeight(payload.scene_preview_height ?? 240);
+      setClipPreviewSpeed(clampNumber(payload.clip_preview_speed ?? 1, 0.25, 4));
       setClipModeLoaded(true);
     } catch (configError) {
       console.error("Could not load clip extraction mode:", configError);
@@ -552,6 +567,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       // matching SceneViewerModal — a transient failure shouldn't silently
       // drop the grid back to the classic path.
       setFeatherweightPreviews(true);
+      setClipPreviewSpeed(1);
       setClipModeLoaded(true);
       logFrontend("error", "frontend.clip.config.error", "Could not load clip extraction mode", {
         error: safeLogValue(configError),
@@ -574,9 +590,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     void listen<ClipProgress>("clip-progress", (event) => {
-      if (!cancelled) {
-        setProgress(mapClipBatchProgress(event.payload, clipBatchProgressRef.current));
-      }
+      const context = clipBatchProgressRef.current;
+      if (cancelled || !context || context.generation !== clipProgressGenerationRef.current) return;
+      publishDetectionProgress(
+        context.generation,
+        mapClipBatchProgress(event.payload, context),
+      );
     }).then((cleanup) => {
       if (cancelled) {
         cleanup();
@@ -599,29 +618,39 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const payload = event.payload;
       // Route to the export modal when an export session is active so the
       // per-clip bar and overall bar both reflect real ffmpeg progress.
-      // Otherwise fall through to the legacy inline progress card that the
-      // codec-conversion path still uses.
-      if (exportSessionRef.current) {
+      // Otherwise route only compatibility-conversion ticks to the dedicated
+      // channel. Proxy builds use their source-specific progress stream.
+      if (exportProgressActiveRef.current && exportSessionRef.current?.phase === "running") {
         const percent = typeof payload.percent === "number" ? payload.percent : 0;
+        const smoothingIndex = typeof payload.clipIndex === "number"
+          ? Math.max(0, payload.clipIndex - 1)
+          : null;
         setExportSession((current) =>
           current
             ? {
                 ...current,
+                activeIndex: smoothingIndex ?? current.activeIndex,
                 activePercent: Math.max(0, Math.min(100, percent)),
                 activeFps: payload.fps ?? current.activeFps,
                 activeSpeed: payload.speed ?? current.activeSpeed,
                 activeMessage: payload.message || current.activeMessage,
+                rows: smoothingIndex == null
+                  ? current.rows
+                  : current.rows.map((row, index) => ({
+                    ...row,
+                    status: index < smoothingIndex || (index === smoothingIndex && percent >= 100)
+                      ? "done"
+                      : index === smoothingIndex
+                        ? "active"
+                        : "pending",
+                  })),
               }
             : current,
         );
         return;
       }
-      setProgress({
-        type: "progress",
-        stage: payload.stage,
-        percent: typeof payload.percent === "number" ? payload.percent : 0,
-        message: payload.message + (payload.speed ? ` (${payload.speed})` : ""),
-      });
+      if (!isConvertingRef.current) return;
+      publishCompatibilityProgress(payload);
     }).then((cleanup) => {
       if (cancelled) {
         cleanup();
@@ -676,30 +705,27 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // clip ids, making the first jump-to-selection click after a new
     // extraction land on the wrong end of the list.
     selectionCursorIdRef.current = null;
-    /* NOTE: per-source plan/proxy state is intentionally NOT reset here. This
-     * effect fires on every result?.input change — including when detection's
-     * results land mid-extraction — and the proxy build is now kicked early
-     * (concurrent with detection in startExtraction). Resetting here would wipe
-     * the in-flight proxy (or its proxyInFlightRef marker) the moment results
-     * arrive, leaving tiles stuck. The plan/proxy reset now happens ONCE at
-     * extraction start (startExtraction) and on new source selection (acceptVideos). */
+    /* Scene results do not reset per-source plan/proxy state. Proxy work is
+     * visibility-driven after scenes exist and an active tile needs a source;
+     * resetting here would discard that work whenever another episode's scenes
+     * arrive. Extraction start, source replacement, and quality changes perform
+     * the explicit invalidation instead. */
   }, [result?.input]);
 
-  /* DEV TOOLS: listen for proxy-build progress so a finished proxy flips its
-   * tiles from WebP poster to live offset <video>. The terminal "complete" tick
-   * is matched by the source becoming present in sourceProxyPaths (set when the
-   * build_source_proxy promise resolves below); this listener only needs to keep
-   * the build observable. Always mounted but inert until a build emits. */
-  const [proxyProgress, setProxyProgress] = React.useState<Record<string, number>>({});
+  /* DEV TOOLS: listen for visibility-driven proxy work after scenes exist so the
+   * status subscriber can show the slowest active source. Only the request ID
+   * currently active for that source may publish; late invalidated events stop. */
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    void listen<{ sourcePath: string; percent: number; stage: string }>(
+    void listen<{ sourcePath: string; requestId: string; percent: number; stage: string }>(
       "proxy-progress",
       (event) => {
         if (cancelled) return;
-        const { sourcePath, percent } = event.payload;
-        setProxyProgress((current) => ({ ...current, [sourcePath]: percent }));
+        const { sourcePath, requestId, percent } = event.payload;
+        if (!proxyInFlightRef.current.has(sourcePath)) return;
+        if (activeProxyRequestsRef.current.get(sourcePath)?.requestId !== requestId) return;
+        publishProxyProgress(sourcePath, percent);
       },
     ).then((cleanup) => {
       if (cancelled) cleanup();
@@ -713,29 +739,54 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   function acceptVideos(paths: string[]) {
     if (paths.length === 0) return;
+    const replacingDetection =
+      clipBatchProgressRef.current != null
+      || (isExtracting && !exportProgressActiveRef.current);
+    if (replacingDetection) {
+      // Invalidate the old batch before exposing the replacement source. Its
+      // awaited detector result/finally block must not touch the new UI.
+      clipCancellingRef.current = true;
+      void invoke("cancel_clip").catch(() => {});
+      clipAbortRef.current?.(new Error("SOURCE_REPLACED"));
+      clipAbortRef.current = null;
+      clipCancellingRef.current = false;
+      setIsExtracting(false);
+    }
+    if (isConvertingRef.current) {
+      isConvertingRef.current = false;
+      setIsConverting(false);
+      publishCompatibilityProgress(null);
+    }
     setSelectedVideos(paths);
     setSelectedClipIds(new Set());
     setMergeOrder([]);
     setResult(null);
     setPreviewStates({});
-    setProgress(null);
+    clipBatchProgressRef.current = null;
+    clipProgressGenerationRef.current = resetClipRunProgress();
     setError(null);
     setMergeMode(false);
     setCompatModal(null);
     setConvertedSources({});
     setActiveGridItems(null);
     setUnifiedPreviews({});
-    /* DEV TOOLS: a brand-new source selection invalidates any prior per-source
-     * plan/proxy/progress/failure state so the graceful-poster decision (and the
-     * concurrent proxy build) starts clean. The result effect no longer resets
-     * these, so a new source must clear them here. */
+    /* A replacement source invalidates the visibility-driven plan/proxy state so
+     * later scene tiles begin with fresh probes and request IDs. */
     setPlaybackPlans({});
     setSourceProxyPaths({});
-    setProxyProgress({});
-    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    for (const s of new Set([
+      ...proxyInFlightRef.current,
+      ...planInFlightRef.current,
+      ...activeProxyRequestsRef.current.keys(),
+    ])) {
+      bumpSourceEpoch(s);
+      removeProxyProgress(s);
+    }
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
+    activeProxyRequestsRef.current.clear();
     failedProxiesRef.current.clear();
+    setFailedProxySources({});
     forceProxyRebuildRef.current.clear();
 
     // Video picked, high intent to extract - warm up the server
@@ -997,12 +1048,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, [exportOptions]);
   const selectedExportOption = exportOptions.find((option) => option.value === exportFormat);
   const qualitySpec = React.useMemo(() => clipQualitySpec(exportFormat), [exportFormat]);
+  const supportsRateControl = formatSupportsRateControl(exportFormat);
+
+  React.useEffect(() => {
+    if (!supportsRateControl) {
+      setRateMode("quality");
+    }
+  }, [supportsRateControl]);
 
   React.useEffect(() => {
     if (!qualitySpec) return;
     setExportQuality((current) => {
       const existing = current[exportFormat];
-      if (existing && existing >= qualitySpec.min && existing <= qualitySpec.max) {
+      if (existing != null && existing >= qualitySpec.min && existing <= qualitySpec.max) {
         return current;
       }
       return { ...current, [exportFormat]: qualitySpec.defaultValue };
@@ -1026,215 +1084,240 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     return rows;
   }, [displayedClips, gridCols, hasClips]);
 
-  /* DEV TOOLS: measure the scroll viewport so the offset-<video> budget can be
-   * sized to FILL the visible area (+ a small overscan) instead of a fixed cap.
-   * Virtuoso's scrollerRef hands us the real scroll element (the
-   * ClipPreviewScroller div). Only observe in featherweight mode with clips —
-   * flag-off this never attaches and the geometry stays 0. */
-  React.useEffect(() => {
-    if (!featherweightActive || !hasClips || !scrollerEl || typeof ResizeObserver === "undefined") {
-      // Reset so a flag flip / cleared grid / lost element can't leave a stale
-      // measurement feeding the budget memo (memo then falls back to tunable).
-      setViewportHeightPx(0);
-      setViewportWidthPx(0);
-      return;
-    }
-    const el = scrollerEl;
-    const measure = () => {
-      setViewportHeightPx(el.clientHeight);
-      setViewportWidthPx(el.clientWidth);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-    // scrollerEl changes when Virtuoso (re)mounts the scroll element — e.g. when
-    // hasClips toggles — so re-running on it picks up the fresh target.
-  }, [featherweightActive, hasClips, scrollerEl]);
+  // Ordered clip ids for the selected-clip scrollbar markers. Kept as its own
+  // memo so the marker computation doesn't re-run on every unrelated clip-object
+  // change (preview state ticks) — only when the id list itself changes.
+  const displayedClipIds = React.useMemo(
+    () => displayedClips.map((clip) => clip.id),
+    [displayedClips],
+  );
 
-  /* DEV TOOLS (featherweight only): track the scroller's scrollTop AND its
-   * per-frame velocity so the central mount set can be computed from real scroll
-   * GEOMETRY and FAST-FLING suppression can key on actual velocity (not
-   * Virtuoso's isScrolling, which is true for slow scroll too).
-   * THROTTLED to one state update per requestAnimationFrame — a raw scroll
-   * handler would re-render the panel on every wheel tick. Flag-off (or before
-   * Virtuoso hands us the element) this never attaches; scrollTop stays 0 and
-   * fastScrolling stays false. */
+  // Where to draw a tick on the custom scrollbar overlay for each selected clip:
+  // one per row that holds a selection, at that row's fractional position down
+  // the list. Recomputes when the selection changes AND when the column count
+  // changes (which moves clips onto different rows).
+  const selectionMarkers = React.useMemo(
+    () =>
+      computeSelectionMarkers({
+        selectedIds: selectedClipIds,
+        clipIds: displayedClipIds,
+        gridCols,
+        totalRows: clipRows.length,
+      }),
+    [selectedClipIds, displayedClipIds, gridCols, clipRows.length],
+  );
+
+  /* GRAB-AND-SCROLL (hand-drag panning). Press anywhere in the grid body and drag
+   * up/down to pan the list, like a phone map or a PDF hand tool. The clip tiles
+   * are clickable (a click selects / opens a clip), so a MOVEMENT THRESHOLD tells
+   * the two apart: if the pointer travels past the threshold before release we
+   * treat it as a pan (scroll the list, and swallow the click so no clip toggles);
+   * if it barely moves the normal click runs. Attached imperatively to the real
+   * scroll element Virtuoso hands us (scrollerEl) so it reuses the one scroll
+   * mechanism; hover-preview (mouse enter/leave) is untouched. */
   React.useEffect(() => {
-    if (!featherweightActive || !hasClips || !scrollerEl) {
-      setScrollTopPx(0);
-      setFastScrolling(false);
-      return undefined;
-    }
     const el = scrollerEl;
-    let rafId = 0;
-    let lastTopPx = el.scrollTop;
-    let settleTimer = 0;
-    const clearSettle = () => {
-      if (settleTimer) {
-        window.clearTimeout(settleTimer);
-        settleTimer = 0;
+    if (!el || !hasClips) return undefined;
+
+    let activePointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let startScrollTop = 0;
+    let armed = false; // pointer is down, gesture undecided
+    let dragging = false; // moved past the threshold -> panning
+    let dragVelocity = 0;
+    let lastDragScrollTop = 0;
+    let lastDragAt = 0;
+    let momentumVelocity = 0;
+    let momentumLastAt = 0;
+    let momentumFrame: number | null = null;
+    // Set true the instant a press becomes a drag; consumed by the capture-phase
+    // click handler below to swallow the click that the browser fires after the
+    // drag so no clip gets selected/toggled.
+    let suppressNextClick = false;
+
+    const stopMomentum = () => {
+      if (momentumFrame != null) {
+        cancelAnimationFrame(momentumFrame);
+        momentumFrame = null;
       }
+      momentumVelocity = 0;
     };
-    const onScroll = () => {
-      if (rafId) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = 0;
-        const top = el.scrollTop;
-        // Velocity = px moved since the previous rAF sample. A real fling moves
-        // many px/frame; a careful drag stays well under the threshold.
-        const velocity = Math.abs(top - lastTopPx);
-        lastTopPx = top;
-        setScrollTopPx(top);
-        if (velocity > FAST_SCROLL_VELOCITY_PX_PER_FRAME) {
-          setFastScrolling(true);
-          // Re-arm the settle timer on every fast frame so the flag clears only
-          // ~140ms AFTER the fling actually slows below the threshold.
-          clearSettle();
-          settleTimer = window.setTimeout(() => {
-            settleTimer = 0;
-            setFastScrolling(false);
-          }, FAST_SCROLL_SETTLE_MS);
+
+    const advanceMomentum = (now: number) => {
+      const step = stepGrabMomentum(momentumVelocity, now - momentumLastAt);
+      const before = el.scrollTop;
+      el.scrollTop = before + step.distance;
+      momentumVelocity = step.velocity;
+      momentumLastAt = now;
+
+      // A clamped scrollTop means the grid reached its first or last row. Stop
+      // immediately instead of scheduling invisible work against the boundary.
+      if (momentumVelocity === 0 || Math.abs(el.scrollTop - before) < 0.01) {
+        stopMomentum();
+        return;
+      }
+      momentumFrame = requestAnimationFrame(advanceMomentum);
+    };
+
+    const startMomentum = () => {
+      const now = performance.now();
+      if (
+        Math.abs(dragVelocity) < 0.015
+        || now - lastDragAt > GRID_GRAB_MOMENTUM_RELEASE_WINDOW_MS
+      ) {
+        return;
+      }
+      momentumVelocity = dragVelocity;
+      momentumLastAt = now;
+      momentumFrame = requestAnimationFrame(advanceMomentum);
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return; // primary button only
+      stopMomentum();
+      // Leave the native scrollbar gutter to the browser so grabbing the thumb
+      // still does a normal scrollbar drag (don't double-drive scrollTop).
+      const scrollbarWidth = el.offsetWidth - el.clientWidth;
+      if (scrollbarWidth > 0) {
+        const rect = el.getBoundingClientRect();
+        if (e.clientX >= rect.right - scrollbarWidth) return;
+      }
+      armed = true;
+      dragging = false;
+      suppressNextClick = false;
+      activePointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      startScrollTop = el.scrollTop;
+      dragVelocity = 0;
+      lastDragScrollTop = el.scrollTop;
+      lastDragAt = performance.now();
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!armed) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!dragging) {
+        if (!isPastDragThreshold(dx, dy, GRID_GRAB_DRAG_THRESHOLD_PX)) return;
+        dragging = true;
+        suppressNextClick = true;
+        el.classList.add("is-grabbing");
+        try {
+          if (activePointerId != null) el.setPointerCapture(activePointerId);
+        } catch {
+          /* capture can throw if the pointer already released; ignore */
         }
-      });
+      }
+      // Drag down -> content follows the hand -> scrollTop decreases.
+      el.scrollTop = startScrollTop - dy;
+      const now = performance.now();
+      dragVelocity = sampleGrabVelocity(
+        dragVelocity,
+        el.scrollTop - lastDragScrollTop,
+        now - lastDragAt,
+      );
+      lastDragScrollTop = el.scrollTop;
+      lastDragAt = now;
+      e.preventDefault();
     };
-    // Seed the resting scrollTop immediately (the element may already be
-    // scrolled when this effect re-attaches after a remount).
-    lastTopPx = el.scrollTop;
-    setScrollTopPx(el.scrollTop);
-    setFastScrolling(false);
-    el.addEventListener("scroll", onScroll, { passive: true });
+
+    const endGesture = (allowMomentum: boolean) => {
+      if (!armed) return;
+      armed = false;
+      if (dragging) {
+        dragging = false;
+        el.classList.remove("is-grabbing");
+        try {
+          if (activePointerId != null) el.releasePointerCapture(activePointerId);
+        } catch {
+          /* already released; ignore */
+        }
+      }
+      activePointerId = null;
+      if (allowMomentum) startMomentum();
+      else suppressNextClick = false;
+    };
+
+    const onPointerUp = () => endGesture(true);
+    const onPointerCancel = () => endGesture(false);
+
+    // Capture phase so this runs BEFORE React's delegated bubble handler: a drag's
+    // trailing click is stopped here and never reaches a tile's onClick.
+    const onClickCapture = (e: MouseEvent) => {
+      if (!suppressNextClick) return;
+      suppressNextClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    };
+
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerCancel);
+    el.addEventListener("wheel", stopMomentum, { passive: true });
+    el.addEventListener("click", onClickCapture, true);
     return () => {
-      el.removeEventListener("scroll", onScroll);
-      if (rafId) cancelAnimationFrame(rafId);
-      clearSettle();
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerCancel);
+      el.removeEventListener("wheel", stopMomentum);
+      el.removeEventListener("click", onClickCapture, true);
+      stopMomentum();
+      el.classList.remove("is-grabbing");
     };
-  }, [featherweightActive, hasClips, scrollerEl]);
+  }, [scrollerEl, hasClips]);
 
-  /* DEV TOOLS: derive per-row pixel geometry from the real CSS layout so we can
-   * count how many rows fill the viewport. Mirrors src/styles/clips.css:
-   *   .clip-preview-grid-scroller { padding-right: 6px }
-   *   .clip-preview-grid-row { gap: 12px; padding-bottom: 12px }
-   *   .clip-preview-tile { aspect-ratio: 16 / 9 }
-   */
-  // HOISTED out of rowsInView so the viewport-tight visible-row floor can reuse
-  // the same per-row pixel height. 0 when geometry isn't measured yet.
-  const rowHeightPx = React.useMemo(() => {
-    if (viewportHeightPx <= 0 || viewportWidthPx <= 0) return 0;
-    const ROW_GAP = 12; // column gap == row padding-bottom
-    const SCROLLBAR_PAD = 6; // scroller padding-right
-    const usableWidth = viewportWidthPx - SCROLLBAR_PAD;
-    if (usableWidth <= 0) return 0;
-    const tileWidth = (usableWidth - (gridCols - 1) * ROW_GAP) / gridCols;
-    if (tileWidth <= 0) return 0;
-    const tileHeight = (tileWidth * 9) / 16;
-    const rowHeight = tileHeight + ROW_GAP; // tile + padding-bottom between rows
-    return rowHeight > 0 ? rowHeight : 0;
-  }, [viewportHeightPx, viewportWidthPx, gridCols]);
+  const handleResetLayout = React.useCallback(
+    (anchorClipId: string | null) => {
+      if (anchorClipId) {
+        const idx = displayedClips.findIndex((c) => c.id === anchorClipId);
+        if (idx >= 0) {
+          anchorClipIndexRef.current = idx;
+        }
+      }
+    },
+    [displayedClips],
+  );
 
-  const rowsInView = React.useMemo(() => {
-    if (rowHeightPx <= 0 || viewportHeightPx <= 0) return 0;
-    return Math.ceil(viewportHeightPx / rowHeightPx);
-  }, [rowHeightPx, viewportHeightPx]);
+  const {
+    grantedClipIds,
+    firstVisibleRow,
+    lastVisibleRow,
+    layoutGeneration,
+    diagnostics: playbackDiagnostics,
+  } = useClipPlaybackWindow({
+    scrollerEl,
+    panelActive: active,
+    lightweightEnabled: featherweightActive,
+    clipRows,
+    requestedCap: tunables.maxGridVideoPlayers,
+    hardCap: MAX_GRID_VIDEO_PLAYERS_CEILING,
+    marginPx: tunables.playAreaMarginPx,
+    gridCols,
+    renderedRange: visibleRowRange,
+    onResetLayout: handleResetLayout,
+  });
 
-  /* DEV TOOLS (featherweight only) — CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount
-   * set. This is the SOLE authority for which tiles may mount a live offset
-   * <video>; it REPLACES the retired per-tile IntersectionObserver mount decision
-   * (useInPlayArea) so the live-<video> union can never exceed a known cap.
-   *
-   * Computed from scroll GEOMETRY (scrollTop + measured rowHeight + viewport
-   * height), NEVER from Virtuoso's inflated overscan range and NEVER from
-   * offsetMetrics.activeCount (which is incremented AFTER a <video> mounts — a
-   * feedback loop). Recomputed CONTINUOUSLY (cheap) so slow scroll pre-warms.
-   *
-   *  1. Eligible band = the visible rows EXTENDED by `marginRows` on each side
-   *     (the 250px pre-play pre-warm preserved as rows).
-   *  2. The effective cap is FLOORED at the visible-tile count so every visible
-   *     tile always mounts (no cap-below-visible dead-zone), and ceiling-bounded
-   *     at the top:
-   *       effectiveCap = min(
-   *         MAX_GRID_VIDEO_PLAYERS_CEILING,
-   *         max(visibleTileCount, max(1, tunables.maxGridVideoPlayers)))
-   *     `tunables.maxGridVideoPlayers` (the repurposed live knob, dialed in the
-   *     DEV panel against the activeCount readout) can only RAISE the cap above
-   *     the visible floor to add pre-warm headroom; the hard ceiling always
-   *     bounds the top. The floor + ceiling clamp lives inside
-   *     computeGeometryMountVideoIds; this memo passes the ceiling-clamped knob.
-   *  3. From the eligible tiles, ORDER by distance from the viewport-CENTER row
-   *     and take the nearest up-to-effectiveCap (so when the cap is below the
-   *     band, the visible tiles — nearest the center — are granted first).
-   *
-   * Fast-fling SUPPRESSION is applied OUTSIDE this memo (see mayMountVideoIds):
-   * while `fastScrolling` is true the panel holds the last committed set so a
-   * fling allocates no NEW decoders; this memo keeps computing eligibility so the
-   * instant the fling clears the visible tiles are granted at once (no dead-zone). */
-  const geometryMountVideoIds = React.useMemo(() => {
-    if (!featherweightActive) return new Set<string>();
-    // Repurpose the (formerly inert) "Max grid players" knob as the LIVE cap,
-    // ceiling-clamped here so it can never push past the absolute hard ceiling
-    // (which, at 35, keeps even the 2x StrictMode transient — plus the play-area
-    // gate's hover +1 — under the decoder safety limit: (35 + 1) × 2 = 72 < 75).
-    // computeGeometryMountVideoIds then FLOORS this at the visible-tile count so
-    // every visible tile mounts (no dead-zone) and re-applies the ceiling at the
-    // top.
-    const cap = Math.min(
-      MAX_GRID_VIDEO_PLAYERS_CEILING,
-      Math.max(1, Math.floor(tunables.maxGridVideoPlayers) || 1),
-    );
-    return computeGeometryMountVideoIds({
-      clipRows,
-      cap,
-      rowHeightPx,
-      viewportHeightPx,
-      scrollTopPx,
-      rowsInView,
-      marginPx: PREVIEW_PLAY_AREA_MARGIN_PX,
-    });
-  }, [featherweightActive, clipRows, rowHeightPx, viewportHeightPx, scrollTopPx, rowsInView, tunables.maxGridVideoPlayers]);
-
-  /* DEV TOOLS (featherweight only) — FAST-FLING HOLD. While `fastScrolling` is
-   * true we do NOT grant new mounts: we return the LAST committed geometry set
-   * (held in a ref) so a fling allocates zero new decoders. The instant
-   * fastScrolling clears (settle timeout), the live geometry set is committed and
-   * returned immediately — the now-visible tiles mount at once, no dead-zone.
-   * Flag-off this is the empty set (geometryMountVideoIds is empty). */
-  const lastCommittedMountIdsRef = React.useRef<Set<string>>(new Set());
-  const mayMountVideoIds = React.useMemo(() => {
-    if (fastScrolling) {
-      // Hold: serve the last set committed before the fling started.
-      return lastCommittedMountIdsRef.current;
+  React.useEffect(() => {
+    if (import.meta.env.DEV && featherweightActive) {
+      reportGridPlaybackDiagnostics(playbackDiagnostics);
     }
-    lastCommittedMountIdsRef.current = geometryMountVideoIds;
-    return geometryMountVideoIds;
-  }, [fastScrolling, geometryMountVideoIds]);
+  }, [playbackDiagnostics, featherweightActive]);
 
   const activeGridClipIds = React.useMemo(() => {
     const active = new Set<string>();
     if (!gridPreview) return active;
     if (clipRows.length <= 0) return active;
 
-    // Play exactly the rows the user can see, plus one row above and one
-    // below as a scroll buffer so the next row is already animating when
-    // it enters view (avoids the warm-up flash). Scales naturally with
-    // gridCols because Virtuoso reports visible *rows* and the count of
-    // active clips becomes rows × cols. Old logic walked downward until
-    // it hit MAX_GRID_AUTOPLAYERS=100, which meant ~33 rows of animated
-    // WebPs were compositing on every frame at 3 columns — visible cause
-    // of the grid lag at large clip counts. MAX_GRID_AUTOPLAYERS stays
-    // as a hard ceiling for unusually tall viewports but rarely fires.
-    //
-    // OVERSCAN_ROWS == GRID_VIDEO_OVERSCAN_ROWS (both 1) so flag-off behavior is
-    // numerically identical to the old `±1`. In featherweight mode we also floor
-    // the bottom of the window at the measured fill (startRow + rowsInView - 1)
-    // so the active set can never under-report visible rows relative to the
-    // viewport-fill video budget — otherwise the budget couldn't be filled.
     const OVERSCAN_ROWS = GRID_VIDEO_OVERSCAN_ROWS;
     const lastRow = clipRows.length - 1;
     const baseStart = visibleRowRange?.startIndex ?? 0;
     const baseEnd = visibleRowRange?.endIndex ?? baseStart;
     const startRow = Math.max(0, baseStart - OVERSCAN_ROWS);
-    const fillEnd = featherweightActive && rowsInView > 0 ? baseStart + rowsInView - 1 : baseEnd;
-    const endRow = Math.min(lastRow, Math.max(baseEnd, fillEnd) + OVERSCAN_ROWS);
+    const endRow = Math.min(lastRow, baseEnd + OVERSCAN_ROWS);
 
     for (let rowIndex = startRow; rowIndex <= endRow; rowIndex += 1) {
       for (const clip of clipRows[rowIndex] ?? []) {
@@ -1244,7 +1327,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       if (active.size >= MAX_GRID_AUTOPLAYERS) break;
     }
     return active;
-  }, [clipRows, gridCols, gridPreview, visibleRowRange, featherweightActive, rowsInView]);
+  }, [clipRows, gridPreview, visibleRowRange]);
 
   React.useEffect(() => {
     setVisibleRowRange(null);
@@ -1272,32 +1355,41 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   }, []);
 
   // Single handler both column-count call sites (slider + ticks) route through.
-  // Before the deliberate key={gridCols} remount it captures which clip sits at
+  // Before the deliberate key remount it captures which clip sits at
   // the TOP of the viewport so the fresh list can re-open scrolled to it.
-  const changeGridCols = React.useCallback((next: number) => {
-    const cols = Math.min(4, Math.max(1, next));
-    if (cols === gridCols) return;
-    // Capture which clip sits at the TOP of the viewport BEFORE the remount, reading
-    // the LIVE DOM (the dev-tools/featherweight geometry state is 0 when the flag is off).
-    const el = scrollerEl;
-    if (el && el.scrollTop > 0 && clipRows.length > 0) {
-      const rowEl = el.querySelector<HTMLElement>(".clip-preview-grid-row");
-      const measured = rowEl ? rowEl.getBoundingClientRect().height : 0;
-      let rowHeight = measured;
-      if (rowHeight <= 0) {
-        // No row rendered to measure: derive stride from the scroller's own width.
-        // tile is aspect-ratio 16/9; 12px column gap; scroller has padding-right:6px.
-        const innerWidth = el.clientWidth - 6;
-        const tileW = (innerWidth - 12 * (gridCols - 1)) / gridCols;
-        rowHeight = tileW * (9 / 16) + 12; // +12px row stride (padding-bottom)
+  const changeGridCols = React.useCallback(
+    (next: number) => {
+      const cols = Math.min(4, Math.max(1, next));
+      if (cols === gridCols) return;
+      const topRow = (featherweightActive && firstVisibleRow != null)
+        ? firstVisibleRow
+        : (visibleRowRange?.startIndex ?? 0);
+      if (clipRows[topRow]?.[0]) {
+        const anchorId = clipRows[topRow][0].id;
+        const idx = displayedClips.findIndex((c) => c.id === anchorId);
+        anchorClipIndexRef.current = idx >= 0 ? idx : Math.max(0, topRow * gridCols);
+      } else {
+        anchorClipIndexRef.current = 0;
       }
-      const topRow = Math.floor(el.scrollTop / rowHeight);
-      anchorClipIndexRef.current = topRow * gridCols; // gridCols = CURRENT cols
-    } else {
-      anchorClipIndexRef.current = 0;
-    }
-    setGridCols(cols);
-  }, [gridCols, scrollerEl, clipRows.length]);
+      setGridCols(cols);
+    },
+    [gridCols, featherweightActive, firstVisibleRow, visibleRowRange, clipRows, displayedClips],
+  );
+
+  const changeClipPreviewSpeed = React.useCallback((value: number) => {
+    const next = clampNumber(value, 0.25, 4);
+    setClipPreviewSpeed(next);
+    window.dispatchEvent(
+      new CustomEvent("clip-preview-speed-changed", { detail: { speed: next } }),
+    );
+    window.clearTimeout(previewSpeedSaveTimerRef.current);
+    previewSpeedSaveTimerRef.current = window.setTimeout(() => {
+      void invoke("set_config", {
+        key: "clip_preview_speed",
+        value: String(next),
+      });
+    }, 200);
+  }, []);
 
   /* DEV TOOLS: lazily probe a PlaybackPlan for each distinct source that has an
    * active visible tile (first preview interaction). One invoke per source. */
@@ -1305,7 +1397,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (!featherweightActive || !hasClips) return;
     const sources = new Set<string>();
     for (const clip of displayedClips) {
-      if (!activeGridClipIds.has(clip.id) || !clip.path) continue;
+      if (!grantedClipIds.has(clip.id) || !clip.path) continue;
       if (playbackPlans[clip.path] || planInFlightRef.current.has(clip.path)) continue;
       sources.add(clip.path);
     }
@@ -1329,7 +1421,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           planInFlightRef.current.delete(source);
         });
     }
-  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, scenePreviewHeight]);
+  }, [featherweightActive, hasClips, displayedClips, grantedClipIds, playbackPlans, scenePreviewHeight]);
 
   /* When the preview-quality cap changes, discard the cached per-source plans and
    * proxy paths so both re-run at the new height: the plan re-probes (a source can
@@ -1340,76 +1432,96 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   React.useEffect(() => {
     if (prevScenePreviewHeightRef.current === scenePreviewHeight) return;
     prevScenePreviewHeightRef.current = scenePreviewHeight;
-    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    for (const s of new Set([
+      ...proxyInFlightRef.current,
+      ...planInFlightRef.current,
+      ...activeProxyRequestsRef.current.keys(),
+    ])) {
+      bumpSourceEpoch(s);
+      removeProxyProgress(s);
+    }
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
+    activeProxyRequestsRef.current.clear();
     failedProxiesRef.current.clear();
+    setFailedProxySources({});
     setPlaybackPlans({});
     setSourceProxyPaths({});
   }, [scenePreviewHeight]);
 
-  /* Kick exactly ONE build_source_proxy for a source, deduping on the in-flight
-   * ref. Used both by the lazy on-scroll effect below AND by startExtraction to
-   * overlap the build with scene detection. Dedup is proxyInFlightRef-only (a ref,
-   * always current); it deliberately does NOT read sourceProxyPaths (that would
-   * need it as a dep / could be stale) — callers that can skip an already-built
-   * source do their own sourceProxyPaths check before calling. */
+  /* Kick exactly ONE visibility-driven build_source_proxy for a source after
+   * scenes exist, deduping on the in-flight ref. The request ID and source epoch
+   * together identify the current request; late events/results cannot touch a
+   * replacement request for the same source. */
   const kickProxyBuild = React.useCallback((source: string) => {
     if (proxyInFlightRef.current.has(source)) return;
-    proxyInFlightRef.current.add(source);
     const epoch = currentSourceEpoch(source);
+    const requestId = createSceneProxyRequestId();
+    proxyInFlightRef.current.add(source);
+    activeProxyRequestsRef.current.set(source, { epoch, requestId });
     // "extract again" marks the source for a forced rebuild so the Rust side
     // skips its cache; consumed below so only the first build after a re-extract
     // is forced (later tile interactions reuse the freshly-built proxy).
     const forceRebuild = forceProxyRebuildRef.current.has(source);
-    void invoke<string>("build_source_proxy", { sourcePath: source, force: forceRebuild, height: scenePreviewHeightRef.current })
+    const isCurrentRequest = () =>
+      currentSourceEpoch(source) === epoch
+      && activeProxyRequestsRef.current.get(source)?.epoch === epoch
+      && activeProxyRequestsRef.current.get(source)?.requestId === requestId;
+    void invoke<string>("build_source_proxy", {
+      sourcePath: source,
+      requestId,
+      force: forceRebuild,
+      height: scenePreviewHeightRef.current,
+    })
       .then((proxyPath) => {
-        if (currentSourceEpoch(source) !== epoch) return;
+        if (!isCurrentRequest()) return;
         if (proxyPath) setSourceProxyPaths((current) => ({ ...current, [source]: proxyPath }));
+        removeProxyProgress(source);
       })
       .catch((proxyError) => {
-        if (currentSourceEpoch(source) !== epoch) return;
+        if (!isCurrentRequest()) return;
         // A FAILED build is terminal: mark it so the graceful-poster decision
         // no longer counts this source as "pending" (otherwise a pinned
-        // proxyProgress entry would spin forever), and drop its stale progress
+        // progress entry would otherwise spin forever, and drop its stale tick
         // tick so nothing else reads it as an in-flight build.
         failedProxiesRef.current.add(source);
-        setProxyProgress((cur) => {
-          const { [source]: _dropped, ...rest } = cur;
-          return rest;
-        });
+        setFailedProxySources((current) =>
+          current[source] ? current : { ...current, [source]: true },
+        );
+        removeProxyProgress(source);
         logFrontend("warn", "frontend.clip.source_proxy.warning", "Could not build source proxy", {
           source,
           error: safeLogValue(proxyError),
         });
       })
       .finally(() => {
-        if (currentSourceEpoch(source) !== epoch) return;
+        if (!isCurrentRequest()) return;
         proxyInFlightRef.current.delete(source);
+        activeProxyRequestsRef.current.delete(source);
+        removeProxyProgress(source);
         // One-shot: the forced rebuild has happened (or failed); drop the mark
         // so subsequent builds for this source cache normally.
         forceProxyRebuildRef.current.delete(source);
       });
   }, []);
 
-  /* DEV TOOLS: for proxy-mode sources with an active visible tile, kick exactly
-   * ONE build_source_proxy per source on first interaction. The proxy-progress
-   * listener tracks the build; on resolve we record the proxy path which flips
-   * those tiles from WebP poster to live offset <video>. Never pre-warmed. */
+  /* DEV TOOLS: once scenes exist, visibility selects the sources that need
+   * proxy work. An active tile with a resolved playback plan gets exactly ONE
+   * build_source_proxy; detection itself does not enqueue proxy work. The
+   * progress listener tracks the visible source's request. */
   React.useEffect(() => {
     if (!featherweightActive || !hasClips) return;
-    const sources = new Set<string>();
-    for (const clip of displayedClips) {
-      if (!activeGridClipIds.has(clip.id) || !clip.path) continue;
-      // Featherweight previews always use the lightweight proxy (even for "direct"
-      // sources) — concurrent full-res decoders starve rVFC and the loop overshoots
-      // its margin. Build once the plan has resolved (so we skip unprobeable files).
-      if (!playbackPlans[clip.path]) continue;
-      if (sourceProxyPaths[clip.path] || proxyInFlightRef.current.has(clip.path)) continue;
-      sources.add(clip.path);
+    const sources = collectProxySourcesForActiveClips({
+      clips: displayedClips,
+      activeClipIds: grantedClipIds,
+      playbackPlans,
+      resolvedSources: new Set(Object.keys(sourceProxyPaths)),
+      inFlightSources: proxyInFlightRef.current,
+    });
+    for (const source of sources) {
+      if (!failedProxySources[source]) kickProxyBuild(source);
     }
-    for (const source of sources) kickProxyBuild(source);
-  }, [featherweightActive, hasClips, displayedClips, activeGridClipIds, playbackPlans, sourceProxyPaths, kickProxyBuild]);
+  }, [featherweightActive, hasClips, displayedClips, grantedClipIds, playbackPlans, sourceProxyPaths, failedProxySources, kickProxyBuild]);
 
   function startPreviewRenderBatch(batch: ClipPreviewItem[], token: number) {
     const renderable = batch.filter((clip) => clip.path);
@@ -1537,6 +1649,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (videos.length === 0 || isExtracting) return;
     const force = options?.force ?? false;
     const proxies = options?.proxies ?? detectorProxies;
+    const runGeneration = beginClipRunProgress();
+    const isCurrentRun = () => clipProgressGenerationRef.current === runGeneration;
+    clipBatchProgressRef.current = null;
+    clipProgressGenerationRef.current = runGeneration;
 
     // "Extract again" (force) must be a COMPLETE redo: scene detection already
     // bypasses its cache via the force flag below, but the source proxy has its
@@ -1547,18 +1663,24 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       for (const video of videos) forceProxyRebuildRef.current.add(video);
     }
 
-    // Reset per-source plan/proxy state ONCE here at extraction start (it used to
-    // live in the result?.input effect). Doing it here — before the concurrent
-    // proxy build is kicked below — means detection's results landing mid-extraction
-    // won't wipe the in-flight proxy or its proxyInFlightRef marker. failedProxiesRef
-    // is cleared too so a prior terminal failure doesn't poison the new build.
+    // Reset per-source plan/proxy state at extraction start so a new run starts
+    // clean. Proxy work begins only after scenes exist and a tile is visible;
+    // detection itself never starts proxy jobs or races them with scene discovery.
     setPlaybackPlans({});
     setSourceProxyPaths({});
-    setProxyProgress({});
-    for (const s of new Set([...proxyInFlightRef.current, ...planInFlightRef.current])) bumpSourceEpoch(s);
+    for (const s of new Set([
+      ...proxyInFlightRef.current,
+      ...planInFlightRef.current,
+      ...activeProxyRequestsRef.current.keys(),
+    ])) {
+      bumpSourceEpoch(s);
+      removeProxyProgress(s);
+    }
     planInFlightRef.current.clear();
     proxyInFlightRef.current.clear();
+    activeProxyRequestsRef.current.clear();
     failedProxiesRef.current.clear();
+    setFailedProxySources({});
 
     // GPU mode no longer blocks on a codec preflight. The Python backend
     // routes any codec NVDEC/nelux can't decode straight to software decode ->
@@ -1569,6 +1691,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     // kick in; we do NOT pop the convert modal or abort.
     if (clipMode === "gpu") {
       const unsupported = await findFirstUnsupportedGpuCodec(videos);
+      if (!isCurrentRun()) return;
       if (unsupported) {
         logFrontend(
           "info",
@@ -1592,7 +1715,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     setMergeMode(false);
     setActiveGridItems(null);
     setUnifiedPreviews({});
-    setProgress({
+    publishDetectionProgress(runGeneration, {
       type: "progress",
       stage: "starting",
       percent: 0,
@@ -1604,13 +1727,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     try {
       if (clipMode === "gpu") {
         setServerStatus("warming");
-        setProgress({
+        publishDetectionProgress(runGeneration, {
           type: "progress",
           stage: "dependencies",
           percent: 0,
           message: "Preparing GPU clip server for batch extraction...",
         });
         await invoke("warmup_clip_server").catch((warmupError) => {
+          if (!isCurrentRun()) return;
           setServerStatus("cold");
           logFrontend("warn", "frontend.clip.server_warmup.warning", "Clip server warmup failed; falling back to one-shot extraction", {
             error: safeLogValue(warmupError),
@@ -1618,18 +1742,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         });
       }
 
-      // Overlap: start the source-proxy build(s) concurrently with detection. The proxy
-      // (NVDEC+NVENC) and TransNet detection (tensor cores) mostly use different GPU
-      // silicon; they only share the decoder. Fire-and-forget — do NOT await — so the
-      // ~23s proxy overlaps the ~21s detection instead of running after it. force is
-      // honored via forceProxyRebuildRef (set above on "extract again").
-      if (featherweightActive) {
-        for (const video of videos) kickProxyBuild(video);
-      }
-
       const results: ClipExtractionResult[] = [];
       for (let index = 0; index < videos.length; index += 1) {
-        if (clipCancellingRef.current) break;
+        if (!isCurrentRun() || clipCancellingRef.current) break;
         const rawPath = videos[index];
         // Feed the detector the proxy if one exists for this raw (manual
         // last-resort convert), but everything user-facing stays on the raw.
@@ -1639,14 +1754,16 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           activeIndex: index,
           total: videos.length,
           inputPath: rawPath,
+          generation: runGeneration,
         };
-        setProgress({
+        publishDetectionProgress(runGeneration, {
           type: "progress",
           stage: "starting",
           percent: Math.round((index / videos.length) * 100),
           message: `Episode ${index + 1}/${videos.length}: ${fileName(rawPath)}`,
         });
         const raw = await invoke<string>("clip_extract", { inputPath, mode: clipMode, force });
+        if (!isCurrentRun()) return;
         // Strict type check rather than substring — the cached "done" payload
         // returned for a cache hit is the same shape as a real done event and
         // could theoretically contain the literal string in a path, scene
@@ -1662,6 +1779,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         const rawPayload = isServerTask
           ? await waitForClipServerResult(clipAbortRef)
           : parseBridgePayload<ClipExtractionResult>(raw);
+        if (!isCurrentRun()) return;
         // If detection ran on a proxy, rewrite every scene's source (and the
         // top-level input) back to the RAW so preview + export read the
         // original file, never the lossy proxy. Timecodes are unchanged
@@ -1673,9 +1791,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               scenes: rawPayload.scenes.map((scene) => ({ ...scene, source: rawPath })),
             }
           : rawPayload;
+        if (!isCurrentRun()) return;
         results.push(payload);
         setResult(combineClipResults(results, clipMode));
-        setProgress({
+        publishDetectionProgress(runGeneration, {
           type: "progress",
           stage: "complete",
           percent: Math.round(((index + 1) / videos.length) * 100),
@@ -1684,10 +1803,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         });
       }
 
-      if (results.length === 0) return;
+      if (!isCurrentRun() || results.length === 0) return;
       const payload = combineClipResults(results, clipMode);
       setResult(payload);
-      setProgress({
+      publishDetectionProgress(runGeneration, {
         type: "progress",
         stage: "complete",
         percent: 100,
@@ -1695,7 +1814,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         elapsedSeconds: payload.totalSeconds,
       });
     } catch (clipError) {
-      if (!clipCancellingRef.current) {
+      if (isCurrentRun() && !clipCancellingRef.current) {
         const errorText = readBridgeError(clipError);
         setError(errorText);
         const failed = clipBatchProgressRef.current;
@@ -1706,6 +1825,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         }
       }
     } finally {
+      if (!isCurrentRun()) return;
       clipAbortRef.current = null;
       clipBatchProgressRef.current = null;
       clipCancellingRef.current = false;
@@ -1716,17 +1836,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   async function handleConvertCompat() {
     if (!compatModal || isConverting) return;
     const { failedPath } = compatModal;
+    const conversionGeneration = clipProgressGenerationRef.current;
+    isConvertingRef.current = true;
     setIsConverting(true);
-    setConvertMessage("Converting to compatible format...");
     setError(null);
-    setProgress({
-      type: "progress",
+    publishCompatibilityProgress({
       stage: "starting",
       percent: 0,
       message: `Converting ${fileName(failedPath)} to compatible format...`,
     });
     try {
       const raw = await invoke<string>("clip_compat_convert", { inputPath: failedPath });
+      if (clipProgressGenerationRef.current !== conversionGeneration) return;
       const payload = parseBridgePayload<{ output: string; cached: boolean }>(raw);
       const convertedPath = payload.output;
       const originalName = fileName(failedPath);
@@ -1739,15 +1860,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       setConvertedSources((current) => ({ ...current, [failedPath]: originalName }));
       setDetectorProxies(nextProxies);
       setCompatModal(null);
-      setConvertMessage(null);
+      publishCompatibilityProgress(null);
+      isConvertingRef.current = false;
       setIsConverting(false);
       // selectedVideos already holds the raw at failedIndex; just re-run.
       void startExtraction(selectedVideos, { force: true, proxies: nextProxies });
     } catch (convertError) {
+      if (clipProgressGenerationRef.current !== conversionGeneration) return;
       const errorText = readBridgeError(convertError);
       setError(errorText);
-      setProgress(null);
-      setConvertMessage(null);
+      publishDetectionProgress(clipProgressGenerationRef.current, null);
+      publishCompatibilityProgress(null);
+      isConvertingRef.current = false;
       setIsConverting(false);
       setCompatModal((current) =>
         current ? { ...current, rawError: errorText } : current,
@@ -1760,6 +1884,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   function dismissCompatModal() {
     if (isConverting) return;
+    publishCompatibilityProgress(null);
     setCompatModal(null);
   }
 
@@ -1895,9 +2020,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     },
     [mergeOrderedClips],
   );
-  // Container extension the backend will actually write for the current
-  // preset, so the merge UI labels match the real output file.
-  const mergeExt = clipPresetExtension(exportFormat);
+  // Container extension the backend will actually write for the current preset
+  // and the selected clips' sources, so the merge UI labels match the real
+  // output file. Smart cut reads the sources; every other preset ignores them.
+  const mergeExt = React.useMemo(
+    () =>
+      clipPresetExtension(
+        exportFormat,
+        mergeOrderedClips.map((clip) => clip.path ?? clip.sourceName),
+      ),
+    [exportFormat, mergeOrderedClips],
+  );
 
   async function handleClipClick(
     clip: ClipPreviewItem,
@@ -2293,6 +2426,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
     setError(null);
     setIsExtracting(true);
+    exportProgressActiveRef.current = true;
     setExportMinimized(false);
     setExportSession({
       mode: "single",
@@ -2309,6 +2443,15 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     let cancelled = false;
     let failed = false;
     let firstError: string | null = null;
+    const exportedPaths: string[] = [];
+    const supportsRc = formatSupportsRateControl(exportFormat);
+    const rateModeArg = supportsRc ? rateMode : null;
+    const bitrateMbps = supportsRc && rateMode !== "quality"
+      ? (exportBitrate[exportFormat] ?? clipBitrateDefault(exportFormat))
+      : null;
+    const qualityValue = qualitySpec && rateMode === "quality"
+      ? exportQuality[exportFormat]
+      : null;
 
     try {
       for (let index = 0; index < selectedClips.length; index += 1) {
@@ -2335,14 +2478,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
         try {
           if (clip.isUnified && clip.segments) {
-            await invoke<string>("clip_export_merged", {
+            const raw = await invoke<string>("clip_export_merged", {
               clips: clip.segments,
               outputDir: outDir,
               preset: exportFormat,
-              qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
+              qualityValue,
+              rateMode: rateModeArg,
+              bitrateMbps,
             });
+            const payload = parseBridgePayload<{ output?: string }>(raw);
+            if (payload.output) exportedPaths.push(payload.output);
           } else {
-            await invoke<string>("clip_export", {
+            const raw = await invoke<string>("clip_export", {
               clips: [
                 {
                   source: clip.path,
@@ -2354,8 +2501,16 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
               ],
             outputDir: outDir,
             preset: exportFormat,
-            qualityValue: clipQualitySpec(exportFormat) ? exportQuality[exportFormat] : null,
+            qualityValue,
+            rateMode: rateModeArg,
+            bitrateMbps,
           });
+            const payload = parseBridgePayload<{ output?: string; outputs?: string[] }>(raw);
+            if (payload.outputs?.length) {
+              exportedPaths.push(...payload.outputs);
+            } else if (payload.output) {
+              exportedPaths.push(payload.output);
+            }
           }
           setExportSession((current) =>
             current
@@ -2400,7 +2555,68 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           );
         }
       }
+      if (!cancelled && !failed && smoothExport) {
+        if (exportedPaths.length !== selectedClips.length) {
+          throw new Error("The app could not identify every exported clip for motion smoothing.");
+        }
+        setExportSession((current) =>
+          current
+            ? {
+                ...current,
+                activeIndex: 0,
+                activePercent: 0,
+                activeFps: null,
+                activeSpeed: null,
+                activeMessage: "Preparing one motion-smoothing batch",
+                rows: current.rows.map((row) => ({ ...row, status: "pending" })),
+              }
+            : current,
+        );
+        await invoke<string>("interpolate_exported_clips", {
+          paths: exportedPaths,
+          factor: 2,
+          model: "rife4.25",
+          gpu: clipMode === "gpu",
+          half: clipMode === "gpu",
+          rateMode: rateModeArg ?? "quality",
+          quality: qualityValue ?? 18,
+          bitrateMbps: bitrateMbps ?? 20,
+        });
+        setExportSession((current) =>
+          current
+            ? {
+                ...current,
+                activePercent: 100,
+                rows: current.rows.map((row) => ({ ...row, status: "done" })),
+              }
+            : current,
+        );
+      }
+    } catch (e) {
+      const errorText = readBridgeError(e);
+      if (clipCancellingRef.current) {
+        cancelled = true;
+      } else {
+        failed = true;
+        firstError = errorText;
+        setExportSession((current) =>
+          current
+            ? {
+                ...current,
+                rows: current.rows.map((row, index) =>
+                  index === current.activeIndex
+                    ? { ...row, status: "error", errorMessage: errorText }
+                    : row,
+                ),
+              }
+            : current,
+        );
+      }
     } finally {
+      // Shared conversion-progress events belong to an export only while its
+      // work is actually running. Keep a completed session for the dialog, but
+      // release the shared stream before publishing the terminal phase.
+      exportProgressActiveRef.current = false;
       const finalPhase = cancelled
         ? "cancelled"
         : failed
@@ -2430,91 +2646,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     }
   }
 
-  /* DEV TOOLS: surface an in-flight proxy build in the featherweight status line.
-   * A source is building when proxy-progress has emitted a percent for it but its
-   * resolved path isn't in sourceProxyPaths yet; once built it reverts to the
-   * normal ready text. Pick the lowest percent so the line reflects the slowest
-   * build still finishing. */
-  const proxyBuildPct = React.useMemo(() => {
-    if (!featherweightActive) return null;
-    let lowest: number | null = null;
-    for (const [source, percent] of Object.entries(proxyProgress)) {
-      if (sourceProxyPaths[source]) continue;
-      if (lowest === null || percent < lowest) lowest = percent;
-    }
-    return lowest;
-  }, [featherweightActive, proxyProgress, sourceProxyPaths]);
-
-  /* The prep bar carries the proxy-build / WebP-cache progress now, so this
-   * caption is just the scene-ready summary — no duplicated build % or cached
-   * count. Featherweight bakes nothing, so it reads "live previews". */
-  const runMessage = error
-    ?? (result
-      ? (featherweightActive
-          ? `${displayedClips.length} scenes ready - live previews`
-          : `${result.sceneCount} scenes ready`)
-      : progress?.message ?? "");
-
-  /* Per-task progress bars. The detection feed and the secondary preview-prep
-   * task run CONCURRENTLY, so each bar is driven SOLELY by its own signal and
-   * never fights the other. There is no synthetic roll-up: two purpose-built
-   * bars already convey state, and a fixed-weight blend of two parallel tasks
-   * with no fixed cost ratio reads as broken (Overall at 60% while detection is
-   * 100% above it) and pulls a completed bar backward when a post-detection lazy
-   * proxy build kicks. Each task simply shows its own honest fraction.
-   *
-   * - detection: progress.percent (already cross-episode overall via
-   *   mapClipBatchProgress). Indeterminate while extracting before any percent.
-   * - prep (exactly one runs per mode — proxy ON / WebP OFF):
-   *     featherweight ON  -> source-proxy build (proxyBuildPct). Bar appears
-   *       only while a build is in flight or has resolved; absent otherwise so
-   *       a non-running stage hides rather than showing 0%. proxyBuildPct===null
-   *       with resolved paths => done (100%); building with no percent yet =>
-   *       indeterminate. Failed sources are already excluded from proxyBuildPct.
-   *     featherweight OFF -> WebP preview bake (settledPreviewCount / clips).
-   *       Cache hits flip clips to ready immediately so the bar renders complete;
-   *       errors count as settled so a single failure can't peg the bar < 100%.
-   */
-  const proxyResolvedCount = Object.keys(sourceProxyPaths).length;
-  const prepBar = React.useMemo<{
-    label: string;
-    percent: number;
-    indeterminate: boolean;
-  } | null>(() => {
-    if (featherweightActive) {
-      // No proxy in flight and none resolved => no build ran this mode: hide.
-      if (proxyBuildPct === null && proxyResolvedCount === 0) return null;
-      if (proxyBuildPct === null) {
-        return { label: "Preview proxy", percent: 100, indeterminate: false };
-      }
-      return {
-        label: "Building preview proxy",
-        percent: Math.max(0, Math.min(100, proxyBuildPct)),
-        // No percent yet (cache-miss build just kicked) => indeterminate sweep.
-        indeterminate: proxyBuildPct <= 0,
-      };
-    }
-    // WebP bake only runs with a visible grid and at least one clip; otherwise
-    // there is no prep task to report, so hide the bar rather than show 0%.
-    if (!gridPreview || displayedClips.length === 0) return null;
-    return {
-      label: `Caching previews (${readyPreviewCount}/${displayedClips.length})`,
-      // Drive the fill off SETTLED (ready + error) previews so a permanently
-      // failed bake can't keep the bar below 100% once all work has finished.
-      percent: Math.round((settledPreviewCount / displayedClips.length) * 100),
-      indeterminate: false,
-    };
-  }, [
-    featherweightActive,
-    proxyBuildPct,
-    proxyResolvedCount,
-    gridPreview,
-    displayedClips.length,
-    readyPreviewCount,
-    settledPreviewCount,
-  ]);
-
-  const detectionIndeterminate = isExtracting && (!progress || progress.percent <= 0);
+  const resolvedProxySources = React.useMemo(
+    () => Object.keys(sourceProxyPaths),
+    [sourceProxyPaths],
+  );
 
   return (
     <section
@@ -2615,21 +2750,81 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             </div>
           </div>
 
+          <div
+            className={`clip-cols-control ${featherweightPreviews ? "" : "is-disabled"}`}
+            title={
+              featherweightPreviews
+                ? undefined
+                : "Preview speed needs the featherweight preview engine. Turn it on in Settings."
+            }
+          >
+            <div className="clip-cols-label">
+              <span>Preview speed</span>
+              <strong>
+                {clipPreviewSpeed.toFixed(clipPreviewSpeed % 0.5 === 0 ? 1 : 2)}x
+              </strong>
+            </div>
+            <input
+              type="range"
+              className="clip-cols-slider"
+              min={0.25}
+              max={4}
+              step={0.25}
+              value={clipPreviewSpeed}
+              disabled={!featherweightPreviews}
+              onChange={(e) => changeClipPreviewSpeed(Number(e.currentTarget.value))}
+              aria-label="Grid preview playback speed"
+            />
+            <div className="clip-cols-ticks">
+              {[0.5, 1, 2].map((speed) => (
+                <button
+                  key={speed}
+                  type="button"
+                  className={`clip-cols-tick ${clipPreviewSpeed === speed ? "is-active" : ""}`}
+                  disabled={!featherweightPreviews}
+                  onClick={() => changeClipPreviewSpeed(speed)}
+                  aria-label={`${speed}x preview speed`}
+                >
+                  {speed}x
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="clip-cols-control">
             <div className="clip-cols-label">
               <span>Export Format</span>
             </div>
             <Dropdown<ClipExportFormat>
               value={exportFormat}
-              onChange={(next) => setExportFormat(next)}
+              onChange={(next) => {
+                setExportFormat(next);
+                if (next !== "h264-nvenc" && next !== "h264-cpu") {
+                  setSmoothExport(false);
+                }
+              }}
               options={dropdownOptions}
               className="clip-export-format-dropdown"
             />
             {selectedExportOption?.reason && <small className="stream-warning">{selectedExportOption.reason}</small>}
-            {qualitySpec && (
+            {supportsRateControl && (
+              <ClipRateControl
+                mode={rateMode}
+                bitrateMbps={exportBitrate[exportFormat] ?? clipBitrateDefault(exportFormat)}
+                disabled={isExtracting}
+                onModeChange={setRateMode}
+                onBitrateChange={(bitrateMbps) => {
+                  setExportBitrate((current) => ({
+                    ...current,
+                    [exportFormat]: bitrateMbps,
+                  }));
+                }}
+              />
+            )}
+            {qualitySpec && rateMode === "quality" && (
               <VideoOutputControl
                 spec={qualitySpec}
-                value={exportQuality[exportFormat] || qualitySpec.defaultValue}
+                value={exportQuality[exportFormat] ?? qualitySpec.defaultValue}
                 disabled={isExtracting}
                 onChange={(value) => {
                   const clamped = clampNumber(value, qualitySpec.min, qualitySpec.max);
@@ -2637,6 +2832,31 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                 }}
               />
             )}
+            <label className={`clip-smoothing-toggle ${smoothExport ? "is-active" : ""}`}>
+              <span className="clip-smoothing-check">
+                <input
+                  type="checkbox"
+                  checked={smoothExport}
+                  disabled={isExtracting}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setSmoothExport(checked);
+                    if (checked && exportFormat !== "h264-nvenc" && exportFormat !== "h264-cpu") {
+                      setExportFormat(
+                        clipMode === "gpu" && gpuStatus?.hasH264Nvenc
+                          ? "h264-nvenc"
+                          : "h264-cpu",
+                      );
+                    }
+                  }}
+                />
+                <Zap size={13} strokeWidth={2.4} />
+              </span>
+              <span>
+                <strong>Smooth motion · 2× FPS</strong>
+                <small>Uses H.264, then runs one RIFE batch after every clip exports.</small>
+              </span>
+            </label>
           </div>
 
           {!mergeMode && (
@@ -2691,36 +2911,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           )}
         </div>
 
-        {!exportSession && (progress || error || result) && (
-          <div className={`clip-run-card glass ${error ? "is-error" : ""}`}>
-            {/* Scene detection — always present; the core task. */}
-            {(progress || error) && (
-              <div className="clip-bar-row">
-                <div className="clip-run-line">
-                  <strong>{error ? "Extraction failed" : formatClipProgressStage(progress?.stage)}</strong>
-                  {progress && !error && <span>{Math.round(progress.percent)}%</span>}
-                </div>
-                {progress && !error && (
-                  <div className={`clip-progress-track ${detectionIndeterminate ? "is-indeterminate" : ""}`}>
-                    <span className="spring-motion" style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} />
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Preview prep — exactly one of proxy build / WebP bake, only when it actually runs. */}
-            {!error && prepBar && (
-              <div className="clip-bar-row">
-                <div className="clip-run-line">
-                  <strong>{prepBar.label}</strong>
-                  {!prepBar.indeterminate && <span>{prepBar.percent}%</span>}
-                </div>
-                <div className={`clip-progress-track ${prepBar.indeterminate ? "is-indeterminate" : ""}`}>
-                  <span className="spring-motion" style={{ width: `${prepBar.percent}%` }} />
-                </div>
-              </div>
-            )}
-            <p>{runMessage}</p>
-          </div>
+        {!exportSession && (
+          <ClipRunStatus
+            error={error}
+            sceneCount={result?.sceneCount ?? 0}
+            displayedClipCount={displayedClips.length}
+            hasResult={Boolean(result)}
+            isExtracting={isExtracting}
+            featherweightActive={featherweightActive}
+            resolvedProxySources={resolvedProxySources}
+            gridPreview={gridPreview}
+            readyPreviewCount={readyPreviewCount}
+            settledPreviewCount={settledPreviewCount}
+          />
         )}
 
         <div className="clip-format-note">
@@ -2766,20 +2969,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       <div className="clip-extractor-stage">
         {hasClips ? (
           <Virtuoso
-            /* Remount on column change so Virtuoso discards its per-row size
-             * cache and re-measures from scratch. Without this, switching from
-             * 1 column (tall rows) to multi-column (short rows) leaves every
-             * OFF-SCREEN row cached at the old tall height — only mounted rows
-             * re-measure — so the scroll spacer stays massively over-reserved
-             * (the "deadzone" empty region). A window resize cleared it before
-             * by forcing a full re-measure; this does the same automatically. */
-            key={gridCols}
+            /* Remount on column or width-layout reset so Virtuoso discards its per-row size
+             * cache and re-measures from scratch. */
+            key={`${gridCols}-${layoutGeneration}`}
             ref={virtuosoRef}
             data={clipRows}
-            /* Anchor-preserve across the key={gridCols} remount above: a clip's identity is
-             * stable, only its row index changes with column count. Re-open the fresh list
-             * scrolled so the clip that was at the top stays at the top. null ref (initial
-             * load / no prior column change) -> index 0 -> opens at the top. */
+            /* Anchor-preserve across remount: a clip's identity is stable,
+             * only its row index changes. Re-open the fresh list scrolled so the
+             * clip that was at the top stays at the top. */
             initialTopMostItemIndex={
               anchorClipIndexRef.current == null
                 ? 0
@@ -2796,9 +2993,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             style={virtuosoStyle}
             components={virtuosoComponents}
             computeItemKey={computeRowKey}
-            /* DEV TOOLS: capture the real scroll element so the viewport-fill
-             * video-budget ResizeObserver can measure it. Stable handler (above)
-             * so Virtuoso's scroll-attach effect doesn't loop. */
             scrollerRef={handleScrollerRef}
             rangeChanged={setVisibleRowRange}
             itemContent={(_index, row) => (
@@ -2826,9 +3020,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                    *  - the plan resolved as PROXY mode and the proxy is genuinely
                    *    expected: no proxy path yet AND the build has not FAILED.
                    *    (The build being actively running / queued — proxyInFlightRef
-                   *    or a live proxyProgress tick — also keeps it pending, but a
+                   *    or a live proxy-progress tick — also keeps it pending, but a
                    *    FAILED build, which drops its progress entry and is recorded
-                   *    in failedProxiesRef, no longer counts.)
+                   *    in failedProxySources state/ref, no longer counts.)
                    *
                    * A DIRECT-mode plan resolves playbackSrc immediately, so it is
                    * never pending here. Net effect: the spinner shows continuously
@@ -2837,21 +3031,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                    * of spinning forever. Flag-off this is unused (the tile ignores it). */
                   const sourceKey = clipSourceKey(clip);
                   const planForKey = sourceKey != null ? playbackPlans[sourceKey] : undefined;
-                  // FIX A — a probe (plan + proxy) is only ever scheduled for a tile
-                  // that is in activeGridClipIds (both probe effects gate on it). The
-                  // spinner, however, is gated on the IntersectionObserver play area, so
-                  // a tile could be spinner-eligible while NO probe is scheduled for it
-                  // -> permanent spinner. Require `scheduled` on BOTH pending sub-conditions
-                  // so a tile that is NOT slated for a probe reports pending=false (and
-                  // falls to the neutral merged poster) instead of spinning forever; an
-                  // ACTIVE tile whose proxy is genuinely building still reports pending.
-                  const scheduled = activeGridClipIds.has(clip.id);
+                  const scheduled = featherweightActive ? grantedClipIds.has(clip.id) : activeGridClipIds.has(clip.id);
+                  const proxyFailed = sourceKey != null && Boolean(failedProxySources[sourceKey]);
                   const proxyExpected =
                     scheduled &&
                     sourceKey != null &&
                     planForKey?.mode === "proxy" &&
                     !sourceProxyPaths[sourceKey] &&
-                    !failedProxiesRef.current.has(sourceKey);
+                    !proxyFailed;
                   const planPending =
                     scheduled &&
                     sourceKey != null &&
@@ -2868,21 +3055,20 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     mergeMode={mergeMode}
                     mergeDisabled={mergeDisabled}
                     mergePosition={mergePositions.get(clip.id) ?? null}
-                    paused={!gridPreview || Boolean(viewerClip)}
-                    playable={activeGridClipIds.has(clip.id)}
+                    paused={!gridPreview || Boolean(viewerClip) || proxyFailed}
+                    playable={activeGridClipIds.has(clip.id) && !proxyFailed}
                     selected={mergeMode ? mergePositions.has(clip.id) : selectedClipIds.has(clip.id)}
                     activationEpoch={activationEpoch}
                     clipHoverPreview={hoverPlayOnly}
                     /* DEV TOOLS: featherweight gate */
-                    featherweightEnabled={featherweightActive}
+                    featherweightEnabled={featherweightActive && !proxyFailed}
+                    previewRate={clipPreviewSpeed}
                     playbackPending={playbackPending}
-                    /* DEV TOOLS: CENTRAL, GEOMETRY-DRIVEN, HARD-CAPPED mount gate.
-                     * The panel's own scroll geometry is the SOLE authority for
-                     * which tiles may mount a live offset <video> (the per-tile
-                     * IntersectionObserver was retired from the mount path). The
-                     * set size never exceeds the decoder ceiling, and a fast fling
-                     * grants no new mounts. Flag-off mayMountVideoIds is empty. */
-                    mayMountVideo={mayMountVideoIds.has(clip.id)}
+                    /* CENTRAL, MEASURED, HARD-CAPPED mount gate.
+                     * The measured viewport playback window is the SOLE authority for
+                     * which tiles may mount a live offset <video>. The set size never
+                     * exceeds the decoder ceiling, and a fast fling grants no new mounts. */
+                    mayMountVideo={featherweightActive && grantedClipIds.has(clip.id) && !proxyFailed}
                     justMerged={justMergedId === clip.id}
                     onClick={(modifiers) => handleClipClick(clip, modifiers)}
                     onToggleSelect={() =>
@@ -2937,6 +3123,28 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             document.body,
           )}
 
+        {/* Selected-clip markers on the scrollbar: one tick per row that holds a
+            selection, positioned where that row sits in the full list. Clicking a
+            tick jumps that clip into view. The container is pointer-transparent so
+            it never steals a scrollbar-thumb grab — only the ticks are clickable. */}
+        {hasClips && selectionMarkers.length > 0 && (
+          <div className="clip-scroll-markers" role="group" aria-label="Selected clip markers">
+            {selectionMarkers.map((marker) => (
+              <button
+                key={marker.row}
+                type="button"
+                className="clip-scroll-marker"
+                style={{ top: `${marker.topPct}%` }}
+                title="Jump to selected clip"
+                aria-label="Jump to selected clip"
+                onClick={() =>
+                  virtuosoRef.current?.scrollToIndex({ index: marker.row, align: "center", behavior: "auto" })
+                }
+              />
+            ))}
+          </div>
+        )}
+
         {hasClips && selectedClipIds.size > 0 && !mergeMode && (
           <div className="clip-jump-pill" role="group" aria-label="Jump through selected clips">
             <button
@@ -2972,7 +3180,11 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           <div className="clip-empty-state">
             {isExtracting ? <Loader2 className="is-spinning" size={36} strokeWidth={1.8} /> : <Clapperboard size={36} strokeWidth={1.7} />}
             <h2>{isExtracting ? "Extracting clips" : "Clip extractor"}</h2>
-            <p>{progress?.message ?? error ?? (selectedVideos.length > 0 ? "Ready for RTX TransNetV2." : "No clips yet.")}</p>
+            <p>
+              <ClipRunProgressMessage
+                fallback={error ?? (selectedVideos.length > 0 ? "Ready for RTX TransNetV2." : "No clips yet.")}
+              />
+            </p>
           </div>
         )}
 
@@ -2981,7 +3193,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           failedPath={compatModal?.failedPath ?? null}
           rawError={compatModal?.rawError ?? null}
           isConverting={isConverting}
-          convertMessage={isConverting ? (progress?.message ?? convertMessage) : convertMessage}
           onConvert={() => void handleConvertCompat()}
           onCancel={dismissCompatModal}
         />
@@ -2992,10 +3203,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           session={exportSession}
           minimized={exportMinimized}
           onCancel={() => {
+            exportProgressActiveRef.current = false;
             clipCancellingRef.current = true;
             void invoke("cancel_clip");
           }}
-          onClose={() => setExportSession(null)}
+          onClose={() => {
+            exportProgressActiveRef.current = false;
+            setExportSession(null);
+          }}
           onMinimize={() => setExportMinimized(true)}
           onRestore={() => setExportMinimized(false)}
         />
@@ -3119,35 +3334,6 @@ function mapClipBatchProgress(progress: ClipProgress, context: ClipBatchProgress
   };
 }
 
-function formatClipProgressStage(stage?: string): string {
-  switch (stage) {
-    case "starting":
-      return "Starting";
-    case "dependencies":
-      return "Checking Dependencies";
-    case "probe":
-      return "Reading Source";
-    case "decode":
-      return "Decoding";
-    case "analyze":
-      return "Analyzing";
-    case "scenes":
-      return "Building Scenes";
-    case "complete":
-      return "Complete";
-    default:
-      return stage ? titleCaseStage(stage) : "Ready";
-  }
-}
-
-function titleCaseStage(stage: string): string {
-  return stage
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 // Short, stable per-episode tag for multi-episode runs. The full source
 // filename is REDUNDANT noise on a tile (it's identical for every clip of
 // the same episode); a compact tag is all the user needs to tell which
@@ -3226,19 +3412,38 @@ type ClipExportOption = {
   description?: string;
 };
 
-// Mirrors preset_extension() in src-tauri/src/clips.rs. Used for UI labels so
-// the displayed filename matches the file the backend writes.
-function clipPresetExtension(format: ClipExportFormat): string {
+// Containers whose contents are already legal in an mp4, so smart cut can copy
+// them straight back into one. Mirrors is_mp4_family() in clips.rs.
+const MP4_FAMILY_EXTENSIONS = ["mp4", "m4v", "mov"];
+
+function isMp4FamilySource(sourcePath: string): boolean {
+  const ext = sourcePath.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase() ?? "";
+  return MP4_FAMILY_EXTENSIONS.includes(ext);
+}
+
+// Mirrors preset_extension_for() in src-tauri/src/clips.rs. Used for UI labels
+// so the displayed filename matches the file the backend writes. Smart cut is
+// the one preset that varies by source: it keeps an mp4 source in mp4 and falls
+// back to mkv for everything else. The rule reads the source's NAME, never its
+// contents, precisely so the label can be worked out here without a probe.
+export function clipPresetExtension(
+  format: ClipExportFormat,
+  sourcePaths: string[] = [],
+): string {
   switch (format) {
     case "prores-lt":
     case "prores-hq":
     case "gpu-intra":
       return "mov";
     case "h264-cpu":
+    case "h264-10bit-cpu":
     case "hevc-cpu":
     case "h264-nvenc":
+    case "h264-10bit-nvenc":
     case "av1-nvenc":
       return "mp4";
+    case "smart-cut":
+      return sourcePaths.length > 0 && sourcePaths.every(isMp4FamilySource) ? "mp4" : "mkv";
     case "lossless-cut":
       return "mkv";
     default:
@@ -3246,7 +3451,7 @@ function clipPresetExtension(format: ClipExportFormat): string {
   }
 }
 
-function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
+export function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
   switch (format) {
     case "gpu-intra":
       return {
@@ -3265,6 +3470,17 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
         valueLabel: "CQ",
         help: "Lower values keep more detail and create larger files.",
         min: 14,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
+    case "h264-10bit-nvenc":
+      return {
+        label: "10-bit quality",
+        valueLabel: "QP",
+        help: "0 keeps maximum detail with no bitrate cap. Higher values create smaller files.",
+        min: 0,
         max: 28,
         step: 1,
         defaultValue: 18,
@@ -3292,6 +3508,17 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
         defaultValue: 18,
         suffix: "",
       };
+    case "h264-10bit-cpu":
+      return {
+        label: "10-bit quality",
+        valueLabel: "CRF",
+        help: "0 keeps maximum detail with no bitrate cap. Higher values create smaller files.",
+        min: 0,
+        max: 28,
+        step: 1,
+        defaultValue: 18,
+        suffix: "",
+      };
     case "hevc-cpu":
       return {
         label: "Constant rate factor",
@@ -3306,12 +3533,38 @@ function clipQualitySpec(format: ClipExportFormat): VideoControlSpec | null {
     case "prores-lt":
     case "prores-hq":
     case "lossless-cut":
+    case "smart-cut":
     default:
       return null;
   }
 }
 
-function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null): ClipExportOption[] {
+export function formatSupportsRateControl(format: ClipExportFormat): boolean {
+  switch (format) {
+    case "prores-lt":
+    case "prores-hq":
+    case "lossless-cut":
+    case "smart-cut":
+      return false;
+    default:
+      return true;
+  }
+}
+
+export function clipBitrateDefault(format: ClipExportFormat): number {
+  switch (format) {
+    case "gpu-intra":
+      return 60;
+    case "hevc-cpu":
+      return 12;
+    case "av1-nvenc":
+      return 8;
+    default:
+      return 20;
+  }
+}
+
+export function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null): ClipExportOption[] {
   const cpuModeReason = "GPU export presets are hidden in CPU clip mode. Switch clip extraction to GPU mode to use NVENC presets.";
   const gpuIntraReady = Boolean(gpuStatus?.hasHevcNvenc);
   const statusMessage = gpuStatus?.message ?? "Checking GPU export support...";
@@ -3325,6 +3578,12 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
       label: "Lossless cut (no re-encode)",
       disabled: false,
       description: "Bit-exact stream copy of the original, fastest. Snaps to the nearest keyframe (not frame-accurate). Saved as MKV.",
+    },
+    {
+      value: "smart-cut",
+      label: "Smart cut (frame-accurate, no quality loss)",
+      disabled: false,
+      description: "Copies the original like Lossless cut, but re-encodes only the first fraction of a second so the clip starts on the exact frame. H.264/HEVC sources only. Keeps the source's format: MP4 in, MP4 out; everything else saves as MKV.",
     },
     {
       value: "prores-lt",
@@ -3345,6 +3604,12 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
       description: "Widely compatible delivery codec (libx264). Lower CRF = higher quality.",
     },
     {
+      value: "h264-10bit-cpu",
+      label: "H.264 10-bit CPU MP4",
+      disabled: false,
+      description: "High 10 H.264 via CPU. Quality reaches 0 with no bitrate cap.",
+    },
+    {
       value: "hevc-cpu",
       label: "HEVC CPU MP4",
       disabled: false,
@@ -3363,6 +3628,13 @@ function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus | null
       disabled: !gpuMode || !h264NvencReady,
       reason: !gpuMode ? cpuModeReason : h264NvencReady ? undefined : "Bundled FFmpeg does not expose h264_nvenc on this machine.",
       description: "Fast GPU H.264 delivery encode. Lower CQ = higher quality.",
+    },
+    {
+      value: "h264-10bit-nvenc",
+      label: "H.264 10-bit NVENC MP4",
+      disabled: !gpuMode || !h264NvencReady,
+      reason: !gpuMode ? cpuModeReason : h264NvencReady ? undefined : "Bundled FFmpeg does not expose h264_nvenc on this machine.",
+      description: "High 10 H.264 on supported RTX GPUs; automatically retries on CPU if needed.",
     },
     {
       value: "av1-nvenc",

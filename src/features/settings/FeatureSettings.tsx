@@ -3,6 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { Film, Music, FileAudio } from "lucide-react";
 import type { AppConfig } from "../../types/app";
 import { Dropdown } from "../../components/Dropdown";
+import { VideoOutputControl } from "../video/VideoOutputControl";
+
+const GRID_PREVIEW_SPEED_SPEC = {
+  label: "Grid preview speed",
+  valueLabel: "Speed",
+  help: "How fast scene tiles play on the clip grid. Does not affect exports.",
+  min: 0.25,
+  max: 4,
+  step: 0.25,
+  defaultValue: 1,
+  suffix: "x",
+};
 
 interface FeatureSettingsProps {
   backendConfig: AppConfig | null;
@@ -40,10 +52,27 @@ export function FeatureSettings({
   const [featherweightPreviews, setFeatherweightPreviews] = React.useState(
     backendConfig?.featherweight_previews ?? true,
   );
+  const [clipPreviewSpeed, setClipPreviewSpeed] = React.useState(
+    backendConfig?.clip_preview_speed ?? 1,
+  );
 
   React.useEffect(() => {
     setFeatherweightPreviews(backendConfig?.featherweight_previews ?? true);
   }, [backendConfig?.featherweight_previews]);
+
+  React.useEffect(() => {
+    setClipPreviewSpeed(backendConfig?.clip_preview_speed ?? 1);
+  }, [backendConfig?.clip_preview_speed]);
+
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      setClipPreviewSpeed(
+        (event as CustomEvent<{ speed: number }>).detail.speed,
+      );
+    };
+    window.addEventListener("clip-preview-speed-changed", handler);
+    return () => window.removeEventListener("clip-preview-speed-changed", handler);
+  }, []);
 
   async function saveTsukyioKey() {
     await persistConfigField("tsukyio_api_key", tsukyioKey.trim());
@@ -259,6 +288,34 @@ export function FeatureSettings({
               );
             }}
             align="right"
+          />
+        </div>
+
+        <div
+          className="setting-row"
+          title={
+            featherweightPreviews
+              ? undefined
+              : "Preview speed needs the featherweight preview engine. Turn it on in Settings."
+          }
+        >
+          <div className="setting-info">
+            <span className="setting-label">Grid preview speed</span>
+            <span className="setting-desc">
+              Changes how fast scene tiles play. The scene viewer and exported files stay at normal speed.
+            </span>
+          </div>
+          <VideoOutputControl
+            spec={GRID_PREVIEW_SPEED_SPEC}
+            value={clipPreviewSpeed}
+            disabled={!featherweightPreviews}
+            onChange={(value) => {
+              setClipPreviewSpeed(value);
+              void persistConfigField("clip_preview_speed", String(value));
+              window.dispatchEvent(
+                new CustomEvent("clip-preview-speed-changed", { detail: { speed: value } }),
+              );
+            }}
           />
         </div>
       </div>

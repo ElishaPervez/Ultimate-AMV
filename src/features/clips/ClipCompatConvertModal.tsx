@@ -2,13 +2,13 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, Loader2, Wand2, X } from "lucide-react";
 import { fileName } from "../../lib/paths";
+import { useClipRunProgressSnapshot } from "./clipRunProgressStore";
 
 export function ClipCompatConvertModal({
   open,
   failedPath,
   rawError,
   isConverting,
-  convertMessage,
   onConvert,
   onCancel,
 }: {
@@ -16,11 +16,12 @@ export function ClipCompatConvertModal({
   failedPath: string | null;
   rawError: string | null;
   isConverting: boolean;
-  convertMessage: string | null;
   onConvert: () => void;
   onCancel: () => void;
+  [key: string]: unknown;
 }) {
   const [showDetails, setShowDetails] = React.useState(false);
+  const { compatibility } = useClipRunProgressSnapshot();
 
   React.useEffect(() => {
     if (!open) return;
@@ -69,7 +70,7 @@ export function ClipCompatConvertModal({
         {isConverting ? (
           <div className="clip-compat-status">
             <Loader2 className="is-spinning" size={18} strokeWidth={2.1} />
-            <span>{convertMessage ?? "Converting to compatible format..."}</span>
+            <span>{compatibility?.message ?? "Converting to compatible format..."}</span>
           </div>
         ) : (
           rawError && (

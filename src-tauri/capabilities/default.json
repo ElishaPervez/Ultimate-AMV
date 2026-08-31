@@ -16,9 +16,11 @@
     "core:webview:allow-set-webview-position",
     "core:webview:allow-set-webview-size",
     "core:webview:allow-set-webview-focus",
+    "core:webview:allow-set-webview-zoom",
     "core:webview:allow-webview-close",
     "dialog:default",
     "opener:default",
+    "opener:allow-open-path",
     "updater:default"
   ]
 }

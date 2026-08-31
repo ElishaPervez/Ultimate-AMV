@@ -37,6 +37,7 @@ export type AudioSetupProgress = {
   total: number;
   state: "running" | "done" | "error";
   message: string;
+  phase?: "install" | "verify";
 };
 
 export type AudioSetupPlan = {
@@ -50,6 +51,14 @@ export type AudioSetupPlan = {
   installs: string[][];
   success_mode: "cpu" | "gpu" | null;
   gpu_name?: string | null;
+};
+
+export type AudioSetupResult = {
+  type: "setup-done";
+  ok: true;
+  mode: "cpu" | "gpu";
+  plan: Omit<AudioSetupPlan, "type">;
+  status: AudioStatus;
 };
 
 export type AudioOutputFormat = "wav" | "mp3";

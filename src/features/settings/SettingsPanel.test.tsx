@@ -6,7 +6,7 @@
 import React from 'react'
 import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
+import { dispatchTauriEvent, mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
 import { SettingsPanel } from './SettingsPanel'
 
 // Minimal valid config JSON (parseBridgePayload uses JSON.parse on last line)
@@ -34,6 +34,7 @@ function configJson(overrides: Record<string, unknown> = {}): string {
     audio_output_format: 'wav',
     clip_hover_preview: false,
     scene_preview_height: 240,
+    clip_preview_speed: 1,
     tsukyio_api_key: '',
     ...overrides,
   }
@@ -59,6 +60,23 @@ function statusJson(overrides: Record<string, unknown> = {}): string {
     ...overrides,
   }
   return JSON.stringify(status)
+}
+
+function setupResultJson(mode: 'cpu' | 'gpu', statusOverrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: 'setup-done',
+    ok: true,
+    mode,
+    plan: {
+      mode,
+      rows: [],
+      issues: [],
+      installs: [],
+      success_mode: mode,
+      gpu_name: mode === 'gpu' ? 'Test GPU' : null,
+    },
+    status: JSON.parse(statusJson(statusOverrides)),
+  })
 }
 
 function setupDefaultMocks() {
@@ -205,5 +223,88 @@ describe('SettingsPanel', () => {
     await waitFor(() => screen.getByRole('button', { name: /Switch to GPU/i }))
     await user.click(screen.getByRole('button', { name: /Switch to GPU/i }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('uses the verified setup result without launching status or mode-setting processes again', async () => {
+    const user = userEvent.setup()
+    mockInvoke('get_config', () => configJson({ setup_type: 'cpu', force_cpu: true, clip_extraction_mode: 'cpu' }))
+    mockInvoke('audio_status', () => statusJson({
+      hardware: { device: 'Test GPU', device_short: 'CPU', gpu_type: 'nvidia', fp16_capable: false, provider: 'CPU fallback' },
+      dependencies: {
+        audio_separator: true, pydub: true, typing_extensions: true,
+        torch: true, torch_version: '2.11.0+cpu',
+        onnxruntime: true, onnxruntime_version: '1.17.0',
+        runtime_ready: true, ready: true,
+      },
+    }))
+    mockInvoke('audio_setup', () => setupResultJson('gpu', {
+      hardware: { device: 'Test GPU', device_short: 'CUDA', gpu_type: 'nvidia', fp16_capable: true, provider: 'CUDAExecutionProvider' },
+      dependencies: {
+        audio_separator: true, pydub: true, typing_extensions: true,
+        torch: true, torch_version: '2.11.0+cu128',
+        onnxruntime: true, onnxruntime_version: '1.17.0',
+        runtime_ready: true, ready: true,
+      },
+      model_name: 'BS-Roformer (Best Quality)',
+    }))
+
+    render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
+    await user.click(await screen.findByRole('button', { name: /Switch to GPU/i }))
+    await user.click(screen.getByRole('dialog').querySelector('.episode-label-confirm') as HTMLButtonElement)
+
+    await waitFor(() => expect(screen.getByText('GPU engine ready.')).toBeInTheDocument())
+    expect(screen.getByText('GPU READY')).toBeInTheDocument()
+    expect(mockInvokeFn.mock.calls.filter((call) => call[0] === 'audio_status')).toHaveLength(1)
+    expect(mockInvokeFn.mock.calls.filter((call) => call[0] === 'get_config')).toHaveLength(1)
+    expect(mockInvokeFn.mock.calls.filter((call) => call[0] === 'set_config')).toHaveLength(0)
+    expect(mockInvokeFn.mock.calls.filter((call) => call[0] === 'audio_setup')).toHaveLength(1)
+  })
+
+  it('shows verification instead of claiming installation is still running', async () => {
+    const user = userEvent.setup()
+    let finishSetup!: (value: string) => void
+    mockInvoke('get_config', () => configJson({ setup_type: 'cpu' }))
+    mockInvoke('audio_status', () => statusJson({
+      hardware: { device: 'Test GPU', device_short: 'CPU', gpu_type: 'nvidia', fp16_capable: false, provider: 'CPU fallback' },
+      dependencies: {
+        audio_separator: true, pydub: true, typing_extensions: true,
+        torch: true, torch_version: '2.11.0+cpu',
+        onnxruntime: true, onnxruntime_version: '1.17.0',
+        runtime_ready: true, ready: true,
+      },
+    }))
+    mockInvoke('audio_setup', () => new Promise<string>((resolve) => {
+      finishSetup = resolve
+    }))
+
+    render(<SettingsPanel themeColors={{ primary: '#48d7ff', secondary: '#63e6a2' }} />)
+    await user.click(await screen.findByRole('button', { name: /Switch to GPU/i }))
+    await user.click(screen.getByRole('dialog').querySelector('.episode-label-confirm') as HTMLButtonElement)
+
+    act(() => {
+      dispatchTauriEvent('audio-setup-progress', {
+        type: 'setup-progress',
+        step: 2,
+        total: 2,
+        state: 'running',
+        message: 'Verifying GPU/CPU engine and cleaning package cache...',
+        phase: 'verify',
+      })
+    })
+
+    expect(await screen.findByText('Verifying GPU/CPU engine...')).toBeInTheDocument()
+    expect(screen.queryByText(/Installing GPU engine/)).not.toBeInTheDocument()
+
+    await act(async () => {
+      finishSetup(setupResultJson('gpu', {
+        hardware: { device: 'Test GPU', device_short: 'CUDA', gpu_type: 'nvidia', fp16_capable: true, provider: 'CUDAExecutionProvider' },
+        dependencies: {
+          audio_separator: true, pydub: true, typing_extensions: true,
+          torch: true, torch_version: '2.11.0+cu128',
+          onnxruntime: true, onnxruntime_version: '1.17.0',
+          runtime_ready: true, ready: true,
+        },
+      }))
+    })
   })
 })

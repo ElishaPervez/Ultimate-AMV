@@ -16,10 +16,30 @@ A Windows desktop app for building anime music video edits. It handles the full 
 
 ## Features
 
+**Get footage**
+
 - **Built-in browser** with automatic episode and series detection on anime streaming sites
-- **Audio separation** : split any track into vocals and instrumentals using ML models, with CPU and NVIDIA GPU (CUDA) support
-- **Clip extraction** : frame-accurate trimming and export via ffmpeg, with GPU-accelerated decoding where available
 - **Download manager** : grab footage directly from streaming sites via a bundled yt-dlp integration
+- **Tsukyio Vault** : browse, preview, and pull editing assets straight into your project
+
+**Find your cuts**
+
+- **Scene Splitter** : automatic scene detection with frame-accurate trimming and export via ffmpeg, GPU-accelerated decoding where available, and Quality / VBR / CBR rate control on every encode preset
+- **Smart cut** : export clips without re-encoding, so cuts are near-instant and bit-for-bit identical to the source while still landing on the exact frame you chose ; MP4 sources stay MP4 for drag-and-drop import into Premiere, After Effects, and DaVinci
+- **Dead Frame Remover** : detects and drops the duplicate frames anime is full of, with a sensitivity dial, a filmstrip preview of what's about to be cut, and optional re-timing of the survivors to a frame rate you pick
+
+**Clean up the footage**
+
+- **Frame Interpolation** : generate in-between frames to raise a clip's frame rate (2x/3x/4x or a target fps), or slow-motion mode up to 64x, with batch queueing and one-click hand-off from the clip grid
+- **Background removal** : cut the subject out of footage using ML matting
+
+**Prep for your editor**
+
+- **Audio separation** : split any track into vocals and instrumentals using ML models, with CPU and NVIDIA GPU (CUDA) support
+- **Video and audio conversion** : convert exports into the formats your editor wants
+
+**Everywhere**
+
 - **Self-contained setup** : a first-run wizard installs all ML dependencies (PyTorch, audio-separator, ONNX Runtime) into a bundled Python environment, no manual setup required
 - **Custom themes** : preset colour schemes plus full hex colour customisation
 
@@ -103,4 +123,4 @@ git push origin v1.0.0
 
 ---
 
-🤖 **App development was powered by GPT 5.5 via CodeX and Opus 4.8 via Claude Code (and a bit of Fable, while it lasted)** ✨
+🤖 **App development was powered by AI** ✨

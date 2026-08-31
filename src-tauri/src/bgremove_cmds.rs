@@ -9,7 +9,7 @@ use tauri::{Emitter, Manager};
 
 use crate::{
     app_root, apply_python_env, bgremove_cli_path, clear_child_pid, cmd, kill_child_pid,
-    log_error, log_info, python_exe, run_bgremove_cli, store_child_pid, truncate_log_text,
+    log_error, log_info, python_exe_checked, run_bgremove_cli, store_child_pid, truncate_log_text,
     BGREMOVE_CHILD_PID,
 };
 
@@ -262,7 +262,7 @@ pub(crate) fn run_streaming_bgremove_cli(
         json!({ "args": &args, "progressEvent": progress_event }),
     );
     
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(bgremove_cli_path(&root))

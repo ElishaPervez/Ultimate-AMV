@@ -867,22 +867,6 @@
   opacity: 0;
 }
 
-@media (max-width: 900px) {
-  .theme-setting-row {
-    flex-direction: column;
-  }
-
-  .theme-customizer {
-    width: 100%;
-    flex-basis: auto;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .theme-gradient-preview {
-    grid-column: 1 / -1;
-  }
-}
-
 /* ============================================================
    31. SETUP WIZARD
    ============================================================ */
@@ -1211,12 +1195,6 @@
   margin: 0;
 }
 
-.setup-error-block {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 .setup-error-msg {
   display: flex;
   align-items: flex-start;
@@ -1228,6 +1206,24 @@
   color: var(--rose);
   font-size: 13px;
   line-height: 1.5;
+  /* A long Python failure used to run past the card and get clipped, so the
+     user could not read the end of it. Cap the height, scroll the rest. */
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.setup-error-msg > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.setup-error-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
 }
 
 .setup-card-complete {

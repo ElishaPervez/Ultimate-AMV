@@ -134,7 +134,12 @@ export type ClipExportFormat =
   | "prores-lt"
   | "prores-hq"
   | "h264-nvenc"
+  | "h264-10bit-nvenc"
   | "av1-nvenc"
   | "h264-cpu"
+  | "h264-10bit-cpu"
   | "hevc-cpu"
-  | "lossless-cut";
+  | "lossless-cut"
+  | "smart-cut";
+
+export type ClipExportRateMode = "quality" | "vbr" | "cbr";

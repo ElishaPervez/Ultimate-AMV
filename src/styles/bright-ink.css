@@ -121,7 +121,7 @@ html.bright-ink .workspace .conversion-segment button:not(.is-active) {
    media player stages. Re-assert the original light foreground for
    everything the sweeps above may have flipped. */
 html.bright-ink .workspace
-  :is(.anikai-browser, .stream-capture-row, .scene-viewer-stage, .tsukyio-player-stage)
+  :is(.anikai-browser, .stream-capture-row, .scene-viewer-stage, .tsukyio-player-stage, .deadframe-video-stage)
   :is(h1, h2, h3, h4, h5, h6, p, label, li, small, span, dt, dd) {
   color: #e7edf2;
 }

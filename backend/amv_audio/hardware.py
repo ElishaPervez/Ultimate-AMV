@@ -5,6 +5,7 @@ from .config import load_config
 
 _CACHE = {
     "checked": False,
+    "force_cpu": None,
     "torch_available": False,
     "torch_version": None,
     "ort_available": False,
@@ -13,12 +14,17 @@ _CACHE = {
 }
 
 
-def _ensure_init():
-    if _CACHE["checked"]:
+def _ensure_init(force_cpu=None):
+    if _CACHE["checked"] and (
+        force_cpu is None or _CACHE["force_cpu"] == bool(force_cpu)
+    ):
         return
 
-    config = load_config()
-    force_cpu = config.get("force_cpu", False)
+    if force_cpu is None:
+        config = load_config()
+        force_cpu = config.get("force_cpu", False)
+    force_cpu = bool(force_cpu)
+    _CACHE["force_cpu"] = force_cpu
 
     try:
         import torch
@@ -35,7 +41,10 @@ def _ensure_init():
         _ = ort.get_available_providers()
         _CACHE["ort_available"] = True
         try:
-            _CACHE["ort_version"] = version("onnxruntime")
+            # The sound runtime loaded, so it is there. Its record can still be
+            # unreadable, in which case the panel says "installed" instead of
+            # showing a blank where a version belongs.
+            _CACHE["ort_version"] = version("onnxruntime") or "installed"
         except Exception:
             _CACHE["ort_version"] = "installed"
     except Exception:
@@ -95,13 +104,13 @@ def _ensure_init():
     _CACHE["checked"] = True
 
 
-def get_hw_info():
-    _ensure_init()
+def get_hw_info(force_cpu=None):
+    _ensure_init() if force_cpu is None else _ensure_init(force_cpu)
     return _CACHE["hw_info"]
 
 
-def get_dependency_info():
-    _ensure_init()
+def get_dependency_info(force_cpu=None):
+    _ensure_init() if force_cpu is None else _ensure_init(force_cpu)
     audio_separator = importlib.util.find_spec("audio_separator") is not None
     pydub = importlib.util.find_spec("pydub") is not None
     typing_extensions = importlib.util.find_spec("typing_extensions") is not None
@@ -120,8 +129,8 @@ def get_dependency_info():
     }
 
 
-def get_torch_status():
-    _ensure_init()
+def get_torch_status(force_cpu=None):
+    _ensure_init() if force_cpu is None else _ensure_init(force_cpu)
     return _CACHE["torch_available"], _CACHE["torch_version"]
 
 
@@ -134,7 +143,7 @@ def verify_cuda_torch():
         return False
 
 
-def refresh_hardware():
+def refresh_hardware(force_cpu=None):
     _CACHE["checked"] = False
-    _ensure_init()
+    _ensure_init() if force_cpu is None else _ensure_init(force_cpu)
     return _CACHE["hw_info"]

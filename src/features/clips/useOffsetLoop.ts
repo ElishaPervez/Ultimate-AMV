@@ -38,6 +38,8 @@ export interface UseOffsetLoopOptions {
   active: boolean;
   /** Force the timeupdate fallback even when rVFC is available (dev tuning). */
   forceFallback?: boolean;
+  /** Playback multiplier for this grid preview. */
+  rate?: number;
   /** Optional per-frame progress sink, 0..1 within [startSec,endSec]. Fires from
    *  the existing rVFC / timeupdate observations — NO extra timer. Snaps to 0 at
    *  each loop turn. Keep it side-effect-only (write to a DOM node / ref), never
@@ -47,10 +49,19 @@ export interface UseOffsetLoopOptions {
 
 export function useOffsetLoop(
   videoRef: React.RefObject<HTMLVideoElement | null>,
-  { startSec, endSec, active, forceFallback = false, onProgress }: UseOffsetLoopOptions,
+  { startSec, endSec, active, forceFallback = false, rate = 1, onProgress }: UseOffsetLoopOptions,
 ): void {
   // rVFC unless unsupported by the runtime or the caller forces the fallback.
   const usingRvfc = RVFC_SUPPORTED && !forceFallback;
+  const rateRef = React.useRef(rate);
+  rateRef.current = rate;
+
+  // A speed change must affect a playing tile immediately without tearing down
+  // the loop or seeking it back to the start.
+  React.useEffect(() => {
+    const video = videoRef.current;
+    if (video) video.playbackRate = rate;
+  }, [videoRef, rate]);
 
   React.useEffect(() => {
     const video = videoRef.current;
@@ -101,7 +112,8 @@ export function useOffsetLoop(
       }
       // setTimeout safety net: timeupdate granularity is coarse (~250ms), so we
       // arm a snap-back at the remaining wall time to tighten the turn-around.
-      const remainingMs = (endSec - video.currentTime) * 1000;
+      const remainingMs =
+        ((endSec - video.currentTime) * 1000) / Math.max(rateRef.current, 0.01);
       if (remainingMs > 0 && remainingMs < 1000) {
         window.clearTimeout(safetyTimer);
         safetyTimer = window.setTimeout(() => {
@@ -114,6 +126,7 @@ export function useOffsetLoop(
 
     // On the active edge / metadata-ready, jump to the window start and play.
     const onLoadedMeta = () => {
+      video.playbackRate = rateRef.current;
       snapToStart();
       void video.play().catch(() => {
         /* autoplay can reject; the caller mutes so this normally resolves. */

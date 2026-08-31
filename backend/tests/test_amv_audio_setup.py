@@ -10,6 +10,7 @@ Covers:
 """
 import sys
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import json
@@ -49,6 +50,15 @@ def test_nelux_importable_returns_false_when_probe_fails(mocker):
         return_value=MagicMock(returncode=1, stdout="", stderr="ImportError: PyTorch must be imported before Nelux."),
     )
     assert m._nelux_importable() is False
+
+
+def test_nelux_pytorch_mismatch_is_reported_as_a_version_problem():
+    m = _get_setup()
+    status, issue = m._nelux_failure_status(
+        "This Nelux wheel was built for PyTorch 2.13.x, but the imported PyTorch is 2.11.0+cu128."
+    )
+    assert status == "PyTorch version mismatch"
+    assert issue == "Install Nelux compatible with PyTorch 2.11.0"
 
 
 def test_nelux_importable_returns_false_on_timeout(mocker):
@@ -143,7 +153,8 @@ def test_installed_torch_mode_missing_returns_missing(mocker):
 def _patch_setup_checks(mocker, *, nvidia=True, installed_mode="gpu", ort_gpu=True,
                          ort_cpu=False, audio_sep=True, typing_ext=True,
                          pydub=True, missing_audio_rt=None,
-                         nelux_installed=True, nelux_importable=True):
+                         nelux_installed=True, nelux_importable=True,
+                         numeric_runtime=True):
     missing_audio_rt = missing_audio_rt or []
     mocker.patch("amv_audio.setup.check_nvidia_gpu", return_value="RTX 4090" if nvidia else None)
     mocker.patch("amv_audio.setup._installed_torch_mode", return_value=(installed_mode, "2.3.0+cu128", installed_mode == "gpu"))
@@ -157,6 +168,7 @@ def _patch_setup_checks(mocker, *, nvidia=True, installed_mode="gpu", ort_gpu=Tr
     }.get(pkg, False))
     mocker.patch("amv_audio.setup._missing_audio_runtime_modules", return_value=missing_audio_rt)
     mocker.patch("amv_audio.setup._nelux_importable", return_value=nelux_importable)
+    mocker.patch("amv_audio.setup._numeric_runtime_ready", return_value=numeric_runtime)
 
 
 def test_collect_gpu_plan_has_required_keys(mocker):
@@ -192,6 +204,46 @@ def test_collect_gpu_plan_reports_wrong_torch_mode(mocker):
     assert any("PyTorch" in issue or "CUDA" in issue for issue in plan["issues"])
 
 
+def test_collect_gpu_plan_installs_only_the_runtime_when_the_stack_is_present(mocker):
+    """Coming back from CPU mode, the GPU sound runtime is the only thing
+    missing. Reinstalling the whole audio stack to recover it costs ~5.7s of
+    resolving 70 packages and hands out blanket upgrade permission."""
+    m = _get_setup()
+    _patch_setup_checks(mocker, ort_gpu=False)
+
+    plan = m.collect_setup_plan("gpu")
+    flat = [" ".join(command) for command in plan["installs"]]
+
+    assert any("onnxruntime-gpu" in step and "uninstall" not in step for step in flat)
+    assert not any("audio-separator" in step for step in flat)
+
+
+def test_collect_gpu_plan_still_installs_the_stack_when_the_stack_is_missing(mocker):
+    m = _get_setup()
+    _patch_setup_checks(mocker, ort_gpu=False, audio_sep=False)
+
+    flat = [" ".join(command) for command in m.collect_setup_plan("gpu")["installs"]]
+
+    # audio-separator's GPU extra brings the runtime, so no separate step.
+    assert any("audio-separator[gpu]" in step for step in flat)
+    assert not any(
+        "onnxruntime-gpu" in step and "audio-separator" not in step and "uninstall" not in step
+        for step in flat
+    )
+
+
+def test_collect_gpu_plan_repairs_incompatible_numeric_runtime(mocker):
+    m = _get_setup()
+    _patch_setup_checks(mocker, numeric_runtime=False)
+
+    plan = m.collect_setup_plan("gpu")
+
+    assert any("NumPy/Numba" in issue for issue in plan["issues"])
+    assert "--force-reinstall" in plan["installs"][-1]
+    assert "numpy==2.4.4" in plan["installs"][-1]
+    assert "numba==0.65.1" in plan["installs"][-1]
+
+
 def test_collect_cpu_plan_has_required_keys(mocker):
     m = _get_setup()
     _patch_setup_checks(mocker, installed_mode="cpu", ort_cpu=True, ort_gpu=False)
@@ -215,6 +267,22 @@ def test_collect_cpu_plan_reports_gpu_runtime_present(mocker):
     _patch_setup_checks(mocker, installed_mode="cpu", ort_cpu=True, ort_gpu=True)
     plan = m.collect_setup_plan("cpu")
     assert any("GPU" in issue or "onnxruntime" in issue.lower() for issue in plan["issues"])
+
+
+def test_collect_cpu_plan_repairs_incompatible_numeric_runtime(mocker):
+    m = _get_setup()
+    _patch_setup_checks(
+        mocker,
+        installed_mode="cpu",
+        ort_cpu=True,
+        ort_gpu=False,
+        numeric_runtime=False,
+    )
+
+    plan = m.collect_setup_plan("cpu")
+
+    assert any("NumPy/Numba" in issue for issue in plan["issues"])
+    assert "--force-reinstall" in plan["installs"][-1]
 
 
 def test_collect_plan_raises_for_invalid_mode():
@@ -265,31 +333,257 @@ def test_summarize_command_error_empty_lines_uses_exit_code():
 
 
 # ---------------------------------------------------------------------------
+# install_setup — the run must check its own work, not only plan it
+# ---------------------------------------------------------------------------
+
+
+def _patch_install_setup(mocker, *, numeric_states, installs=None):
+    """Wire install_setup up to fake commands and a scripted health check.
+
+    `numeric_states` is consumed one entry per check, so a test can say
+    "healthy before the run, broken after it, healthy once repaired".
+    """
+    m = _get_setup()
+    ran = []
+
+    mocker.patch("amv_audio.setup._fix_pth_file")
+    mocker.patch("amv_audio.setup._ensure_installer_for")
+    mocker.patch("amv_audio.setup._ensure_pip")
+    mocker.patch("amv_audio.setup._prune_stale_numeric_metadata")
+    mocker.patch("amv_audio.setup._prune_unused_package_dirs")
+    mocker.patch("amv_audio.setup.installer.prune_cache")
+    mocker.patch("amv_audio.setup.apply_success_mode")
+    mocker.patch(
+        "amv_audio.setup.build_status",
+        return_value={"type": "status", "hardware": {}, "dependencies": {}, "model_name": "test"},
+    )
+    mocker.patch(
+        "amv_audio.setup.collect_setup_plan",
+        return_value={"mode": "cpu", "rows": [], "issues": [], "installs": installs or [["fake-install"]],
+                      "success_mode": None, "gpu_name": None},
+    )
+    mocker.patch(
+        "amv_audio.setup._numeric_runtime_ready", side_effect=list(numeric_states)
+    )
+
+    def fake_stream(cmd, step, total, progress_callback):
+        ran.append(cmd)
+        return 0, []
+
+    mocker.patch("amv_audio.setup._run_command_streaming", side_effect=fake_stream)
+    return m, ran
+
+
+def test_a_step_that_breaks_numpy_is_repaired_before_the_switch_reports_success(mocker):
+    """Regression: the real GPU -> CPU switch shipped a broken audio engine.
+
+    The step list is worked out before anything is installed, so a step that
+    moves NumPy mid-run can never be repaired by that list. The run has to
+    check afterwards.
+    """
+    # Healthy at plan time is irrelevant here: the first call happens after the
+    # installs, and finds the damage. The second call confirms the repair.
+    m, ran = _patch_install_setup(mocker, numeric_states=[False, True])
+
+    result = m.install_setup("cpu", lambda *args: None)
+
+    assert result["ok"] is True
+    repair_steps = [cmd for cmd in ran if any("numpy==" in str(part) for part in cmd)]
+    assert repair_steps, "the run must restore the tested NumPy/Numba pair itself"
+    assert any("numba==0.65.1" in str(part) for part in repair_steps[0])
+
+
+def test_an_untouched_numeric_runtime_costs_no_extra_install(mocker):
+    m, ran = _patch_install_setup(mocker, numeric_states=[True])
+
+    m.install_setup("cpu", lambda *args: None)
+
+    assert ran == [["fake-install"]]
+
+
+def test_a_switch_whose_repair_does_not_take_fails_loudly(mocker):
+    """Better a visible error than a saved mode with a dead audio engine."""
+    m, _ran = _patch_install_setup(mocker, numeric_states=[False, False])
+
+    with pytest.raises(RuntimeError, match="cannot load"):
+        m.install_setup("cpu", lambda *args: None)
+
+
+def test_the_mode_is_not_saved_when_the_repair_fails(mocker):
+    m, _ran = _patch_install_setup(mocker, numeric_states=[False, False])
+    applied = mocker.patch("amv_audio.setup.apply_success_mode")
+
+    with pytest.raises(RuntimeError):
+        m.install_setup("cpu", lambda *args: None)
+
+    applied.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # apply_success_mode — config mutation
 # ---------------------------------------------------------------------------
 
 
 def test_apply_success_mode_gpu_sets_config(mocker):
     m = _get_setup()
-    mocker.patch("amv_audio.setup.refresh_hardware")
     saved = {}
-    mocker.patch("amv_audio.setup.load_config", return_value={"setup_type": "cpu", "force_cpu": False})
+    mocker.patch(
+        "amv_audio.setup.load_config",
+        return_value={
+            "setup_type": "cpu",
+            "force_cpu": True,
+            "clip_extraction_mode": "cpu",
+            "theme": "violet",
+        },
+    )
     mocker.patch("amv_audio.setup.save_config", side_effect=lambda c: saved.update(c))
 
     m.apply_success_mode("gpu")
 
     assert saved["setup_type"] == "gpu"
     assert saved["force_cpu"] is False
+    assert saved["clip_extraction_mode"] == "gpu"
+    assert saved["theme"] == "violet"
 
 
 def test_apply_success_mode_cpu_sets_force_cpu_true(mocker):
     m = _get_setup()
-    mocker.patch("amv_audio.setup.refresh_hardware")
     saved = {}
-    mocker.patch("amv_audio.setup.load_config", return_value={"setup_type": "gpu", "force_cpu": False})
+    mocker.patch(
+        "amv_audio.setup.load_config",
+        return_value={
+            "setup_type": "gpu",
+            "force_cpu": False,
+            "clip_extraction_mode": "gpu",
+        },
+    )
     mocker.patch("amv_audio.setup.save_config", side_effect=lambda c: saved.update(c))
 
     m.apply_success_mode("cpu")
 
     assert saved["setup_type"] == "cpu"
     assert saved["force_cpu"] is True
+    assert saved["clip_extraction_mode"] == "cpu"
+
+
+# ---------------------------------------------------------------------------
+# Final verification — all slow independent work overlaps before config save
+# ---------------------------------------------------------------------------
+
+
+def _verified_plan(mode="gpu"):
+    return {
+        "mode": mode,
+        "rows": [],
+        "issues": [],
+        "installs": [],
+        "success_mode": mode,
+        "gpu_name": "Test GPU" if mode == "gpu" else None,
+    }
+
+
+def test_finish_setup_overlaps_verification_status_and_cache_cleanup(mocker):
+    m = _get_setup()
+    release = threading.Event()
+    started = {name: threading.Event() for name in ("plan", "status", "cache")}
+    status = {"type": "status", "hardware": {"device": "Test GPU"}, "dependencies": {}, "model_name": "test"}
+
+    def wait_job(name, value):
+        started[name].set()
+        assert release.wait(2), f"{name} was never released"
+        return value
+
+    mocker.patch("amv_audio.setup.collect_setup_plan", side_effect=lambda _mode: wait_job("plan", _verified_plan()))
+    mocker.patch(
+        "amv_audio.setup.build_status",
+        side_effect=lambda **_kwargs: wait_job("status", status),
+    )
+    mocker.patch(
+        "amv_audio.setup._prune_package_cache",
+        side_effect=lambda: wait_job("cache", True),
+    )
+    saved = mocker.patch("amv_audio.setup.apply_success_mode")
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        pending = caller.submit(m._finish_setup, "gpu", lambda *args: None, 3)
+        assert all(event.wait(2) for event in started.values())
+        assert not pending.done()
+        saved.assert_not_called()
+        release.set()
+        result = pending.result(timeout=2)
+
+    assert result["status"] == status
+    saved.assert_called_once_with("gpu")
+
+
+def test_numeric_repair_finishes_before_parallel_verification_begins(mocker):
+    m = _get_setup()
+    repaired = threading.Event()
+    initial = _verified_plan("cpu")
+    initial["installs"] = [["fake-install"]]
+
+    mocker.patch("amv_audio.setup._fix_pth_file")
+    mocker.patch("amv_audio.setup._run_step", return_value=(0, []))
+    mocker.patch(
+        "amv_audio.setup.collect_setup_plan",
+        side_effect=[
+            initial,
+            _verified_plan("cpu"),
+        ],
+    )
+    mocker.patch(
+        "amv_audio.setup._restore_numeric_runtime",
+        side_effect=lambda *_args: repaired.set(),
+    )
+    mocker.patch("amv_audio.setup._prune_stale_numeric_metadata")
+    mocker.patch("amv_audio.setup._prune_unused_package_dirs")
+    mocker.patch(
+        "amv_audio.setup.build_status",
+        side_effect=lambda **_kwargs: (
+            repaired.is_set() or pytest.fail("status started before numerical-library repair"),
+            {"type": "status"},
+        )[1],
+    )
+    mocker.patch(
+        "amv_audio.setup._prune_package_cache",
+        side_effect=lambda: repaired.is_set() or pytest.fail("cleanup started before numerical-library repair"),
+    )
+    mocker.patch("amv_audio.setup.apply_success_mode")
+
+    m.install_setup("cpu", lambda *args: None)
+
+    assert repaired.is_set()
+
+
+@pytest.mark.parametrize("failing_job", ["plan", "status"])
+def test_verification_failure_prevents_mode_save(mocker, failing_job):
+    m = _get_setup()
+    if failing_job == "plan":
+        mocker.patch("amv_audio.setup.collect_setup_plan", side_effect=RuntimeError("verification failed"))
+        mocker.patch("amv_audio.setup.build_status", return_value={"type": "status"})
+    else:
+        mocker.patch("amv_audio.setup.collect_setup_plan", return_value=_verified_plan())
+        mocker.patch("amv_audio.setup.build_status", side_effect=RuntimeError("hardware failed"))
+    mocker.patch("amv_audio.setup._prune_package_cache", return_value=True)
+    saved = mocker.patch("amv_audio.setup.apply_success_mode")
+
+    with pytest.raises(RuntimeError):
+        m._finish_setup("gpu", lambda *args: None, 1)
+
+    saved.assert_not_called()
+
+
+def test_cache_cleanup_failure_is_nonfatal(mocker):
+    m = _get_setup()
+    status = {"type": "status", "hardware": {}, "dependencies": {}, "model_name": "test"}
+    mocker.patch("amv_audio.setup.collect_setup_plan", return_value=_verified_plan())
+    mocker.patch("amv_audio.setup.build_status", return_value=status)
+    mocker.patch("amv_audio.setup.installer.prune_cache", side_effect=OSError("cache locked"))
+    saved = mocker.patch("amv_audio.setup.apply_success_mode")
+
+    result = m._finish_setup("gpu", lambda *args: None, 1)
+
+    assert result["status"] == status
+    saved.assert_called_once_with("gpu")

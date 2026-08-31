@@ -41,11 +41,17 @@ pub struct ToolBinary {
     pub name: String,
     pub url: String,
     pub sha256: String,
+    #[serde(default = "startup_default")]
+    pub startup: bool,
     #[serde(default)]
     #[allow(dead_code)]
     pub size: Option<u64>,
     #[serde(flatten)]
     pub kind: BinaryKind,
+}
+
+fn startup_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +77,20 @@ pub struct ToolsStatus {
     pub tools_dir: String,
     pub binaries: Vec<BinaryStatus>,
 }
+
+/// The setup wizard's package installer, fetched on demand (startup:false in
+/// tools.json) so the installer download does not grow by 26 MB for users who
+/// never open setup. Everything that installs Python packages asks for this
+/// first and carries on without it if the download fails — backend/amv_audio/
+/// installer.py falls back to pip, so a blocked download costs a slow setup
+/// rather than a broken one.
+///
+/// Pinned to a permanent tagged release. A rotating build URL gets deleted
+/// upstream and starts 404ing. The version, checksum and size are pinned in
+/// exactly two places — tools.json and bundle-deps.ps1 — and must be bumped
+/// together. Nothing else hardcodes a version: manager.bat and the release
+/// workflow use whichever copy is already on the machine.
+pub(crate) const UV_TOOL: &str = "uv";
 
 static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -185,6 +205,7 @@ pub fn tools_status(app: AppHandle) -> Result<ToolsStatus, String> {
     let binaries: Vec<BinaryStatus> = manifest
         .binaries
         .iter()
+        .filter(|binary| binary.startup)
         .map(|binary| binary_status(&dir, binary))
         .collect();
     let ok = binaries.iter().all(|b| b.present);
@@ -195,8 +216,8 @@ pub fn tools_status(app: AppHandle) -> Result<ToolsStatus, String> {
     })
 }
 
-fn emit_progress(window: &Window, payload: Value) {
-    let _ = window.emit("tools-progress", payload);
+fn emit_progress_to(window: &Window, event: &str, payload: Value) {
+    let _ = window.emit(event, payload);
 }
 
 fn cleanup_partial(path: &Path) {
@@ -205,14 +226,21 @@ fn cleanup_partial(path: &Path) {
     }
 }
 
-async fn download_with_progress(
+async fn download_with_progress_to(
     window: &Window,
+    progress_event: &str,
     binary_name: &str,
     url: &str,
     dest: &Path,
 ) -> Result<(), String> {
+    // Timeouts are the difference between "this download failed" and a window
+    // that sits there forever. A proxy or antivirus web shield that drops
+    // packets instead of refusing the connection never completes the
+    // handshake and never errors, so without these the whole gate wedges.
     let client = reqwest::Client::builder()
         .user_agent("UltimateAMV-Tools/1.0")
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|error| format!("Could not build HTTP client: {error}"))?;
 
@@ -241,8 +269,9 @@ async fn download_with_progress(
     let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
 
-    emit_progress(
+    emit_progress_to(
         window,
+        progress_event,
         json!({
             "type": "download-start",
             "binary": binary_name,
@@ -267,8 +296,9 @@ async fn download_with_progress(
 
         if last_emit.elapsed().as_millis() >= 100 {
             last_emit = Instant::now();
-            emit_progress(
+            emit_progress_to(
                 window,
+                progress_event,
                 json!({
                     "type": "download-progress",
                     "binary": binary_name,
@@ -282,8 +312,9 @@ async fn download_with_progress(
     file.flush().ok();
     drop(file);
 
-    emit_progress(
+    emit_progress_to(
         window,
+        progress_event,
         json!({
             "type": "download-progress",
             "binary": binary_name,
@@ -291,8 +322,9 @@ async fn download_with_progress(
             "totalBytes": total.or(Some(downloaded)),
         }),
     );
-    emit_progress(
+    emit_progress_to(
         window,
+        progress_event,
         json!({
             "type": "download-complete",
             "binary": binary_name,
@@ -460,10 +492,25 @@ fn extract_zip(
                     .map_err(|error| format!("Could not create dir {}: {error}", parent.display()))?;
             }
 
-            let mut out = File::create(&dest)
-                .map_err(|error| format!("Could not create {}: {error}", dest.display()))?;
-            io::copy(&mut entry, &mut out)
-                .map_err(|error| format!("Could not extract {}: {error}", dest.display()))?;
+            // Write beside the target and move it into place, so a copy that
+            // dies partway (disk full, the process killed) cannot leave a
+            // truncated file behind. The presence checks only ask whether the
+            // file exists, so a half-written binary would never be replaced
+            // and the user would silently keep the degraded path forever.
+            let staging = dest.with_extension("partial");
+            let mut out = File::create(&staging)
+                .map_err(|error| format!("Could not create {}: {error}", staging.display()))?;
+            io::copy(&mut entry, &mut out).map_err(|error| {
+                let _ = fs::remove_file(&staging);
+                format!("Could not extract {}: {error}", dest.display())
+            })?;
+            out.flush().ok();
+            drop(out);
+            let _ = fs::remove_file(&dest);
+            fs::rename(&staging, &dest).map_err(|error| {
+                let _ = fs::remove_file(&staging);
+                format!("Could not install {}: {error}", dest.display())
+            })?;
             matched = true;
 
             if rule.to.is_some() {
@@ -497,12 +544,38 @@ fn install_binary(
     }
 }
 
-#[tauri::command]
-pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String> {
+async fn install_tools(
+    app: &AppHandle,
+    window: &Window,
+    requested_names: Option<&[&str]>,
+    progress_event: &str,
+) -> Result<(), String> {
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
-    let manifest = load_manifest(&app)?;
-    let dir = tools_dir(&app)?;
+    let manifest = load_manifest(app)?;
+    let selected: Vec<&ToolBinary> = manifest
+        .binaries
+        .iter()
+        .filter(|binary| {
+            requested_names
+                .map(|names| names.iter().any(|name| *name == binary.name))
+                .unwrap_or(binary.startup)
+        })
+        .collect();
+    if let Some(names) = requested_names {
+        let missing_names: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| !selected.iter().any(|binary| binary.name == *name))
+            .collect();
+        if !missing_names.is_empty() {
+            return Err(format!(
+                "Unknown optional tools requested: {}",
+                missing_names.join(", ")
+            ));
+        }
+    }
+    let dir = tools_dir(app)?;
     fs::create_dir_all(&dir)
         .map_err(|error| format!("Could not create tools dir: {error}"))?;
 
@@ -511,15 +584,16 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
         "Starting tools install",
         json!({
             "tools_dir": dir.display().to_string(),
-            "binary_count": manifest.binaries.len(),
+            "binary_count": selected.len(),
         }),
     );
 
-    emit_progress(
-        &window,
+    emit_progress_to(
+        window,
+        progress_event,
         json!({
             "type": "install-start",
-            "binaries": manifest.binaries.iter().map(|b| &b.name).collect::<Vec<_>>(),
+            "binaries": selected.iter().map(|b| &b.name).collect::<Vec<_>>(),
         }),
     );
 
@@ -527,7 +601,7 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
     fs::create_dir_all(&download_root)
         .map_err(|error| format!("Could not create download cache: {error}"))?;
 
-    for binary in &manifest.binaries {
+    for binary in selected {
         let status = binary_status(&dir, binary);
         if status.present {
             log_info(
@@ -535,8 +609,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
                 "Binary already present, skipping",
                 json!({ "binary": binary.name }),
             );
-            emit_progress(
-                &window,
+            emit_progress_to(
+                window,
+                progress_event,
                 json!({
                     "type": "binary-skip",
                     "binary": binary.name,
@@ -545,8 +620,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
             continue;
         }
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "binary-start",
                 "binary": binary.name,
@@ -566,10 +642,18 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
                 .unwrap_or("download")
         ));
 
-        download_with_progress(&window, &binary.name, &binary.url, &download_path).await?;
+        download_with_progress_to(
+            window,
+            progress_event,
+            &binary.name,
+            &binary.url,
+            &download_path,
+        )
+        .await?;
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "verify-start",
                 "binary": binary.name,
@@ -585,8 +669,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
             return Err(format!("{}: {}", binary.name, error));
         }
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "install-step",
                 "binary": binary.name,
@@ -614,8 +699,9 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
             ));
         }
 
-        emit_progress(
-            &window,
+        emit_progress_to(
+            window,
+            progress_event,
             json!({
                 "type": "binary-done",
                 "binary": binary.name,
@@ -630,13 +716,28 @@ pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String>
         "Tools install completed",
         json!({ "tools_dir": dir.display().to_string() }),
     );
-    emit_progress(
-        &window,
+    emit_progress_to(
+        window,
+        progress_event,
         json!({
             "type": "install-complete",
         }),
     );
     Ok(())
+}
+
+#[tauri::command]
+pub async fn tools_install(app: AppHandle, window: Window) -> Result<(), String> {
+    install_tools(&app, &window, None, "tools-progress").await
+}
+
+pub(crate) async fn install_named(
+    app: &AppHandle,
+    window: &Window,
+    names: &[&str],
+    progress_event: &str,
+) -> Result<(), String> {
+    install_tools(app, window, Some(names), progress_event).await
 }
 
 #[tauri::command]
@@ -646,6 +747,10 @@ pub fn tools_cancel() {
         "Tools install cancelled by user",
         Value::Null,
     );
+    CANCEL_FLAG.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn cancel_active_install() {
     CANCEL_FLAG.store(true, Ordering::SeqCst);
 }
 
@@ -691,6 +796,73 @@ mod tests {
             "**/bin/*.dll",
             "ffmpeg-8.1.1-full_build-shared/share/man/man1/ffmpeg.1.txt"
         ));
+    }
+
+    #[test]
+    fn glob_matches_uv_zip_flat_layout() {
+        // uv's Windows zip has no wrapping directory: uv.exe sits at the root
+        // next to uvw.exe and uvx.exe. The ffmpeg zips do wrap everything in a
+        // versioned folder, so "**/x" has to match both shapes or the tool
+        // installs as "matched no entries" and setup silently loses uv.
+        assert!(glob_matches("**/uv.exe", "uv.exe"));
+        assert!(glob_matches("**/uv.exe", "some-wrapper/uv.exe"));
+        // Must not grab the neighbours: uvx.exe and uvw.exe are different
+        // programs and installing one under the name uv.exe would produce a
+        // uv that cannot install anything.
+        assert!(!glob_matches("**/uv.exe", "uvx.exe"));
+        assert!(!glob_matches("**/uv.exe", "uvw.exe"));
+    }
+
+    #[test]
+    fn uv_manifest_entry_is_on_demand_and_extracts_the_binary() {
+        let raw = include_str!("../../tools.json");
+        let manifest: ToolsManifest =
+            serde_json::from_str(raw).expect("tools.json must parse");
+        let uv = manifest
+            .binaries
+            .iter()
+            .find(|binary| binary.name == UV_TOOL)
+            .expect("tools.json must define the uv entry");
+
+        // Downloading 26 MB on every cold start, for users who never open
+        // setup, is exactly what startup:false avoids.
+        assert!(!uv.startup, "uv must be fetched on demand, not at startup");
+        assert!(
+            uv.url.contains("/releases/download/"),
+            "uv must come from a permanent tagged release: {}",
+            uv.url
+        );
+        match &uv.kind {
+            BinaryKind::Zip { extract } => {
+                let rule = extract.first().expect("uv needs an extract rule");
+                assert_eq!(rule.to.as_deref(), Some("uv.exe"));
+                assert!(glob_matches(&rule.from_glob, "uv.exe"));
+            }
+            _ => panic!("uv ships as a zip"),
+        }
+    }
+
+    #[test]
+    fn startup_defaults_to_required_but_optional_models_can_opt_out() {
+        let required: ToolBinary = serde_json::from_value(json!({
+            "name": "ffmpeg",
+            "url": "https://example.invalid/ffmpeg.exe",
+            "sha256": "abc",
+            "kind": "single",
+            "dest": "ffmpeg.exe"
+        }))
+        .expect("required tool manifest entry");
+        let optional: ToolBinary = serde_json::from_value(json!({
+            "name": "rife-4.25",
+            "url": "https://example.invalid/rife.zip",
+            "sha256": "abc",
+            "startup": false,
+            "kind": "zip",
+            "extract": [{ "from": "**/flownet.pkl", "to": "models/rife425/flownet.pkl" }]
+        }))
+        .expect("optional tool manifest entry");
+        assert!(required.startup);
+        assert!(!optional.startup);
     }
 }
 

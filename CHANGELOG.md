@@ -5,6 +5,72 @@ All notable changes to Ultimate AMV are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.15.1] : 2026-08-27
+
+### Changed
+- Scene Splitter preview playback now follows the measured visible grid, so changing columns, resizing the window, and switching preview modes keeps the tiles aligned and responsive.
+- Preview work is now limited to the clips that need it, while fast scrolling avoids starting new decoders until the grid settles.
+- Scene detection, proxy previews, and conversion now report progress separately, so a later run is not overwritten by stale progress from an earlier run.
+
+### Fixed
+- Exported clips no longer retain source chapter and timed-text timelines that made the player scrubber show the full episode after the media had ended.
+- Replacing a source or starting a new extraction no longer lets late results from the previous run change the current clip grid.
+
+## [0.15.0] : 2026-08-04
+
+### Added
+- Added Frame Interpolation: generate the in-between frames of a clip to raise its frame rate, with 2x/3x/4x multipliers or a target frame rate you type in. A separate slow-motion mode goes up to 64x and stretches the clip out instead of speeding the playback, so the action plays back slowed down rather than smoother at the same length. You choose the output format, and you can queue several clips and leave them to run.
+- Added a one-click hand-off from the clip grid: send everything you just exported straight into interpolation as a single batch instead of adding clips one at a time.
+- Added Dead Frame Remover: finds frames that are duplicates of the one before them, which anime is full of, and drops them. A sensitivity dial controls how aggressively it judges two frames to be the same, a filmstrip under the dial shows you which frames are about to be cut so you can see the effect before committing, and clips can be queued and exported as a batch.
+- Dead Frame Remover can re-time what survives to a frame rate you pick, so removing duplicates leaves you with a clip that plays at a normal speed instead of a shorter, faster one.
+- Added a Smart cut export preset: cuts clips without re-encoding them, so the export is close to instant and the picture is bit-for-bit identical to your source. Cuts still land on the exact frame you chose.
+- Added Quality, VBR and CBR rate control to every clip export preset that supports it, so you can trade file size against quality per export. The setting is kept when an NVIDIA export falls back to the processor.
+- Added a playback speed control for the clip grid previews, adjustable from 0.25x to 4x and applied live without restarting the previews you are watching.
+
+### Changed
+- The Home tab is now laid out as the four stages of an edit (get footage, find your cuts, clean up, prep for your editor) instead of a flat menu. All nine tools appear, including Frame Interpolation and Dead Frame Remover, which were missing before, and cards are sized to their contents rather than stretched to fill the row.
+- Home gained a status rail that tells you what will do the work before you start it, whether fast export encoding is available, and whether a required tool is missing. It also reopens the last tool you used and lists your recent downloads, which you can click to reveal on disk.
+- Setting up or switching between processor and graphics-card mode is dramatically faster. Swapping the graphics-card build of PyTorch for the processor one takes roughly 6 seconds instead of 82. Switching back no longer reinstalls the entire audio engine to recover one file, and the checks the setup screen runs now happen at the same time instead of one after another.
+- Smart cut now keeps your source's format instead of always saving as MKV: an MP4 episode gives you MP4 clips, which import straight into Premiere, After Effects and DaVinci with no conversion step. MKV and other sources are unchanged, because they can hold audio an MP4 cannot.
+- HEVC clips saved as MP4 are now labelled so QuickTime and Final Cut will open them.
+- The minimum window size is now 1080x675, so no panel can be squeezed into an unusable layout.
+
+### Fixed
+- Fixed the app opening on the first-run setup wizard even though setup had been finished long ago. An interrupted switch between processor and graphics-card mode could leave a package on disk with the file describing it deleted, which crashed the check the app runs at startup; the app then assumed setup had never happened. Those damaged leftovers are now cleaned up and reinstalled instead of being skipped forever as though the package were fine.
+- Fixed a failed setup showing a wall of raw machine output instead of a readable sentence explaining what went wrong.
+- Fixed the setup log vanishing the moment an install failed, which took away the only record of what broke. It now stays on screen beneath the error, and a long message scrolls in place and can be selected and copied.
+- Fixed vocal and instrumental separation breaking after switching between processor and graphics-card mode, and fixed the switch replacing the tested PyTorch build with the wrong one.
+- Fixed setup dying outright when the faster installer misbehaved; it now falls back to the slower one and finishes.
+- Fixed Dead Frame Remover previews staying black on source formats the preview could not play.
+- Fixed background removal and the clip tools failing to start on some installs by launching them through the same verified Python the rest of the app uses.
+- Fixed the built-in streaming browser drifting out of alignment with its frame when the interface zoom was not 100%.
+- Fixed a set of Smart cut correctness problems found in review, covering clip timing, merging clips that were not compatible, cancelling an export part-way, and leftover temporary files.
+
+## [0.14.0] : 2026-07-17
+
+### Changed
+- Audio setup and extraction now verify the numerical processing code Python actually loads, repair the tested NumPy 2.4.4 and Numba 0.65.1 pair automatically, and remove stale package records left by earlier updates.
+- Release builds now stop before publishing if the bundled numerical processing code is not the verified version.
+
+### Fixed
+- Fixed vocal and instrumental extraction failing immediately after an app update because the installer could replace a compatible NumPy version with one that Numba refused to load.
+- When separation fails before producing stems, the app now reports the underlying processing error instead of replacing it with the generic message "Separation produced no output files."
+
+## [0.13.3] : 2026-07-17
+
+### Added
+- Added direct H.264 10-bit export with three rate modes: Quality keeps visual quality consistent, VBR targets an average bitrate, and CBR keeps output at the selected bitrate. VBR and CBR accept any positive Mbps value without an artificial upper limit.
+- Added a visible, draggable scrollbar at the outer edge of the clip grid so long scene lists can be navigated precisely.
+
+### Changed
+- Dragging the clip grid now carries momentum after release and slows smoothly, while a new drag or mouse-wheel input stops it immediately.
+
+### Fixed
+- Fixed scene previews staying black after resizing the window until the user hovered them, switched columns, or restored the old window size. Newly visible scenes now load as soon as the layout settles.
+- Fixed the installed app repeatedly reporting missing GPU AI files after Repair. The check now validates the actual bundled runtime in the correct load order and shared-library location.
+
 ## [0.13.2] : 2026-06-17
 
 ### Fixed
@@ -250,6 +316,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.15.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.1
+[0.15.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.0
+[0.14.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.14.0
+[0.13.3]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.3
+[0.13.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.2
 [0.13.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.1
 [0.13.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.13.0
 [0.12.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.12.0

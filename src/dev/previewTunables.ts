@@ -135,3 +135,44 @@ export function getOffsetMetricsSummary(): { activeCount: number; maxOvershootMs
   }
   return { activeCount: offsetMetrics.size, maxOvershootMs };
 }
+
+// ---------------------------------------------------------------------------
+// DEV TOOLS live grid playback diagnostics.
+// ---------------------------------------------------------------------------
+
+export type GridPlaybackDiagnostics = {
+  viewportWidth: number;
+  viewportHeight: number;
+  firstVisibleRow: number | null;
+  lastVisibleRow: number | null;
+  visibleTileCount: number;
+  grantedCount: number;
+  hardCap: number;
+  fastScrolling: boolean;
+  layoutGeneration: number;
+  visibleCountExceededHardCap: boolean;
+  anchorClipId: string | null;
+};
+
+let gridPlaybackDiagnostics: GridPlaybackDiagnostics = {
+  viewportWidth: 0,
+  viewportHeight: 0,
+  firstVisibleRow: null,
+  lastVisibleRow: null,
+  visibleTileCount: 0,
+  grantedCount: 0,
+  hardCap: 35,
+  fastScrolling: false,
+  layoutGeneration: 0,
+  visibleCountExceededHardCap: false,
+  anchorClipId: null,
+};
+
+export function reportGridPlaybackDiagnostics(d: GridPlaybackDiagnostics): void {
+  gridPlaybackDiagnostics = d;
+}
+
+export function getGridPlaybackDiagnostics(): GridPlaybackDiagnostics {
+  return gridPlaybackDiagnostics;
+}
+

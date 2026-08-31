@@ -46,7 +46,7 @@ export function VideoOutputControl({
             disabled={disabled}
             onChange={(event) => {
               const next = event.currentTarget.value;
-              if (/^\d*$/.test(next)) {
+              if (/^\d*(?:\.\d*)?$/.test(next)) {
                 setDraftValue(next);
               }
             }}

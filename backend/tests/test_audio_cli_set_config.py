@@ -35,6 +35,7 @@ BASE_CFG = {
     "clip_hover_preview": False,
     "featherweight_previews": True,
     "scene_preview_height": 240,
+    "clip_preview_speed": 1.0,
 }
 
 EXPECTED_CONFIG_PAYLOAD = {
@@ -58,6 +59,7 @@ EXPECTED_CONFIG_PAYLOAD = {
     "clip_hover_preview": False,
     "featherweight_previews": True,
     "scene_preview_height": 240,
+    "clip_preview_speed": 1.0,
 }
 
 
@@ -112,6 +114,15 @@ class TestConfigPayloadDefaults:
         from audio_cli import _config_payload
         val = _config_payload({"scene_preview_height": "360"})["scene_preview_height"]
         assert isinstance(val, int)
+
+    def test_clip_preview_speed_default_is_one(self):
+        from audio_cli import _config_payload
+        assert _config_payload({})["clip_preview_speed"] == 1.0
+
+    def test_clip_preview_speed_is_float(self):
+        from audio_cli import _config_payload
+        val = _config_payload({"clip_preview_speed": "2"})["clip_preview_speed"]
+        assert isinstance(val, float)
 
     def test_force_cpu_default_false(self):
         from audio_cli import _config_payload
@@ -721,6 +732,43 @@ class TestSetConfigFeatherweightPreviews:
         set_config("featherweight_previews", "true")
         payload = mock_emit.call_args[0][0]
         assert payload["featherweight_previews"] is True
+
+
+# ---------------------------------------------------------------------------
+# set_config — clip_preview_speed
+# ---------------------------------------------------------------------------
+
+class TestSetConfigClipPreviewSpeed:
+    @pytest.mark.parametrize("value,expected", [
+        ("0.1", 0.25),
+        ("2", 2.0),
+        ("10", 4.0),
+    ])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_value_is_clamped_and_saved(
+        self, mock_load, mock_save, mock_emit, value, expected
+    ):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("clip_preview_speed", value)
+        assert result is None
+        saved = mock_save.call_args[0][0]
+        assert saved["clip_preview_speed"] == expected
+
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_non_numeric_returns_1(self, mock_load, mock_save, mock_emit):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("clip_preview_speed", "fast")
+        assert result == 1
+        mock_save.assert_not_called()
+        payload = mock_emit.call_args[0][0]
+        assert payload["type"] == "error"
+        assert "clip_preview_speed" in payload["message"]
 
 
 # ---------------------------------------------------------------------------

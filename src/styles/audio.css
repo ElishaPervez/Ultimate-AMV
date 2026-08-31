@@ -721,15 +721,6 @@
   font-size: 13px;
 }
 
-@media (max-width: 720px) {
-  .stem-mixer-track {
-    grid-template-columns: 120px minmax(0, 1fr);
-  }
-  .stem-mixer-label {
-    grid-template-columns: 40px minmax(0, 1fr) 24px;
-  }
-}
-
 /* ============================================================
    23. AUDIO MESSAGES & BATCH STATUS
    ============================================================ */
@@ -1585,11 +1576,5 @@
 .youtube-trim-options label > small {
   opacity: 0.7;
   font-size: 10.5px;
-}
-
-@media (max-width: 720px) {
-  .youtube-trim-fields {
-    grid-template-columns: 1fr;
-  }
 }
 

@@ -1,7 +1,67 @@
 import unittest
 from unittest.mock import patch
 
-from audio_cli import set_config
+from audio_cli import set_config, setup, status
+
+
+class TestStatusAndSetup(unittest.TestCase):
+    @patch("audio_cli.emit")
+    @patch("audio_cli.build_status")
+    def test_regular_status_emits_shared_status_shape(self, mock_build_status, mock_emit):
+        payload = {
+            "type": "status",
+            "hardware": {"device": "Test GPU"},
+            "dependencies": {"ready": True},
+            "model": "model.ckpt",
+            "model_name": "Test model",
+        }
+        mock_build_status.return_value = payload
+
+        status()
+
+        mock_emit.assert_called_once_with(payload)
+
+    @patch("audio_cli.add_log")
+    @patch("audio_cli.emit")
+    @patch("audio_cli.install_setup")
+    def test_setup_returns_verified_status_and_verification_phase(
+        self, mock_install_setup, mock_emit, _mock_add_log
+    ):
+        verified_status = {
+            "type": "status",
+            "hardware": {"device": "Test GPU"},
+            "dependencies": {"ready": True},
+            "model_name": "Test model",
+        }
+
+        def fake_install(mode, progress_callback):
+            progress_callback(
+                2,
+                2,
+                "running",
+                "Verifying GPU/CPU engine and cleaning package cache...",
+                "verify",
+            )
+            return {
+                "ok": True,
+                "mode": mode,
+                "plan": {"mode": mode, "issues": [], "installs": []},
+                "status": verified_status,
+            }
+
+        mock_install_setup.side_effect = fake_install
+
+        result = setup("gpu")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            mock_emit.call_args_list[0].args[0]["phase"],
+            "verify",
+        )
+        self.assertEqual(
+            mock_emit.call_args_list[-1].args[0]["status"],
+            verified_status,
+        )
 
 
 class TestSetConfig(unittest.TestCase):
@@ -31,6 +91,7 @@ class TestSetConfig(unittest.TestCase):
             "clip_hover_preview": False,
             "featherweight_previews": True,
             "scene_preview_height": 240,
+            "clip_preview_speed": 1.0,
             "tsukyio_api_key": "",
         }
         payload.update(overrides)

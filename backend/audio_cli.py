@@ -27,11 +27,11 @@ if _tools_dir not in os.environ.get("PATH", ""):
 
 from amv_audio.config import load_config, save_config
 from amv_audio.dependencies import ensure_feature_dependencies, repair_missing_module
-from amv_audio.hardware import get_dependency_info, get_hw_info
+from amv_audio.installer import recorded_version
 from amv_audio.logs import add_log, get_terminal_logs
-from amv_audio.models import get_active_model, get_model_display_name
 from amv_audio.separator import run_separation
 from amv_audio.setup import collect_setup_plan, install_setup
+from amv_audio.status import build_status
 
 THEME_PRESETS = {
     "cyan": ("#48d7ff", "#63e6a2"),
@@ -47,18 +47,7 @@ def emit(payload):
 
 
 def status():
-    hw = get_hw_info()
-    model = get_active_model(hw)
-    deps = get_dependency_info()
-    emit(
-        {
-            "type": "status",
-            "hardware": hw,
-            "dependencies": deps,
-            "model": model,
-            "model_name": get_model_display_name(model),
-        }
-    )
+    emit(build_status())
 
 
 def logs():
@@ -105,6 +94,7 @@ def _config_payload(cfg):
         "clip_hover_preview": bool(cfg.get("clip_hover_preview", False)),
         "featherweight_previews": bool(cfg.get("featherweight_previews", True)),
         "scene_preview_height": int(cfg.get("scene_preview_height", 240)),
+        "clip_preview_speed": float(cfg.get("clip_preview_speed", 1.0)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
     }
 
@@ -117,10 +107,13 @@ def _auto_sync_install_mode(cfg):
     # "GPU installed - CPU configured" on a +cu torch and so downstream code
     # that reads clip_extraction_mode (e.g. DownloaderPanel's post-download
     # clip-server warmup) sees the right mode.
-    try:
-        from importlib.metadata import version
-        torch_version = version("torch")
-    except Exception:
+    # A version that cannot be read says nothing about which build is
+    # installed, so leave the stored preferences alone rather than guessing.
+    # Reading it as text instead is what used to kill this command outright,
+    # and with it dead the app decided the user had never finished setup and
+    # threw the first-run wizard at them.
+    torch_version = recorded_version("torch")
+    if not torch_version:
         return cfg, False
 
     if "+cu" in torch_version:
@@ -232,6 +225,13 @@ def set_config(key, value):
         cfg["clip_hover_preview"] = value.lower() == "true"
     elif key == "featherweight_previews":
         cfg["featherweight_previews"] = value.lower() == "true"
+    elif key == "clip_preview_speed":
+        try:
+            number = float(value)
+        except ValueError:
+            emit({"type": "error", "message": "clip_preview_speed must be a number"})
+            return 1
+        cfg["clip_preview_speed"] = max(0.25, min(4.0, number))
     elif key == "scene_preview_height":
         # Max preview-proxy height in px. 0 is the sentinel for the
         # "Source"/unlimited preset (Rust maps 0 -> None). Snap to the fixed
@@ -288,8 +288,17 @@ def separate(input_file):
 
 
 def setup(mode):
-    def on_progress(step, total, state, message):
-        emit({"type": "setup-progress", "step": step, "total": total, "state": state, "message": message})
+    def on_progress(step, total, state, message, phase="install"):
+        emit(
+            {
+                "type": "setup-progress",
+                "step": step,
+                "total": total,
+                "state": state,
+                "message": message,
+                "phase": phase,
+            }
+        )
 
     try:
         add_log("audio.setup.start", f"Started {mode.upper()} audio setup", details={"mode": mode})

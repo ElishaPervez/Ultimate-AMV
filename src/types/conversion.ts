@@ -4,6 +4,8 @@ export type ConversionProgress = {
   message: string;
   fps?: string | null;
   speed?: string | null;
+  clipIndex?: number;
+  clipCount?: number;
 };
 
 export type ConversionDone = {

@@ -63,6 +63,7 @@ def test_default_config_has_required_keys():
         "theme_color_b",
         "audio_output_format",
         "clip_hover_preview",
+        "clip_preview_speed",
     }
     missing = required - DEFAULT_CONFIG.keys()
     assert not missing, f"DEFAULT_CONFIG missing keys: {missing}"
@@ -86,6 +87,10 @@ def test_default_max_recent_is_twenty():
 
 def test_default_force_cpu_is_false():
     assert DEFAULT_CONFIG["force_cpu"] is False
+
+
+def test_default_clip_preview_speed_is_one():
+    assert DEFAULT_CONFIG["clip_preview_speed"] == 1.0
 
 
 # ---------------------------------------------------------------------------

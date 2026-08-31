@@ -217,6 +217,205 @@
   background: rgba(255, 255, 255, 0.035);
 }
 
+.clip-cols-control.is-disabled {
+  opacity: 0.52;
+}
+
+.clip-smoothing-toggle {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  margin-top: 3px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  background: rgba(5, 10, 13, 0.34);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.clip-smoothing-toggle.is-active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.clip-smoothing-check {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  color: rgba(210, 225, 233, 0.64);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 6px;
+}
+
+.clip-smoothing-toggle.is-active .clip-smoothing-check {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.clip-smoothing-check input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.clip-smoothing-toggle > span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.clip-smoothing-toggle strong {
+  color: #e6edf1;
+  font-size: 10px;
+  font-weight: 760;
+}
+
+.clip-smoothing-toggle small {
+  color: #7f909b;
+  font-size: 8.5px;
+  line-height: 1.3;
+}
+
+.clip-rate-control {
+  display: grid;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.clip-rate-control-head {
+  display: grid;
+  gap: 6px;
+}
+
+.clip-rate-control-head > span {
+  color: rgba(181, 230, 247, 0.86);
+  font-size: 9px;
+  font-weight: 840;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.clip-rate-mode-help {
+  color: #83929d;
+  font-size: 9px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+
+.clip-rate-mode {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  background: rgba(2, 6, 9, 0.48);
+}
+
+.clip-rate-mode button {
+  min-width: 0;
+  height: 27px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  color: #87939d;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.clip-rate-mode button:hover:not(:disabled) {
+  color: #dce8ef;
+}
+
+.clip-rate-mode button.is-active {
+  color: var(--theme-accent-contrast);
+  background: var(--accent-gradient);
+  box-shadow: 0 5px 14px rgb(var(--theme-accent-rgb) / 0.2);
+}
+
+.clip-rate-mode button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.clip-bitrate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid rgb(var(--theme-accent-rgb) / 0.15);
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgb(var(--theme-accent-rgb) / 0.07), rgba(255, 255, 255, 0.02));
+}
+
+.clip-bitrate-row.is-cbr {
+  border-color: rgb(var(--theme-accent-rgb) / 0.26);
+  background:
+    linear-gradient(90deg, rgb(var(--theme-accent-rgb) / 0.1), transparent 62%),
+    rgba(255, 255, 255, 0.02);
+}
+
+.clip-bitrate-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.clip-bitrate-row strong {
+  color: #d8e5ed;
+  font-size: 10px;
+  font-weight: 820;
+}
+
+.clip-bitrate-row small {
+  color: #83929d;
+  font-size: 9px;
+  font-weight: 620;
+  line-height: 1.3;
+}
+
+.clip-bitrate-value {
+  display: grid;
+  grid-template-columns: 58px auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 6px;
+  background: rgba(2, 6, 9, 0.55);
+}
+
+.clip-bitrate-value input {
+  width: 58px;
+  border: 0;
+  outline: 0;
+  color: #f4fbff;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 860;
+  text-align: right;
+}
+
+.clip-bitrate-value input:focus {
+  color: var(--cyan);
+}
+
+.clip-bitrate-value span {
+  color: #8fa2b1;
+  font-size: 9px;
+  font-weight: 820;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .clip-cols-label {
   display: flex;
   justify-content: space-between;
@@ -459,16 +658,30 @@
 
 .clip-preview-grid-scroller {
   position: absolute;
-  inset: 14px;
+  /* Keep the breathing room around the cards, but dock the scrollbar itself to
+     the workspace edge. The stable gutter below prevents the final card column
+     from running underneath it. */
+  inset: 14px 0 14px 14px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 6px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(139, 227, 136, 0.62) rgba(255, 255, 255, 0.04);
+  padding-right: 10px;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(139, 227, 136, 0.9) rgba(255, 255, 255, 0.05);
+  /* Grab-and-scroll: press-and-drag anywhere in the grid pans the list. */
+  cursor: grab;
   transition:
     filter 160ms ease,
     transform 160ms ease,
     opacity 160ms ease;
+}
+
+/* While a grab-drag is in progress the whole grid shows the closed-hand cursor
+   (overrides the per-tile pointer cursor) and text selection is suppressed. */
+.clip-preview-grid-scroller.is-grabbing,
+.clip-preview-grid-scroller.is-grabbing * {
+  cursor: grabbing !important;
+  user-select: none;
 }
 
 .clip-preview-grid-row {
@@ -496,7 +709,7 @@
   inset: 14px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 6px;
+  padding-right: 10px;
 }
 
 /* ── Floating jump-to-selection pill (bottom-right of the clip stage) ── */
@@ -571,21 +784,76 @@
   aspect-ratio: auto;
 }
 
+/* Wide, high-contrast, ALWAYS-VISIBLE scrollbar. Defining an explicit width
+   forces WebView2 to use a classic (non-overlay) bar that stays on screen the
+   whole time the grid can scroll, so it's easy to spot and grab over a wall of
+   thumbnails. The green thumb stays in the app's existing accent family. */
 .clip-preview-grid-scroller::-webkit-scrollbar,
 .clip-preview-grid::-webkit-scrollbar {
-  width: 9px;
+  width: 14px;
 }
 
 .clip-preview-grid-scroller::-webkit-scrollbar-track,
 .clip-preview-grid::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
 }
 
 .clip-preview-grid-scroller::-webkit-scrollbar-thumb,
 .clip-preview-grid::-webkit-scrollbar-thumb {
-  border: 2px solid rgba(5, 8, 9, 0.8);
+  min-height: 44px;
+  /* Dark inset ring (via padding-box clip) frames the bright green so the thumb
+     reads clearly against both dark tracks and light thumbnails behind it. */
+  border: 3px solid rgba(5, 8, 9, 0.85);
   border-radius: 999px;
-  background: var(--accent-border-strong);
+  background: rgba(139, 227, 136, 0.9);
+  background-clip: padding-box;
+}
+
+.clip-preview-grid-scroller::-webkit-scrollbar-thumb:hover,
+.clip-preview-grid::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 227, 136, 1);
+  background-clip: padding-box;
+}
+
+/* ── Selected-clip markers overlaid on the scrollbar gutter ──
+   A pointer-transparent rail down the right edge so the ticks can sit over the
+   native scrollbar without blocking a thumb grab; each tick re-enables pointer
+   events so it stays clickable to jump that clip into view. */
+.clip-scroll-markers {
+  position: absolute;
+  /* The scroller is docked to the workspace's far-right edge, so the marker
+     rail sits directly over that scrollbar gutter. */
+  top: 14px;
+  right: 0;
+  bottom: 14px;
+  width: 14px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.clip-scroll-marker {
+  position: absolute;
+  right: 3px;
+  width: 8px;
+  height: 4px;
+  margin: 0;
+  margin-top: -2px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: rgba(139, 227, 136, 1);
+  box-shadow:
+    0 0 0 1px rgba(3, 6, 7, 0.7),
+    0 0 6px rgba(139, 227, 136, 0.5);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.clip-scroll-marker:hover {
+  background: #ffffff;
+  transform: scaleX(1.5);
 }
 
 .clip-preview-skeleton,

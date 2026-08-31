@@ -864,23 +864,6 @@
 }
 
 /* Stack the results row on narrow panels: dock drops under the grid. */
-@media (max-width: 900px) {
-  .tsukyio-results-row {
-    flex-direction: column;
-  }
-
-  .tsukyio-dock {
-    flex: 0 0 auto;
-    width: 100%;
-  }
-
-  .tsukyio-dock-reopen {
-    width: 100%;
-    height: 30px;
-    align-self: auto;
-  }
-}
-
 /* Audio assets don't need a 16:9 black letterbox â€” collapse the stage to a
    compact bar that hosts the custom player, still centered. */
 .scene-viewer-stage.is-audio {
@@ -1047,14 +1030,6 @@
 }
 
 /* Stack the player on narrow modals so the scrub bar keeps usable width. */
-@media (max-width: 480px) {
-  .tsukyio-audio-player {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
-  }
-}
-
 /* ---- Audio player inside the dock ----
    The dock is far narrower than the old modal (~352px content vs the modal's
    wide stage), so the controls would crowd if laid out in one row. Re-tune:

@@ -12,7 +12,7 @@ use tauri::Emitter;
 use crate::{
     app_root, apply_python_env, audio_cli_path, canonical_input_path, clear_child_pid, cmd,
     emit_conversion_progress, ensure_tool, find_tool, log_error, log_info, probe_duration,
-    python_exe, run_audio_cli, run_ffmpeg_with_progress, store_child_pid, stop_clip_processes_for_dependency_setup,
+    python_exe_checked, run_audio_cli, run_ffmpeg_with_progress, store_child_pid, stop_clip_processes_for_dependency_setup,
     truncate_log_text, AUDIO_CHILD_PID, ConversionDone,
 };
 
@@ -65,12 +65,81 @@ pub(crate) async fn audio_extract(window: tauri::Window, input_path: String) -> 
     result
 }
 
+/// Fetch the fast package installer before a setup run, if it is not already
+/// there. Deliberately cannot fail the caller: on a machine where the download
+/// is blocked (antivirus, a locked-down network, GitHub unreachable) the
+/// Python side falls back to pip, so the user gets a slow setup instead of a
+/// dead end. Progress goes out on its own event because the setup panel's
+/// event carries a fixed payload shape that the tools installer does not
+/// speak.
+async fn ensure_fast_installer(app: &tauri::AppHandle, window: &tauri::Window) {
+    let already_there = crate::tools::tools_dir(app)
+        .map(|dir| dir.join("uv.exe").is_file())
+        .unwrap_or(false);
+    if already_there {
+        return;
+    }
+
+    // Field names have to match AudioSetupProgress in src/types/audio.ts. The
+    // panels read `state` and call .toUpperCase() on it, so a payload missing
+    // it takes the whole install screen down.
+    let notify = |message: &str| {
+        let _ = window.emit(
+            "audio-setup-progress",
+            json!({
+                "type": "setup-progress",
+                "step": 0,
+                "total": 0,
+                "state": "running",
+                "message": message,
+            }),
+        );
+    };
+
+    notify("Downloading the package installer (26 MB, first run only)...");
+
+    // Bounded on purpose. A proxy or antivirus web shield that black-holes the
+    // connection rather than refusing it would otherwise leave the wizard
+    // waiting forever on a step that is optional by design.
+    let fetch = crate::tools::install_named(
+        app,
+        window,
+        &[crate::tools::UV_TOOL],
+        "audio-setup-tools-progress",
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(300), fetch).await {
+        Ok(Ok(())) => notify("Package installer ready."),
+        Ok(Err(error)) => {
+            log_info(
+                "audio.setup.installer.unavailable",
+                "Fast installer could not be fetched; setup will use the bundled one",
+                json!({ "error": error }),
+            );
+            notify("Continuing with the bundled installer.");
+        }
+        Err(_) => {
+            crate::tools::cancel_active_install();
+            log_info(
+                "audio.setup.installer.timeout",
+                "Fast installer download timed out; setup will use the bundled one",
+                json!({ "timeout_secs": 300 }),
+            );
+            notify("Installer download timed out. Continuing with the bundled installer.");
+        }
+    }
+}
+
 #[tauri::command]
-pub(crate) async fn audio_setup(window: tauri::Window, mode: String) -> Result<String, String> {
+pub(crate) async fn audio_setup(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    mode: String,
+) -> Result<String, String> {
     if mode != "cpu" && mode != "gpu" {
         return Err("Setup mode must be cpu or gpu".to_string());
     }
     stop_clip_processes_for_dependency_setup(&window).await;
+    ensure_fast_installer(&app, &window).await;
     log_info(
         "audio.setup.invoke.start",
         "Starting audio dependency setup command",
@@ -299,7 +368,7 @@ pub(crate) fn run_streaming_audio_cli(
         "Starting streaming audio bridge",
         json!({ "args": &args, "progressEvent": progress_event }),
     );
-    let mut command = cmd(python_exe(&root));
+    let mut command = cmd(python_exe_checked(&root)?);
     command
         .arg("-I")
         .arg(audio_cli_path(&root))
@@ -392,17 +461,24 @@ pub(crate) fn run_streaming_audio_cli(
         }
         result
     } else {
-        let error = final_payload.unwrap_or_else(|| {
-            let tail = stderr_tail.trim();
-            if tail.is_empty() {
-                format!(
-                    "Python process exited with code {}",
-                    status.code().unwrap_or(-1)
-                )
-            } else {
-                tail.to_string()
-            }
-        });
+        // This string is what the setup wizard and the audio panels put on
+        // screen verbatim, so unwrap the sentence out of the sidecar's own
+        // payload instead of showing the user a line of JSON. Non-JSON cases
+        // (stderr tail, exit code) are unchanged.
+        let error = final_payload
+            .as_deref()
+            .map(crate::bridge_error_text)
+            .unwrap_or_else(|| {
+                let tail = stderr_tail.trim();
+                if tail.is_empty() {
+                    format!(
+                        "Python process exited with code {}",
+                        status.code().unwrap_or(-1)
+                    )
+                } else {
+                    tail.to_string()
+                }
+            });
         log_error(
             "audio.streaming_bridge.error",
             "Streaming audio bridge process failed",

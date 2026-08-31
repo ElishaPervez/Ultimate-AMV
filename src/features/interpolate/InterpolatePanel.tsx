@@ -1,0 +1,682 @@
+import React from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  FilePlus2,
+  FolderOpen,
+  Gauge,
+  Loader2,
+  Sparkles,
+  Trash2,
+  Upload,
+  XCircle,
+} from "lucide-react";
+import { setDiscordJob } from "../../lib/discord";
+import { useFileDrop } from "../../lib/useFileDrop";
+import { fileName, fileStem, normalizeSelectedPaths } from "../../lib/paths";
+import { acceptsDroppedPath, isSupportedVideoPath, VIDEO_EXTENSIONS } from "../../lib/videoPaths";
+import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
+import type {
+  InterpolateDone,
+  InterpolateFactor,
+  InterpolateModelKey,
+  InterpolateNamingMode,
+  InterpolateOutputFormat,
+  InterpolateProgress,
+  InterpolateQueueItem,
+  InterpolateRateIntent,
+  InterpolateRateMode,
+  InterpolateStatus,
+} from "../../types/interpolate";
+import { InterpolateProgressCard } from "./InterpolateProgressCard";
+import { VideoOutputControl } from "../video/VideoOutputControl";
+import { OUTPUT_FORMATS, outputFormatExtension } from "../video/outputFormats";
+import type { VideoControlSpec } from "../../types/conversion";
+
+let interpolationBusy = false;
+
+export { acceptsDroppedPath, isSupportedVideoPath };
+
+function parentDirectory(path: string): string {
+  const index = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return index >= 0 ? path.slice(0, index) : "";
+}
+
+function joinPath(folder: string, name: string): string {
+  const separator = folder.includes("\\") ? "\\" : "/";
+  return `${folder.replace(/[\\/]+$/, "")}${separator}${name}`;
+}
+
+export function buildInterpolationOutput(
+  input: string,
+  outputFolder: string,
+  factor: InterpolateFactor,
+  naming: InterpolateNamingMode,
+  rateIntent: InterpolateRateIntent = "factor",
+  targetFps = 60,
+  extension = "mp4",
+): string {
+  const stem = fileStem(input);
+  const suffix = rateIntent === "target"
+    ? `${targetFps}fps`
+    : rateIntent === "slow-motion"
+      ? `${factor}x-slowmo`
+      : `${factor}x`;
+  const name = naming === "suffix" ? `${stem}_${suffix}.${extension}` : `${stem}.${extension}`;
+  const output = joinPath(outputFolder, name);
+  if (output.toLocaleLowerCase() === input.toLocaleLowerCase()) {
+    return joinPath(outputFolder, `${stem}_${suffix}.${extension}`);
+  }
+  return output;
+}
+
+export function normalizeInterpolateProgress(payload: InterpolateProgress): InterpolateProgress | null {
+  if (payload.type === "progress") return payload;
+  const binary = payload.binary?.startsWith("rife") ? "RIFE model" : payload.binary || "model";
+  if (payload.type === "download-start") {
+    return { ...payload, type: "progress", stage: "model-init", percent: 0, message: `Downloading ${binary}` };
+  }
+  if (payload.type === "download-progress") {
+    const percent = payload.totalBytes
+      ? (Number(payload.downloadedBytes || 0) / Number(payload.totalBytes)) * 100
+      : -1;
+    return { ...payload, type: "progress", stage: "model-init", percent, message: `Downloading ${binary}` };
+  }
+  if (payload.type === "verify-start") {
+    return { ...payload, type: "progress", stage: "model-init", percent: 99, message: `Verifying ${binary}` };
+  }
+  if (payload.type === "install-step") {
+    return { ...payload, type: "progress", stage: "model-init", percent: 100, message: `Installing ${binary}` };
+  }
+  return null;
+}
+
+export function InterpolatePanel({ active }: { active: boolean }) {
+  const [status, setStatus] = React.useState<InterpolateStatus | null>(null);
+  const [queue, setQueue] = React.useState<InterpolateQueueItem[]>([]);
+  const [factor, setFactor] = React.useState<InterpolateFactor>(2);
+  const [rateIntent, setRateIntent] = React.useState<InterpolateRateIntent>("factor");
+  const [targetFps, setTargetFps] = React.useState(60);
+  const [model, setModel] = React.useState<InterpolateModelKey>("rife4.25");
+  const [outputFolder, setOutputFolder] = React.useState("");
+  const [naming, setNaming] = React.useState<InterpolateNamingMode>("suffix");
+  const [useGpu, setUseGpu] = React.useState(true);
+  const [outputFormat, setOutputFormat] = React.useState<InterpolateOutputFormat>("h264-mp4");
+  const [rateMode, setRateMode] = React.useState<InterpolateRateMode>("quality");
+  const [quality, setQuality] = React.useState(18);
+  const [bitrateMbps, setBitrateMbps] = React.useState(20);
+  const [running, setRunning] = React.useState(false);
+  const [cancelling, setCancelling] = React.useState(false);
+  const [progress, setProgress] = React.useState<InterpolateProgress | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [result, setResult] = React.useState<InterpolateDone | null>(null);
+  const [etaSeconds, setEtaSeconds] = React.useState<number | null>(null);
+  const statusFetched = React.useRef(false);
+  const clipStartedAt = React.useRef(0);
+  const currentClipIndex = React.useRef(0);
+  const measuredClipSeconds = React.useRef<number[]>([]);
+
+  React.useEffect(() => () => {
+    interpolationBusy = false;
+  }, []);
+
+  const refreshOutputs = React.useCallback((
+    items: InterpolateQueueItem[],
+    folder = outputFolder,
+    selectedFactor = factor,
+    selectedNaming = naming,
+    selectedIntent = rateIntent,
+    selectedTarget = targetFps,
+    selectedFormat = outputFormat,
+  ) => items.map((item) => ({
+    ...item,
+    output: folder
+      ? buildInterpolationOutput(
+        item.input,
+        folder,
+        selectedFactor,
+        selectedNaming,
+        selectedIntent,
+        selectedTarget,
+        outputFormatExtension(selectedFormat),
+      )
+      : "",
+  })), [factor, naming, outputFolder, outputFormat, rateIntent, targetFps]);
+
+  React.useEffect(() => {
+    if (!active || statusFetched.current) return;
+    statusFetched.current = true;
+    void invoke<string>("interpolate_status")
+      .then((raw) => {
+        const next = parseBridgePayload<InterpolateStatus>(raw);
+        setStatus(next);
+        setUseGpu(Boolean(next.hardware.hasCuda));
+      })
+      .catch((cause) => {
+        setError(readBridgeError(cause));
+        setUseGpu(false);
+      });
+  }, [active]);
+
+  React.useEffect(() => {
+    setDiscordJob("Interpolating frames", running);
+    return () => setDiscordJob("Interpolating frames", false);
+  }, [running]);
+
+  React.useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<InterpolateProgress>("interpolate-progress", (event) => {
+      if (!interpolationBusy) return;
+      const next = normalizeInterpolateProgress(event.payload);
+      if (!next) return;
+      setProgress(next);
+      const index = next.clipIndex || 0;
+      if (index > 0 && index !== currentClipIndex.current) {
+        currentClipIndex.current = index;
+        clipStartedAt.current = performance.now();
+        setQueue((items) => items.map((item, itemIndex) => ({
+          ...item,
+          status: itemIndex === index - 1 ? "running" : item.status,
+        })));
+      }
+      if (index > 0 && next.stage === "encode" && (next.percent || 0) >= 100) {
+        const elapsed = Math.max(0, (performance.now() - clipStartedAt.current) / 1000);
+        if (index > 1) measuredClipSeconds.current.push(elapsed);
+        const samples = measuredClipSeconds.current;
+        if (samples.length > 0) {
+          const average = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+          setEtaSeconds(average * Math.max(0, queue.length - index));
+        }
+        setQueue((items) => items.map((item, itemIndex) => ({
+          ...item,
+          status: itemIndex === index - 1 ? "done" : item.status,
+        })));
+      }
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+    return () => unlisten?.();
+  }, [queue.length]);
+
+  function acceptFiles(paths: string[]) {
+    const unique = paths.filter((path, index, all) =>
+      all.findIndex((candidate) => candidate.toLocaleLowerCase() === path.toLocaleLowerCase()) === index
+    );
+    if (unique.length === 0) return;
+    const folder = outputFolder || parentDirectory(unique[0]);
+    if (!outputFolder) setOutputFolder(folder);
+    setQueue((existing) => {
+      const known = new Set(existing.map((item) => item.input.toLocaleLowerCase()));
+      const added = unique
+        .filter((path) => !known.has(path.toLocaleLowerCase()))
+        .map((input) => ({
+          input,
+          output: buildInterpolationOutput(
+            input,
+            folder,
+            factor,
+            naming,
+            rateIntent,
+            targetFps,
+            outputFormatExtension(outputFormat),
+          ),
+          status: "queued" as const,
+        }));
+      return [...existing, ...added];
+    });
+    setError(null);
+    setResult(null);
+  }
+
+  async function pickFiles() {
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
+    });
+    acceptFiles(normalizeSelectedPaths(selected));
+  }
+
+  async function pickFolderInputs() {
+    const selected = await open({ multiple: false, directory: true });
+    if (!selected || Array.isArray(selected)) return;
+    try {
+      const paths = await invoke<string[]>("interpolate_list_folder", { folder: selected });
+      if (paths.length === 0) {
+        setError("That folder contains no supported video files.");
+        return;
+      }
+      acceptFiles(paths);
+    } catch (cause) {
+      setError(readBridgeError(cause));
+    }
+  }
+
+  async function acceptDroppedPaths(paths: string[]) {
+    const clips = paths.filter(isSupportedVideoPath);
+    const folders = paths.filter((path) => !isSupportedVideoPath(path));
+    for (const folder of folders) {
+      try {
+        clips.push(...await invoke<string[]>("interpolate_list_folder", { folder }));
+      } catch {
+        // Not a readable folder — the remaining drops still go through.
+      }
+    }
+    if (clips.length === 0) {
+      setError("Nothing in that drop was a supported video clip.");
+      return;
+    }
+    acceptFiles(clips);
+  }
+
+  const dropZone = useFileDrop({
+    accept: acceptsDroppedPath,
+    enabled: !running,
+    onDrop: (paths) => void acceptDroppedPaths(paths),
+  });
+
+  async function pickOutputFolder() {
+    const selected = await open({ multiple: false, directory: true });
+    if (!selected || Array.isArray(selected)) return;
+    setOutputFolder(selected);
+    setQueue((items) => refreshOutputs(items, selected));
+  }
+
+  function updateFactor(next: InterpolateFactor) {
+    setFactor(next);
+    setQueue((items) => refreshOutputs(items, outputFolder, next, naming));
+  }
+
+  function updateNaming(next: InterpolateNamingMode) {
+    setNaming(next);
+    setQueue((items) => refreshOutputs(items, outputFolder, factor, next));
+  }
+
+  function updateRateIntent(next: InterpolateRateIntent) {
+    const nextFactor = next === "factor" && factor > 4 ? 4 : factor;
+    if (nextFactor !== factor) setFactor(nextFactor);
+    setRateIntent(next);
+    setQueue((items) => refreshOutputs(items, outputFolder, nextFactor, naming, next, targetFps));
+  }
+
+  function updateTargetFps(next: number) {
+    setTargetFps(next);
+    setQueue((items) => refreshOutputs(items, outputFolder, factor, naming, rateIntent, next));
+  }
+
+  function updateOutputFormat(next: InterpolateOutputFormat) {
+    setOutputFormat(next);
+    setQueue((items) =>
+      refreshOutputs(items, outputFolder, factor, naming, rateIntent, targetFps, next)
+    );
+  }
+
+  async function runInterpolation() {
+    if (running || interpolationBusy || queue.length === 0 || !outputFolder || !status) return;
+    interpolationBusy = true;
+    setRunning(true);
+    setCancelling(false);
+    setError(null);
+    setResult(null);
+    setEtaSeconds(null);
+    setProgress({ type: "progress", stage: "dependencies", percent: -1, message: "Preparing the interpolation queue" });
+    measuredClipSeconds.current = [];
+    currentClipIndex.current = 0;
+    const jobs = refreshOutputs(queue).map((item) => ({ input: item.input, output: item.output }));
+    setQueue((items) => refreshOutputs(items).map((item) => ({ ...item, status: "queued", message: undefined })));
+    try {
+      const raw = await invoke<string>("interpolate_run", {
+        jobs,
+        factor,
+        targetFps: rateIntent === "target" ? targetFps : null,
+        slowMotion: rateIntent === "slow-motion",
+        model,
+        gpu: useGpu,
+        half: useGpu,
+        outputFormat,
+        rateMode,
+        quality,
+        bitrateMbps,
+      });
+      const done = parseBridgePayload<InterpolateDone>(raw);
+      setResult(done);
+      setQueue((items) => items.map((item) => {
+        const outcome = done.outcomes.find((candidate) =>
+          candidate.input.toLocaleLowerCase() === item.input.toLocaleLowerCase()
+        );
+        return {
+          ...item,
+          output: outcome?.output || item.output,
+          status: outcome?.ok ? "done" : "failed",
+          message: outcome?.error,
+        };
+      }));
+    } catch (cause) {
+      if (!cancelling) setError(readBridgeError(cause));
+    } finally {
+      interpolationBusy = false;
+      setRunning(false);
+      setCancelling(false);
+      setProgress(null);
+    }
+  }
+
+  async function cancelInterpolation() {
+    if (!running || cancelling) return;
+    setCancelling(true);
+    setProgress((current) => ({
+      ...(current || { type: "progress" }),
+      stage: "cancelling",
+      percent: -1,
+      message: "Stopping the active clip and keeping finished files",
+    }));
+    try {
+      await invoke("cancel_interpolate");
+    } finally {
+      interpolationBusy = false;
+      setRunning(false);
+      setCancelling(false);
+      setProgress(null);
+      setError("Interpolation cancelled. Finished clips were kept.");
+      setQueue((items) => items.map((item) =>
+        item.status === "running" ? { ...item, status: "queued" } : item
+      ));
+    }
+  }
+
+  const completed = queue.filter((item) => item.status === "done").length;
+  const currentPercent = progress?.percent && progress.percent > 0 ? progress.percent : 0;
+  const currentIndex = progress?.clipIndex || completed;
+  const overallPercent = queue.length
+    ? ((Math.max(0, currentIndex - 1) + currentPercent / 100) / queue.length) * 100
+    : 0;
+  const gpuReady = Boolean(status?.hardware.hasCuda);
+  const supportsRateControl = OUTPUT_FORMATS.find((entry) => entry.key === outputFormat)?.rateControl ?? true;
+  const outputSpec: VideoControlSpec = rateMode === "quality"
+    ? {
+      label: "Constant quality",
+      valueLabel: useGpu ? "CQ" : "CRF",
+      help: "Lower values preserve more detail and create larger files.",
+      min: 14,
+      max: 28,
+      step: 1,
+      defaultValue: 18,
+      suffix: "",
+    }
+    : {
+      label: rateMode === "cbr" ? "Constant bitrate" : "Target bitrate",
+      valueLabel: "Mbps",
+      help: rateMode === "cbr"
+        ? "The encoder holds this bitrate throughout the clip."
+        : "The encoder averages around this bitrate.",
+      min: 1,
+      max: 200,
+      step: 1,
+      defaultValue: 20,
+      suffix: "",
+    };
+
+  return (
+    <section
+      ref={dropZone.ref}
+      className={`conversion-panel interpolate-panel drop-zone${dropZone.hover ? " is-drop-target" : ""}`}
+    >
+      <div className="drop-zone-overlay">
+        <Upload size={32} strokeWidth={1.8} />
+        <span>Drop clips or a folder to smooth</span>
+        <small>MP4 · MKV · MOV · WEBM · AVI · M4V</small>
+      </div>
+      <header className="conversion-hero interpolate-hero">
+        <div>
+          <span className="conversion-kicker">Motion synthesis</span>
+          <h2>Smooth the shot, keep the cut.</h2>
+          <p>Add short AMV clips as a batch. The model loads once, inserts new frames, and keeps the original audio aligned.</p>
+        </div>
+        <div className={`conversion-compat ${useGpu && gpuReady ? "is-ready" : "is-locked"}`}>
+          {useGpu && gpuReady ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+          <span>
+            {!status ? "Checking hardware" : useGpu && gpuReady
+              ? `${status.hardware.device || "NVIDIA GPU"} · half precision`
+              : "CPU mode · substantially slower"}
+          </span>
+        </div>
+      </header>
+
+      <div className="interpolate-layout">
+        <div className="interpolate-queue-column">
+          <section className="interpolate-queue-pane" aria-label="Interpolation queue">
+            <div className="interpolate-queue-toolbar">
+              <div>
+                <span className="conversion-field-label">Clip queue</span>
+                <strong>{queue.length === 0 ? "No clips yet" : `${queue.length} clip${queue.length === 1 ? "" : "s"}`}</strong>
+              </div>
+              <div className="interpolate-add-actions">
+                <button type="button" className="conversion-pick-btn" disabled={running} onClick={() => void pickFiles()}>
+                  <FilePlus2 size={15} /> Add clips
+                </button>
+                <button type="button" className="conversion-pick-btn" disabled={running} onClick={() => void pickFolderInputs()}>
+                  <FolderOpen size={15} /> Add folder
+                </button>
+              </div>
+            </div>
+
+            {queue.length === 0 ? (
+              <button type="button" className="interpolate-empty" onClick={() => void pickFiles()}>
+                <Sparkles size={24} />
+                <strong>Build a smoothing queue</strong>
+                <span>Drop clips or a folder anywhere on this page, or click to browse. MP4, MKV, MOV, WebM, AVI, and M4V are accepted.</span>
+              </button>
+            ) : (
+              <div className="interpolate-queue-list">
+                {queue.map((item, index) => (
+                  <div className={`interpolate-queue-item is-${item.status}`} key={item.input}>
+                    <span className="interpolate-queue-index">{String(index + 1).padStart(2, "0")}</span>
+                    <div className="interpolate-queue-copy">
+                      <strong title={item.input}>{fileName(item.input)}</strong>
+                      <span title={item.output}>{item.message || (item.output ? fileName(item.output) : "Choose an output folder")}</span>
+                    </div>
+                    <span className="interpolate-queue-state">
+                      {item.status === "running" ? <Loader2 size={14} className="audio-spin" />
+                        : item.status === "done" ? <Check size={14} />
+                          : item.status === "failed" ? <XCircle size={14} />
+                            : "Queued"}
+                    </span>
+                    <button
+                      type="button"
+                      className="interpolate-remove"
+                      aria-label={`Remove ${fileName(item.input)}`}
+                      disabled={running}
+                      onClick={() => setQueue((items) => items.filter((candidate) => candidate.input !== item.input))}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="interpolate-encoding" aria-label="Output encoding">
+            <span className="conversion-field-label">Output encoding</span>
+            <div className="interpolate-formats">
+              {OUTPUT_FORMATS.map((entry) => (
+                <button
+                  type="button"
+                  className={outputFormat === entry.key ? "is-active" : ""}
+                  disabled={running}
+                  aria-pressed={outputFormat === entry.key}
+                  onClick={() => updateOutputFormat(entry.key)}
+                  key={entry.key}
+                >
+                  <strong>{entry.label}</strong>
+                  <span>{entry.hint}</span>
+                </button>
+              ))}
+            </div>
+            {supportsRateControl ? (
+              <div className="interpolate-encoding-body">
+                <div className="conversion-segment interpolate-rate-mode">
+                  {(["quality", "vbr", "cbr"] as InterpolateRateMode[]).map((value) => (
+                    <button
+                      type="button"
+                      className={rateMode === value ? "is-active" : ""}
+                      disabled={running}
+                      onClick={() => setRateMode(value)}
+                      key={value}
+                    >
+                      {value === "quality" ? "Quality" : value.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <VideoOutputControl
+                  spec={outputSpec}
+                  value={rateMode === "quality" ? quality : bitrateMbps}
+                  disabled={running}
+                  onChange={rateMode === "quality" ? setQuality : setBitrateMbps}
+                />
+              </div>
+            ) : (
+              <p className="interpolate-encoding-note">
+                ProRes keeps almost everything the model produced, so there is nothing to tune.
+                Expect files several times larger than the source.
+              </p>
+            )}
+          </section>
+        </div>
+
+        <aside className="interpolate-controls">
+          <div className="interpolate-control">
+            <span className="conversion-field-label">Frame rate</span>
+            <div className="conversion-segment interpolate-rate-intent">
+              <button type="button" className={rateIntent === "factor" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("factor")}>
+                Multiplier
+              </button>
+              <button type="button" className={rateIntent === "target" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("target")}>
+                Target FPS
+              </button>
+              <button type="button" className={rateIntent === "slow-motion" ? "is-active" : ""} disabled={running} onClick={() => updateRateIntent("slow-motion")}>
+                Slow motion
+              </button>
+            </div>
+            <div className={`conversion-segment interpolate-factor${rateIntent === "slow-motion" ? " is-slow-motion" : ""}`}>
+              {(rateIntent === "target"
+                ? [30, 60, 120]
+                : rateIntent === "slow-motion"
+                  ? [2, 3, 4, 8, 16, 32, 64]
+                  : [2, 3, 4]).map((value) => (
+                <button
+                  type="button"
+                  className={(rateIntent === "target" ? targetFps === value : factor === value) ? "is-active" : ""}
+                  disabled={running}
+                  onClick={() => rateIntent === "target"
+                    ? updateTargetFps(value)
+                    : updateFactor(value as InterpolateFactor)}
+                  key={value}
+                >
+                  {value}{rateIntent === "target" ? "" : "x"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="interpolate-control">
+            <span className="conversion-field-label">Model</span>
+            <div className="interpolate-models">
+              {(["rife4.25", "rife4.6"] as InterpolateModelKey[]).map((value) => (
+                <button
+                  type="button"
+                  className={model === value ? "is-active" : ""}
+                  disabled={running}
+                  aria-pressed={model === value}
+                  onClick={() => setModel(value)}
+                  key={value}
+                >
+                  <strong>{value === "rife4.25" ? "RIFE 4.25" : "RIFE 4.6"}</strong>
+                  <span>{value === "rife4.25" ? "Best anime detail" : "Lower memory"}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="interpolate-control">
+            <span className="conversion-field-label">Output folder</span>
+            <button type="button" className="interpolate-folder" disabled={running} onClick={() => void pickOutputFolder()}>
+              <FolderOpen size={15} />
+              <span title={outputFolder}>{outputFolder || "Choose folder"}</span>
+            </button>
+          </div>
+
+          <div className="interpolate-control">
+            <span className="conversion-field-label">File naming</span>
+            <div className="conversion-segment">
+              <button type="button" className={naming === "suffix" ? "is-active" : ""} disabled={running} onClick={() => updateNaming("suffix")}>
+                Add _{rateIntent === "target" ? `${targetFps}fps` : rateIntent === "slow-motion" ? `${factor}x-slowmo` : `${factor}x`}
+              </button>
+              <button type="button" className={naming === "source-name" ? "is-active" : ""} disabled={running} onClick={() => updateNaming("source-name")}>
+                Source name
+              </button>
+            </div>
+          </div>
+
+          <div className="interpolate-hardware-toggle">
+            <div>
+              <Gauge size={15} />
+              <span>Processing</span>
+            </div>
+            <div className="conversion-segment">
+              <button type="button" className={useGpu ? "is-active" : ""} disabled={running || !gpuReady} onClick={() => setUseGpu(true)}>GPU</button>
+              <button type="button" className={!useGpu ? "is-active" : ""} disabled={running} onClick={() => setUseGpu(false)}>CPU</button>
+            </div>
+          </div>
+
+          {!useGpu && (
+            <div className="interpolate-warning">
+              <AlertTriangle size={16} />
+              <span>At 1080p, CPU interpolation can take several minutes for each clip. The queue remains usable, but GPU mode is the practical path for batches.</span>
+            </div>
+          )}
+
+          {error && <div className="interpolate-result is-error">{error}</div>}
+          {result && !running && (
+            <div className={`interpolate-result ${result.failed ? "is-warning" : "is-success"}`}>
+              {result.succeeded} finished{result.failed ? ` · ${result.failed} failed` : ""}.
+              {result.sceneHolds > 0 ? ` ${result.sceneHolds} hard cut${result.sceneHolds === 1 ? "" : "s"} held cleanly.` : ""}
+            </div>
+          )}
+
+          {running ? (
+            <InterpolateProgressCard
+              progress={progress}
+              overallPercent={overallPercent}
+              completed={completed}
+              total={queue.length}
+              cadenceSteps={rateIntent === "target" ? 5 : factor}
+              cadenceLabel={rateIntent === "target"
+                ? `${targetFps} fps target cadence`
+                : rateIntent === "slow-motion"
+                  ? `${factor}x slow motion`
+                  : `${factor}x frame cadence`}
+              etaSeconds={etaSeconds}
+              cancelling={cancelling}
+              onCancel={() => void cancelInterpolation()}
+            />
+          ) : (
+            <button
+              type="button"
+              className="conversion-run-btn interpolate-run"
+              disabled={!status || queue.length === 0 || !outputFolder}
+              onClick={() => void runInterpolation()}
+            >
+              <Sparkles size={16} />
+              Interpolate {queue.length || ""} clip{queue.length === 1 ? "" : "s"}
+            </button>
+          )}
+        </aside>
+      </div>
+    </section>
+  );
+}

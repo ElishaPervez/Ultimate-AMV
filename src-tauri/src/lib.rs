@@ -9,9 +9,11 @@ mod audio_cmds;
 mod background_img;
 mod clips;
 mod config;
+mod deadframe_cmds;
 mod discord;
 mod downloads;
 mod eyedropper;
+mod interpolate_cmds;
 mod logging;
 mod preview;
 mod python_env;
@@ -29,9 +31,10 @@ pub(crate) use downloads::{content_fingerprint, sanitize_path_segment, short_sta
 pub(crate) use logging::{append_app_log, app_state_dir, log_error, log_info, log_warn, reset_app_logs, truncate_log_text};
 pub(crate) use preview::serialize_clip_preview_done;
 pub(crate) use python_env::{
-    app_root, apply_python_env, apply_python_env_async, audio_cli_path, clear_child_pid,
-    clip_cli_path, bgremove_cli_path, cmd, find_tool, kill_child_pid, python_exe, run_audio_cli,
-    run_bgremove_cli, store_child_pid, tools_dir_path,
+    app_root, apply_python_env, apply_python_env_async, audio_cli_path, bridge_error_text,
+    clear_child_pid, clip_cli_path, bgremove_cli_path, cmd, deadframe_cli_path, find_tool,
+    interpolate_cli_path, kill_child_pid, python_exe_checked, run_audio_cli, run_bgremove_cli,
+    run_deadframe_cli, run_interpolate_cli, store_child_pid, tools_dir_path,
 };
 pub(crate) use video_cmds::{
     canonical_input_path, command_available, emit_conversion_progress, ensure_tool, ffmpeg_listing,
@@ -65,6 +68,14 @@ pub(crate) struct ConversionDone {
 
 pub(crate) static AUDIO_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static CLIP_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+// Cancel is a request for the WHOLE export, not just for the ffmpeg process
+// that happens to be running. An export like smart cut runs five processes back
+// to back per clip, and killing a pid only works while one is actually alive —
+// a click that lands in the gap between two of them would otherwise be
+// forgotten and the export would carry on. Set on cancel, cleared when a new
+// export starts, checked either side of every clip ffmpeg run.
+pub(crate) static CLIP_CANCEL_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 // Featherweight previews: the in-flight source-proxy ffmpeg build. Mirrors
 // CLIP_CHILD_PID so a new source selection / app teardown cancels it.
 pub(crate) static PROXY_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
@@ -76,6 +87,15 @@ pub(crate) static PROXY_BUILD_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 pub(crate) static DOWNLOAD_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static VIDEO_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 pub(crate) static BGREMOVE_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+pub(crate) static INTERPOLATE_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+pub(crate) static INTERPOLATE_ACTIVE_OUTPUT: OnceLock<Mutex<Option<std::path::PathBuf>>> =
+    OnceLock::new();
+// Dead-frame removal gets its own PID slot on purpose: sharing the
+// interpolation one would make cancelling either feature kill the other's
+// sidecar and delete the wrong half-written file.
+pub(crate) static DEADFRAME_CHILD_PID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+pub(crate) static DEADFRAME_ACTIVE_OUTPUT: OnceLock<Mutex<Option<std::path::PathBuf>>> =
+    OnceLock::new();
 // Raw HANDLE to the Job Object set up by setup_kill_on_close_job().
 // Stored as usize so we can revisit it across threads / from a Tauri command
 // (windows-rs HANDLE is !Send). prepare_for_update() reopens it to drop
@@ -263,6 +283,8 @@ fn prepare_for_update() -> Result<(), String> {
     kill_child_pid(&DOWNLOAD_CHILD_PID);
     kill_child_pid(&VIDEO_CHILD_PID);
     kill_child_pid(&BGREMOVE_CHILD_PID);
+    kill_child_pid(&INTERPOLATE_CHILD_PID);
+    kill_child_pid(&DEADFRAME_CHILD_PID);
     kill_child_pid(&wallpaper::WALLPAPER_CHILD_PID);
     if let Some(mutex) = CLIP_SERVER.get() {
         let mut guard = mutex.blocking_lock();
@@ -389,6 +411,8 @@ pub fn run() {
                 kill_child_pid(&DOWNLOAD_CHILD_PID);
                 kill_child_pid(&VIDEO_CHILD_PID);
                 kill_child_pid(&BGREMOVE_CHILD_PID);
+                kill_child_pid(&INTERPOLATE_CHILD_PID);
+                kill_child_pid(&DEADFRAME_CHILD_PID);
                 kill_child_pid(&wallpaper::WALLPAPER_CHILD_PID);
 
                 // Kill persistent server
@@ -452,6 +476,17 @@ pub fn run() {
             bgremove_cmds::bgremove_process,
             bgremove_cmds::bgremove_save_preview,
             bgremove_cmds::cancel_bgremove,
+            interpolate_cmds::interpolate_status,
+            interpolate_cmds::interpolate_list_folder,
+            interpolate_cmds::interpolate_run,
+            interpolate_cmds::interpolate_exported_clips,
+            interpolate_cmds::cancel_interpolate,
+            deadframe_cmds::deadframe_analyze,
+            deadframe_cmds::deadframe_preview,
+            deadframe_cmds::deadframe_export,
+            deadframe_cmds::deadframe_list_folder,
+            deadframe_cmds::deadframe_clear_previews,
+            deadframe_cmds::cancel_deadframe,
             open_path,
             reveal_in_folder,
             tools::tools_status,

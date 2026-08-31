@@ -56,6 +56,8 @@ export interface UsePlaylistLoopOptions {
   active: boolean;
   /** Force the timeupdate fallback even when rVFC is available (dev tuning). */
   forceFallback?: boolean;
+  /** Playback multiplier for this grid preview. */
+  rate?: number;
   /** Per-presented-frame progress sink: (segIndex, fractionWithinSegment 0..1).
    *  SIDE-EFFECT-ONLY — write to a DOM node / ref, NEVER setState, to preserve
    *  the zero-rerender hot path. Snaps fraction to 0 at each advance. */
@@ -64,10 +66,19 @@ export interface UsePlaylistLoopOptions {
 
 export function usePlaylistLoop(
   videoRef: React.RefObject<HTMLVideoElement | null>,
-  { segments, active, forceFallback = false, onProgress }: UsePlaylistLoopOptions,
+  { segments, active, forceFallback = false, rate = 1, onProgress }: UsePlaylistLoopOptions,
 ): void {
   // rVFC unless unsupported by the runtime or the caller forces the fallback.
   const usingRvfc = RVFC_SUPPORTED && !forceFallback;
+  const rateRef = React.useRef(rate);
+  rateRef.current = rate;
+
+  // Update playing tiles in place. Keeping rate out of the main effect avoids
+  // restarting the playlist and seeking to segment zero on every slider tick.
+  React.useEffect(() => {
+    const video = videoRef.current;
+    if (video) video.playbackRate = rate;
+  }, [videoRef, rate]);
 
   // Snapshot the windows into a stable JSON key so the loop effect only re-arms
   // when the actual segment boundaries change, not on every parent re-render that
@@ -169,7 +180,7 @@ export function usePlaylistLoop(
         seekLanded = true;
         seekWatchdog = 0;
         advance();
-      }, 600);
+      }, 600 / Math.max(rateRef.current, 0.01));
       if (Number.isFinite(previewStart)) {
         video.currentTime = previewStart;
       }
@@ -263,7 +274,8 @@ export function usePlaylistLoop(
       const { previewEnd } = currentWindow();
       // setTimeout safety net: timeupdate granularity is coarse (~250ms), so we
       // arm an advance at the remaining wall time to tighten the turn-around.
-      const remainingMs = (previewEnd - video.currentTime) * 1000;
+      const remainingMs =
+        ((previewEnd - video.currentTime) * 1000) / Math.max(rateRef.current, 0.01);
       if (remainingMs > 0 && remainingMs < 1000) {
         window.clearTimeout(safetyTimer);
         safetyTimer = window.setTimeout(() => {
@@ -292,6 +304,7 @@ export function usePlaylistLoop(
     // On metadata-ready (or active edge with metadata already present): reset to
     // segment 0, seek to its window start, and start playback.
     const onLoadedMeta = () => {
+      video.playbackRate = rateRef.current;
       cancelPending();
       seekToSegment(0);
       if (usingRvfc && RVFC_SUPPORTED) {

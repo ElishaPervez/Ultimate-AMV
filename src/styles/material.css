@@ -57,6 +57,10 @@
 :root.has-app-bg .mode-switcher,
 :root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-grid,
 :root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-format-card,
+:root.has-app-bg .interpolate-queue-pane,
+:root.has-app-bg .interpolate-controls,
+:root.has-app-bg .deadframe-players,
+:root.has-app-bg .deadframe-controls,
 :root.has-app-bg .dash-hero-card,
 :root.has-app-bg .dash-stage-main > :is(.extract-vocals-button, .audio-card, .stem-mixer),
 :root.has-app-bg .dash-stage-side,
@@ -70,7 +74,7 @@
 :root.has-app-bg .terminal-log,
 :root.has-app-bg .clip-extractor-rail,
 :root.has-app-bg .download-queue-panel,
-:root.has-app-bg .home-grid {
+:root.has-app-bg .home-body {
   background: var(--material-tint);
   backdrop-filter: blur(var(--material-blur)) brightness(var(--material-brightness)) saturate(var(--material-saturate));
   -webkit-backdrop-filter: blur(var(--material-blur)) brightness(var(--material-brightness)) saturate(var(--material-saturate));
@@ -83,6 +87,10 @@
 :root.has-app-bg .u-material,
 :root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-grid,
 :root.has-app-bg .conversion-panel:not(.bgremove-panel) .conversion-format-card,
+:root.has-app-bg .interpolate-queue-pane,
+:root.has-app-bg .interpolate-controls,
+:root.has-app-bg .deadframe-players,
+:root.has-app-bg .deadframe-controls,
 :root.has-app-bg .dash-hero-card,
 :root.has-app-bg .dash-stage-main > :is(.extract-vocals-button, .audio-card, .stem-mixer),
 :root.has-app-bg .dash-stage-side,
@@ -94,7 +102,7 @@
 :root.has-app-bg .youtube-trim,
 :root.has-app-bg .download-history-panel,
 :root.has-app-bg .terminal-log,
-:root.has-app-bg .home-grid {
+:root.has-app-bg .home-body {
   border: 1px solid var(--glass-border);
 }
 
@@ -199,6 +207,48 @@
   border-radius: var(--radius-lg);
 }
 
+/* ---- Frame interpolation ------------------------------------ */
+/* Two column carriers (queue + controls). The controls column is the
+   densest small-text surface in the app — 10-11px labels, model card
+   subtitles, the encoding disclosure — so without a carrier it washed
+   straight out over a bright wallpaper. Both keep their own 12px
+   radius; the material only supplies fill, blur and edge. */
+:root.has-app-bg :is(.interpolate-queue-pane, .interpolate-controls) {
+  border-radius: var(--radius-lg);
+}
+
+/* ---- Dead frame remover ------------------------------------- */
+/* Three carriers: the shared queue pane above, the player pair, and
+   the control grid. The three control cards inside that grid become
+   chip-style surfaces rather than carriers of their own — nesting a
+   carrier costs a second backdrop snapshot per frame for nothing. */
+:root.has-app-bg .deadframe-players {
+  padding: 12px;
+  border-radius: var(--radius-lg);
+}
+
+:root.has-app-bg .deadframe-controls {
+  padding: 12px;
+  border-radius: var(--radius-xl);
+}
+
+:root.has-app-bg :is(.deadframe-dial, .deadframe-encoding, .deadframe-output) {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+}
+
+/* The gate line and the Preview button float bare between carriers;
+   the ghost-button styling washes out on a bright wallpaper. */
+:root.has-app-bg .deadframe-gate:not(.is-open) {
+  color: #e2ebf1;
+  background: rgba(6, 8, 16, 0.55);
+}
+
+:root.has-app-bg .deadframe-preview-btn {
+  background: rgba(6, 8, 16, 0.55);
+}
+
 /* ---- Vocal separation (Phase 2.3) --------------------------- */
 /* Hero + the active stage card carry their own material (one of the
    stage wrappers is visible at a time). The side column is ONE
@@ -253,7 +303,7 @@
 }
 
 /* ---- Home (Phase 2.9) --------------------------------------- */
-:root.has-app-bg .home-grid {
+:root.has-app-bg .home-body {
   padding: 16px;
   border-radius: var(--radius-xl);
 }

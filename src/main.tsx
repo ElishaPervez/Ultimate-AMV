@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
 import { logFrontend, safeLogValue } from "./lib/log";
+import { startUiScaling } from "./lib/uiScale";
 import { ErrorBoundary } from "./shell/ErrorBoundary";
 import { Root } from "./shell/Root";
 
@@ -23,6 +24,11 @@ function installFrontendLogHandlers() {
 }
 
 installFrontendLogHandlers();
+
+// Started outside React so the very first paint — the tools gate and the
+// setup wizard, both of which render before <Root/> settles — is already
+// scaled to the window instead of snapping a frame later.
+startUiScaling();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
