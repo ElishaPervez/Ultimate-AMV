@@ -438,7 +438,7 @@ pub(crate) async fn tsukyio_start_device_auth(
     let client = shared_client()?;
     let body = json!({
         "client_id": OAUTH_CLIENT_ID,
-        "scope": "profile:read vault:read",
+        "scope": "profile:read vault:read stats:read",
     });
 
     let response = client
