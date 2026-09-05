@@ -6,8 +6,8 @@
 // cross-origin calls for data), and streams downloads to disk while emitting
 // progress events the frontend can render.
 //
-// Auth is a per-user Bearer key (`tsk_...`) stored in the Python config under
-// `tsukyio_api_key`. The key is never hardcoded here.
+// OAuth credentials stay in desktop-managed account storage and renew on demand.
+// An API key from the Python config remains a separate fallback.
 //
 // Media playback/preview is NOT loaded directly from the remote stream URL:
 // WebView2 refuses to play the cross-origin `https://tsukyio.com/api/stream`
@@ -18,8 +18,8 @@
 // Windows) that proxies the upstream stream from the Rust side: it adds the
 // Bearer auth server-side, forwards the incoming `Range` header upstream, and
 // relays the 206/200 + Content-Range/Content-Type/Content-Length back to the
-// webview. This keeps the API key out of the DOM (it lives in managed state,
-// pushed via `tsukyio_set_session_key`) and lets `<video>`/`<audio>` seek.
+// webview. Credentials never enter media URLs, and previews use the same
+// renewal path as browsing and downloads.
 
 use std::{
     fs::{self, File},
@@ -118,12 +118,17 @@ fn load_persisted_tokens(path: &Path) -> Option<TsukyioTokens> {
 
 fn save_persisted_tokens(path: &Path, tokens: &TsukyioTokens) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| "Could not create Tsukyio account storage.".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|_| "Could not create Tsukyio account storage.".to_string())?;
     }
-    let data = serde_json::to_vec(tokens).map_err(|_| "Could not encode Tsukyio account.".to_string())?;
+    let data =
+        serde_json::to_vec(tokens).map_err(|_| "Could not encode Tsukyio account.".to_string())?;
     let pending = path.with_extension("json.tmp");
-    let mut file = File::create(&pending).map_err(|_| "Could not save Tsukyio account.".to_string())?;
-    file.write_all(&data).and_then(|_| file.sync_all()).map_err(|_| "Could not save Tsukyio account.".to_string())?;
+    let mut file =
+        File::create(&pending).map_err(|_| "Could not save Tsukyio account.".to_string())?;
+    file.write_all(&data)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "Could not save Tsukyio account.".to_string())?;
     drop(file);
     fs::rename(&pending, path).map_err(|_| "Could not replace saved Tsukyio account.".to_string())
 }
@@ -132,7 +137,9 @@ fn delete_persisted_tokens(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("Could not remove saved Tsukyio account. Please try disconnecting again.".into()),
+        Err(_) => {
+            Err("Could not remove saved Tsukyio account. Please try disconnecting again.".into())
+        }
     }
 }
 
@@ -173,7 +180,9 @@ impl TsukyioSession {
 
     #[cfg(test)]
     pub(crate) fn get(&self) -> Option<String> {
-        self.get_tokens().map(|t| t.access_token).or_else(|| self.legacy_key.lock().ok()?.clone())
+        self.get_tokens()
+            .map(|t| t.access_token)
+            .or_else(|| self.legacy_key.lock().ok()?.clone())
     }
 
     pub(crate) fn get_tokens(&self) -> Option<TsukyioTokens> {
@@ -184,8 +193,15 @@ impl TsukyioSession {
         self.replace_tokens(None, tokens)
     }
 
-    fn replace_tokens(&self, expected: Option<u64>, tokens: Option<TsukyioTokens>) -> Result<(), String> {
-        let mut guard = self.tokens.lock().map_err(|_| "Tsukyio account storage is unavailable.".to_string())?;
+    fn replace_tokens(
+        &self,
+        expected: Option<u64>,
+        tokens: Option<TsukyioTokens>,
+    ) -> Result<(), String> {
+        let mut guard = self
+            .tokens
+            .lock()
+            .map_err(|_| "Tsukyio account storage is unavailable.".to_string())?;
         if expected.is_some_and(|v| v != self.revision.load(Ordering::SeqCst)) {
             return Err("Tsukyio account changed. Please retry.".into());
         }
@@ -212,20 +228,32 @@ impl TsukyioSession {
 
     fn cancel_auth(&self, request_id: &str) {
         let mut pending = self.pending_auth.lock().unwrap();
-        if pending.as_ref().is_some_and(|(id, _)| id == request_id) { *pending = None; }
+        if pending.as_ref().is_some_and(|(id, _)| id == request_id) {
+            *pending = None;
+        }
     }
 
     fn attach_device_code(&self, request_id: &str, code: String) -> Result<(), String> {
         let mut pending = self.pending_auth.lock().unwrap();
         match pending.as_mut() {
-            Some((id, device_code)) if id == request_id => { *device_code = Some(code); Ok(()) }
+            Some((id, device_code)) if id == request_id => {
+                *device_code = Some(code);
+                Ok(())
+            }
             _ => Err("Authorization canceled.".into()),
         }
     }
 
-    fn finish_auth(&self, request_id: &str, code: &str, tokens: TsukyioTokens) -> Result<(), String> {
+    fn finish_auth(
+        &self,
+        request_id: &str,
+        code: &str,
+        tokens: TsukyioTokens,
+    ) -> Result<(), String> {
         let mut pending = self.pending_auth.lock().unwrap();
-        if !pending.as_ref().is_some_and(|(id, device_code)| id == request_id && device_code.as_deref() == Some(code)) {
+        if !pending.as_ref().is_some_and(|(id, device_code)| {
+            id == request_id && device_code.as_deref() == Some(code)
+        }) {
             return Err("Authorization canceled.".into());
         }
         self.set_tokens(Some(tokens))?;
@@ -250,7 +278,6 @@ pub(crate) fn tsukyio_set_session_key(
 ) {
     state.set_legacy_key(key);
 }
-
 
 /// Shared reqwest client for every Tsukyio call (JSON API, downloads, the
 /// stream/thumbnail proxies). Built once so its connection pool + TLS session
@@ -330,13 +357,40 @@ async fn fetch_user_info(access_token: &str) -> Result<TsukyioUserProfile, Strin
     }
 
     let val: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
-    let id = val.get("id").or_else(|| val.get("sub")).and_then(Value::as_str).unwrap_or("").to_string();
-    let username = val.get("username").and_then(Value::as_str).unwrap_or("").to_string();
-    let name = val.get("name").and_then(Value::as_str).map(|s| s.to_string());
-    let email = val.get("email").and_then(Value::as_str).map(|s| s.to_string());
-    let image = val.get("image").and_then(Value::as_str).map(|s| s.to_string());
-    let role = val.get("role").and_then(Value::as_str).unwrap_or("user").to_string();
-    let premium_plan = val.get("premium_plan").or_else(|| val.get("premiumPlan")).and_then(Value::as_str).unwrap_or("FREE").to_string();
+    let id = val
+        .get("id")
+        .or_else(|| val.get("sub"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let username = val
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let name = val
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let email = val
+        .get("email")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let image = val
+        .get("image")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let role = val
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user")
+        .to_string();
+    let premium_plan = val
+        .get("premium_plan")
+        .or_else(|| val.get("premiumPlan"))
+        .and_then(Value::as_str)
+        .unwrap_or("FREE")
+        .to_string();
 
     Ok(TsukyioUserProfile {
         id,
@@ -392,19 +446,36 @@ async fn refresh_token_at(state: &TsukyioSession, token_url: &str) -> Result<Str
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        log_warn("tsukyio.oauth.refresh_failed", "OAuth token refresh failed", json!({ "status": status.as_u16() }));
+        log_warn(
+            "tsukyio.oauth.refresh_failed",
+            "OAuth token refresh failed",
+            json!({ "status": status.as_u16() }),
+        );
         // If refresh fails due to revocation, clear the stale tokens
         let error = serde_json::from_str::<Value>(&text).unwrap_or_default();
-        if status == reqwest::StatusCode::UNAUTHORIZED || error.get("error").and_then(Value::as_str) == Some("invalid_grant") {
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || error.get("error").and_then(Value::as_str) == Some("invalid_grant")
+        {
             state.replace_tokens(Some(revision), None)?;
         }
         return Err(status_error(status, &text));
     }
 
     let data: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
-    let new_access = data.get("access_token").and_then(Value::as_str).ok_or("Missing access_token")?.to_string();
-    let new_refresh = data.get("refresh_token").and_then(Value::as_str).map(|s| s.to_string()).or(tokens.refresh_token.clone());
-    let expires_in = data.get("expires_in").and_then(Value::as_u64).unwrap_or(900);
+    let new_access = data
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or("Missing access_token")?
+        .to_string();
+    let new_refresh = data
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or(tokens.refresh_token.clone());
+    let expires_in = data
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .unwrap_or(900);
 
     let updated_tokens = TsukyioTokens {
         access_token: new_access.clone(),
@@ -418,14 +489,21 @@ async fn refresh_token_at(state: &TsukyioSession, token_url: &str) -> Result<Str
 }
 
 /// Resolves an effective Bearer token, giving precedence to the active OAuth session or explicit fallback.
-async fn resolve_token(state: &TsukyioSession, explicit_token: Option<&str>) -> Result<String, String> {
+async fn resolve_token(
+    state: &TsukyioSession,
+    explicit_token: Option<&str>,
+) -> Result<String, String> {
     if state.get_tokens().is_some() {
         return refresh_token_if_needed(state).await;
     }
     if let Some(tok) = explicit_token.filter(|t| !t.trim().is_empty()) {
         return Ok(tok.trim().to_string());
     }
-    state.legacy_key.lock().ok().and_then(|g| g.clone())
+    state
+        .legacy_key
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
         .ok_or_else(|| "Connect a Tsukyio account or add an API key in Settings.".into())
 }
 
@@ -456,13 +534,20 @@ pub(crate) async fn tsukyio_start_device_auth(
     }
 
     let data = serde_json::from_str::<Value>(&text).map_err(|e| format!("Parse error: {e}"))?;
-    let code = data.get("device_code").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or("Missing device code")?;
+    let code = data
+        .get("device_code")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("Missing device code")?;
     state.attach_device_code(&request_id, code.to_string())?;
     Ok(data)
 }
 
 #[tauri::command]
-pub(crate) fn tsukyio_cancel_device_auth(state: tauri::State<'_, TsukyioSession>, request_id: String) {
+pub(crate) fn tsukyio_cancel_device_auth(
+    state: tauri::State<'_, TsukyioSession>,
+    request_id: String,
+) {
     state.cancel_auth(&request_id);
 }
 
@@ -472,7 +557,13 @@ pub(crate) async fn tsukyio_poll_device_auth(
     device_code: String,
     request_id: String,
 ) -> Result<Value, String> {
-    if !state.pending_auth.lock().unwrap().as_ref().is_some_and(|(id, code)| id == &request_id && code.as_deref() == Some(&device_code)) {
+    if !state
+        .pending_auth
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|(id, code)| id == &request_id && code.as_deref() == Some(&device_code))
+    {
         return Err("Authorization canceled.".into());
     }
     let client = shared_client()?;
@@ -496,7 +587,11 @@ pub(crate) async fn tsukyio_poll_device_auth(
     if !status.is_success() {
         let val: Value = serde_json::from_str(&text).unwrap_or_default();
         let error_code = val.get("error").and_then(Value::as_str).unwrap_or("error");
-        let error_desc = val.get("error_description").or_else(|| val.get("message")).and_then(Value::as_str).unwrap_or("Authentication pending.");
+        let error_desc = val
+            .get("error_description")
+            .or_else(|| val.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("Authentication pending.");
 
         return Ok(json!({
             "status": "pending",
@@ -506,8 +601,15 @@ pub(crate) async fn tsukyio_poll_device_auth(
     }
 
     let val: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
-    let access_token = val.get("access_token").and_then(Value::as_str).ok_or("Missing access_token")?.to_string();
-    let refresh_token = val.get("refresh_token").and_then(Value::as_str).map(|s| s.to_string());
+    let access_token = val
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or("Missing access_token")?
+        .to_string();
+    let refresh_token = val
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
     let expires_in = val.get("expires_in").and_then(Value::as_u64).unwrap_or(900);
 
     // Fetch user profile immediately
@@ -564,7 +666,12 @@ pub(crate) async fn tsukyio_disconnect(
                 "client_id": OAUTH_CLIENT_ID,
                 "token": tokens.refresh_token.unwrap_or(tokens.access_token),
             });
-            let _ = c.post(format!("{TSUKYIO_BASE}/oauth/revoke")).json(&body).timeout(Duration::from_secs(5)).send().await;
+            let _ = c
+                .post(format!("{TSUKYIO_BASE}/oauth/revoke"))
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
         }
     }
     Ok(())
@@ -599,12 +706,20 @@ pub(crate) async fn tsukyio_test_connection(
     state: tauri::State<'_, TsukyioSession>,
     api_key: Option<String>,
 ) -> Result<Value, String> {
-    log_info("tsukyio.test.start", "Testing Tsukyio connection", Value::Null);
+    log_info(
+        "tsukyio.test.start",
+        "Testing Tsukyio connection",
+        Value::Null,
+    );
     let token = resolve_token(&state, api_key.as_deref()).await?;
     let url = format!("{TSUKYIO_BASE}/stats/global");
     let result = get_json(&token, &url).await;
     match &result {
-        Ok(_) => log_info("tsukyio.test.complete", "Tsukyio connection OK", Value::Null),
+        Ok(_) => log_info(
+            "tsukyio.test.complete",
+            "Tsukyio connection OK",
+            Value::Null,
+        ),
         Err(error) => log_warn(
             "tsukyio.test.error",
             "Tsukyio connection failed",
@@ -635,7 +750,10 @@ pub(crate) async fn tsukyio_browse(
         ("offset", offset.to_string()),
         ("includeDownloads", "true".to_string()),
     ];
-    if let Some(cat) = category.as_deref().filter(|c| !c.trim().is_empty() && *c != "all") {
+    if let Some(cat) = category
+        .as_deref()
+        .filter(|c| !c.trim().is_empty() && *c != "all")
+    {
         query.push(("category", cat.to_string()));
     }
     if let Some(rel) = path.as_deref().filter(|p| !p.trim().is_empty()) {
@@ -677,7 +795,10 @@ pub(crate) async fn tsukyio_search(
     let auth = bearer_value(&token)?;
     let mut query: Vec<(&str, String)> = vec![("q", q.clone())];
 
-    if let Some(cat) = category.as_deref().filter(|c| !c.trim().is_empty() && *c != "all") {
+    if let Some(cat) = category
+        .as_deref()
+        .filter(|c| !c.trim().is_empty() && *c != "all")
+    {
         query.push(("category", cat.to_string()));
     }
     log_info(
@@ -855,8 +976,8 @@ pub(crate) async fn tsukyio_download(
     }
 
     let total = response.content_length();
-    let mut file = File::create(&temp)
-        .map_err(|error| format!("Could not create download file: {error}"))?;
+    let mut file =
+        File::create(&temp).map_err(|error| format!("Could not create download file: {error}"))?;
     let mut stream = response.bytes_stream();
     let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
@@ -1167,7 +1288,9 @@ pub(crate) fn handle_stream_protocol(
     // present in case the vault tightens auth later.
     if let Some(thumb_path) = thumb_path_from_uri(&uri) {
         tauri::async_runtime::spawn(async move {
-            let key = resolve_token(&app.state::<TsukyioSession>(), None).await.ok();
+            let key = resolve_token(&app.state::<TsukyioSession>(), None)
+                .await
+                .ok();
             let response = proxy_thumbnail(key.as_deref(), &thumb_path).await;
             let response = match response {
                 Ok(response) => response,
@@ -1207,7 +1330,10 @@ pub(crate) fn handle_stream_protocol(
     tauri::async_runtime::spawn(async move {
         let key = match resolve_token(&app.state::<TsukyioSession>(), None).await {
             Ok(key) => key,
-            Err(_) => { responder.respond(proxy_error(401)); return; }
+            Err(_) => {
+                responder.respond(proxy_error(401));
+                return;
+            }
         };
         let response = proxy_stream(&key, &asset_id, range_header.as_deref()).await;
         let response = match response {
@@ -1249,7 +1375,10 @@ async fn proxy_stream(
     range_header: Option<&str>,
 ) -> Result<tauri::http::Response<Vec<u8>>, (u16, String)> {
     // Resolve the requested range, defaulting to an open-ended read from 0.
-    let requested = parse_range_header(range_header).unwrap_or(RangeSpec { start: 0, end: None });
+    let requested = parse_range_header(range_header).unwrap_or(RangeSpec {
+        start: 0,
+        end: None,
+    });
 
     // Build the upstream Range. Crucially we NEVER send an explicit end that can
     // exceed the file size: an open-ended caller range stays open-ended upstream,
@@ -1327,8 +1456,8 @@ async fn proxy_stream(
         let mut body: Vec<u8> = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
+            let chunk =
+                chunk.map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
             if body.len() as u64 + chunk.len() as u64 > PROXY_MAX_FULL_BODY {
                 return Err((
                     502u16,
@@ -1360,8 +1489,8 @@ async fn proxy_stream(
     let mut body: Vec<u8> = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
+        let chunk =
+            chunk.map_err(|e| (502u16, format!("Could not read Tsukyio stream body: {e}")))?;
         let remaining = cap - body.len();
         if chunk.len() >= remaining {
             body.extend_from_slice(&chunk[..remaining]);
@@ -1436,7 +1565,10 @@ async fn proxy_thumbnail(
 
     let status = response.status();
     if !status.is_success() {
-        return Err((status.as_u16(), format!("Upstream thumbnail returned {status}")));
+        return Err((
+            status.as_u16(),
+            format!("Upstream thumbnail returned {status}"),
+        ));
     }
 
     let content_type = response
@@ -1460,8 +1592,12 @@ async fn proxy_thumbnail(
     let mut body: Vec<u8> = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| (502u16, format!("Could not read Tsukyio thumbnail body: {e}")))?;
+        let chunk = chunk.map_err(|e| {
+            (
+                502u16,
+                format!("Could not read Tsukyio thumbnail body: {e}"),
+            )
+        })?;
         if body.len() + chunk.len() > THUMB_MAX_BODY {
             // A truncated image is useless — refuse instead of serving junk.
             return Err((502u16, "Thumbnail exceeded the size ceiling".to_string()));
@@ -1486,7 +1622,10 @@ mod tests {
     #[test]
     fn extension_falls_back_to_mp4() {
         assert_eq!(extension_for("clip", ""), "mp4");
-        assert_eq!(extension_for("clip", "Naruto/Kakashi/video_01.webm"), "webm");
+        assert_eq!(
+            extension_for("clip", "Naruto/Kakashi/video_01.webm"),
+            "webm"
+        );
         assert_eq!(extension_for("song.mp3", ""), "mp3");
         // Reject junk that isn't really an extension.
         assert_eq!(extension_for("a.b.c.verylongext", ""), "mp4");
@@ -1569,8 +1708,10 @@ mod tests {
         // The whole upstream path arrives as ONE encoded segment; a single
         // decode yields the splice-ready (still per-segment-encoded) path.
         assert_eq!(
-            thumb_path_from_uri("tsukyio://thumb/%2Fapi%2Fv%2Flinks%2FPrecuts%2FMy%2520Folder%2Fclip.jpg")
-                .as_deref(),
+            thumb_path_from_uri(
+                "tsukyio://thumb/%2Fapi%2Fv%2Flinks%2FPrecuts%2FMy%2520Folder%2Fclip.jpg"
+            )
+            .as_deref(),
             Some("/api/v/links/Precuts/My%20Folder/clip.jpg")
         );
         assert_eq!(
@@ -1647,12 +1788,14 @@ mod tests {
     fn legacy_key_does_not_replace_oauth() {
         let directory = tempfile::tempdir().unwrap();
         let session = TsukyioSession::from_path(directory.path().join("oauth.json"));
-        session.set_tokens(Some(TsukyioTokens {
-            access_token: "oauth-access".into(),
-            refresh_token: Some("oauth-refresh".into()),
-            expires_at: current_timestamp() + 900,
-            user: None,
-        })).unwrap();
+        session
+            .set_tokens(Some(TsukyioTokens {
+                access_token: "oauth-access".into(),
+                refresh_token: Some("oauth-refresh".into()),
+                expires_at: current_timestamp() + 900,
+                user: None,
+            }))
+            .unwrap();
         session.set_legacy_key(Some("old-api-key".into()));
         assert_eq!(session.get().as_deref(), Some("oauth-access"));
         session.set_legacy_key(None);
@@ -1663,11 +1806,13 @@ mod tests {
     async fn expired_access_token_without_refresh_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let session = TsukyioSession::from_path(directory.path().join("oauth.json"));
-        session.set_tokens(Some(TsukyioTokens {
-            access_token: "expired-access".into(),
-            expires_at: 1,
-            ..Default::default()
-        })).unwrap();
+        session
+            .set_tokens(Some(TsukyioTokens {
+                access_token: "expired-access".into(),
+                expires_at: 1,
+                ..Default::default()
+            }))
+            .unwrap();
         assert!(refresh_token_if_needed(&session).await.is_err());
     }
 
@@ -1695,7 +1840,9 @@ mod tests {
         session.begin_auth("first".into());
         session.attach_device_code("first", "code".into()).unwrap();
         session.cancel_auth("first");
-        assert!(session.finish_auth("first", "code", TsukyioTokens::default()).is_err());
+        assert!(session
+            .finish_auth("first", "code", TsukyioTokens::default())
+            .is_err());
         assert!(!path.exists());
         assert!(session.get_tokens().is_none());
     }
@@ -1709,8 +1856,20 @@ mod tests {
         session.begin_auth("second".into());
         session.cancel_auth("first");
         session.attach_device_code("second", "code".into()).unwrap();
-        session.finish_auth("second", "code", TsukyioTokens { access_token: "second-account".into(), ..Default::default() }).unwrap();
-        assert_eq!(TsukyioSession::from_path(path).get().as_deref(), Some("second-account"));
+        session
+            .finish_auth(
+                "second",
+                "code",
+                TsukyioTokens {
+                    access_token: "second-account".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            TsukyioSession::from_path(path).get().as_deref(),
+            Some("second-account")
+        );
     }
 
     #[test]
@@ -1718,10 +1877,23 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("oauth.json");
         let session = TsukyioSession::from_path(path.clone());
-        session.set_tokens(Some(TsukyioTokens { access_token: "old".into(), ..Default::default() })).unwrap();
+        session
+            .set_tokens(Some(TsukyioTokens {
+                access_token: "old".into(),
+                ..Default::default()
+            }))
+            .unwrap();
         let revision = session.revision.load(Ordering::SeqCst);
         session.clear_auth().unwrap();
-        assert!(session.replace_tokens(Some(revision), Some(TsukyioTokens { access_token: "late".into(), ..Default::default() })).is_err());
+        assert!(session
+            .replace_tokens(
+                Some(revision),
+                Some(TsukyioTokens {
+                    access_token: "late".into(),
+                    ..Default::default()
+                })
+            )
+            .is_err());
         assert!(TsukyioSession::from_path(path).get_tokens().is_none());
     }
 
@@ -1752,20 +1924,39 @@ mod tests {
                 assert!(request.contains("old-refresh"));
                 seen.fetch_add(1, Ordering::SeqCst);
                 let body = r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":900}"#;
-                let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
                 stream.write_all(reply.as_bytes()).await.unwrap();
             }
         });
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("oauth.json");
         let session = TsukyioSession::from_path(path.clone());
-        session.set_tokens(Some(TsukyioTokens {
-            access_token: "old-access".into(), refresh_token: Some("old-refresh".into()), expires_at: 1, user: None,
-        })).unwrap();
-        let results = futures_util::future::join_all((0..8).map(|_| refresh_token_at(&session, &url))).await;
-        assert!(results.iter().all(|result| result.as_deref() == Ok("new-access")));
+        session
+            .set_tokens(Some(TsukyioTokens {
+                access_token: "old-access".into(),
+                refresh_token: Some("old-refresh".into()),
+                expires_at: 1,
+                user: None,
+            }))
+            .unwrap();
+        let results =
+            futures_util::future::join_all((0..8).map(|_| refresh_token_at(&session, &url))).await;
+        assert!(results
+            .iter()
+            .all(|result| result.as_deref() == Ok("new-access")));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(TsukyioSession::from_path(path).get_tokens().unwrap().refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(
+            TsukyioSession::from_path(path)
+                .get_tokens()
+                .unwrap()
+                .refresh_token
+                .as_deref(),
+            Some("new-refresh")
+        );
         server.abort();
     }
 }
