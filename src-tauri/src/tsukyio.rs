@@ -520,7 +520,9 @@ pub(crate) async fn tsukyio_poll_device_auth(
         user: user_profile.clone(),
     };
 
-    state.finish_auth(&request_id, &device_code, tokens)?;
+    if let Err(message) = state.finish_auth(&request_id, &device_code, tokens) {
+        return Ok(json!({ "status": "error", "error": "session_not_saved", "message": message }));
+    }
 
     Ok(json!({
         "status": "success",

@@ -65,6 +65,29 @@ function renderFeatureSettings(overrides: {
 describe('FeatureSettings', () => {
   beforeEach(() => {
     mockInvoke('set_config', () => JSON.stringify(baseConfig))
+    // Non-account tests leave the initial account check pending.
+    mockInvoke('tsukyio_get_auth_state', () => new Promise(() => {}))
+    mockInvoke('frontend_log', async () => {})
+  })
+
+  it('keeps Disconnect available when the profile could not be loaded', async () => {
+    mockInvoke('tsukyio_get_auth_state', async () => ({ isAuthenticated: true, user: null }))
+    mockInvoke('tsukyio_disconnect', async () => { throw 'Could not remove saved account.' })
+    renderFeatureSettings()
+    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not remove saved account.')
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument()
+  })
+
+  it('shows a sign-in failure in Settings', async () => {
+    mockInvoke('tsukyio_get_auth_state', async () => ({ isAuthenticated: false }))
+    mockInvoke('tsukyio_start_device_auth', async () => { throw 'Tsukyio is unavailable.' })
+    mockInvoke('tsukyio_cancel_device_auth', async () => {})
+    renderFeatureSettings()
+    await act(async () => {})
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Tsukyio' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Tsukyio is unavailable.')
+    expect(screen.getByRole('button', { name: 'Connect Tsukyio' })).toBeEnabled()
   })
 
   it('renders without crashing', () => {
