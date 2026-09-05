@@ -318,6 +318,7 @@ async fn fetch_user_info(access_token: &str) -> Result<TsukyioUserProfile, Strin
     let response = client
         .get(format!("{TSUKYIO_BASE}/oauth/userinfo"))
         .header(reqwest::header::AUTHORIZATION, auth)
+        .timeout(Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| format!("Failed to reach userinfo: {e}"))?;

@@ -29,6 +29,7 @@ export function useTsukyioAuth() {
     expiresAt: null,
   });
   const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
   const [deviceFlow, setDeviceFlow] = React.useState<DeviceAuthFlowState>({ status: "idle" });
 
   const pollTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -63,6 +64,13 @@ export function useTsukyioAuth() {
     };
   }, [checkAuth]);
 
+  React.useEffect(() => {
+    if (!authState.isAuthenticated || !authState.expiresAt) return;
+    const delay = Math.max(1000, authState.expiresAt * 1000 - Date.now() - 30000);
+    const timer = setTimeout(() => { void checkAuth(); }, delay);
+    return () => clearTimeout(timer);
+  }, [authState.isAuthenticated, authState.expiresAt, checkAuth]);
+
   // Clean up polling timer on unmount
   React.useEffect(() => {
     return () => {
@@ -89,6 +97,7 @@ export function useTsukyioAuth() {
   const startDeviceAuth = React.useCallback(async () => {
     if (attemptRef.current) return;
     const requestId = crypto.randomUUID();
+    setError(null);
     attemptRef.current = requestId;
     const current = () => attemptRef.current === requestId;
     setDeviceFlow({ status: "starting" });
@@ -181,6 +190,7 @@ export function useTsukyioAuth() {
   }, [checkAuth, cancelDeviceAuth]);
 
   const disconnect = React.useCallback(async () => {
+    setError(null);
     cancelDeviceAuth();
     checkVersionRef.current++;
     try {
@@ -188,6 +198,7 @@ export function useTsukyioAuth() {
       setAuthState({ isAuthenticated: false, user: null, expiresAt: null });
       window.dispatchEvent(new Event("tsukyio-config-changed"));
     } catch (e) {
+      setError(typeof e === "string" ? e : "Could not disconnect Tsukyio. Please try again.");
       logFrontend("warn", "tsukyio.auth.disconnect_error", "Failed to disconnect Tsukyio account", {
         error: safeLogValue(e),
       });
@@ -197,6 +208,7 @@ export function useTsukyioAuth() {
   return {
     authState,
     loading,
+    error,
     deviceFlow,
     startDeviceAuth,
     cancelDeviceAuth,

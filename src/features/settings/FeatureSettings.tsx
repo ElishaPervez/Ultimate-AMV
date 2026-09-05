@@ -47,7 +47,7 @@ export function FeatureSettings({
   setLocalDownloadPath,
   currentMode,
 }: FeatureSettingsProps) {
-  const { authState, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect } = useTsukyioAuth();
+  const { authState, error: authError, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect } = useTsukyioAuth();
   const [copiedCode, setCopiedCode] = React.useState(false);
   // Local draft of the Tsukyio key so we don't fire a config write on every
   // keystroke; persist on Save (matching how the download path persists on a
@@ -135,6 +135,7 @@ export function FeatureSettings({
 
       <div className="settings-group glass">
         <div className="settings-group-header">Tsukyio Vault</div>
+        {authError && <p className="tsukyio-device-error-text" role="alert">{authError}</p>}
         
         {authState.isAuthenticated ? (
           <div className="setting-row">

@@ -341,7 +341,7 @@ interface TsukyioPanelProps {
 }
 
 export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
-  const { authState, loading: authLoading, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect, checkAuth } = useTsukyioAuth();
+  const { authState, error: authError, loading: authLoading, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect, checkAuth } = useTsukyioAuth();
   const [copiedCode, setCopiedCode] = React.useState(false);
   const [apiKey, setApiKey] = React.useState<string | null>(null);
   const [downloadPath, setDownloadPath] = React.useState<string>("");
@@ -958,6 +958,8 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
           )}
         </div>
       </header>
+
+      {authError && <p className="tsukyio-device-error-text" role="alert">{authError}</p>}
 
       <div className="tsukyio-console u-material">
       <div className={`tsukyio-toolbar ${isHome ? "is-home" : ""}`}>

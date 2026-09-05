@@ -69,3 +69,12 @@ it("displays terminal server errors instead of polling until expiry", async () =
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(result.current.deviceFlow).toEqual({ status: "error", message: "Client unavailable" });
 });
+
+it("rechecks account access before the displayed expiration", async () => {
+  mockInvoke("tsukyio_get_auth_state", async () => ({ isAuthenticated: true, expiresAt: Date.now() / 1000 + 90 }));
+  const { result } = renderHook(useTsukyioAuth);
+  await act(async () => {});
+  mockInvoke("tsukyio_get_auth_state", async () => ({ isAuthenticated: false }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+  expect(result.current.authState.isAuthenticated).toBe(false);
+});

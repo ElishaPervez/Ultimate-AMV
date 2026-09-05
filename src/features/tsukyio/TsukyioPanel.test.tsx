@@ -240,7 +240,7 @@ describe("TsukyioPanel", () => {
 
       await waitFor(() => expect(statsSpy).toHaveBeenCalledWith({ apiKey: API_KEY }));
       expect(sessionSpy).toHaveBeenCalledWith({ key: API_KEY });
-      expect(screen.getByText(/40,000 assets across 8 categories/)).toBeInTheDocument();
+      expect(screen.getByText(/40,000 assets across 9 categories/)).toBeInTheDocument();
       // The discovery home renders tiles, not a browse grid: no fetch yet.
       expect(browseCalls).toHaveLength(0);
     });
