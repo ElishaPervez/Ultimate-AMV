@@ -416,6 +416,22 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
   // can tell a cancel apart from a real failure (clip export's pattern).
   const cancellingRef = React.useRef<Set<string>>(new Set());
 
+  React.useEffect(() => {
+    fetchToken.current++;
+    statsToken.current++;
+    setItems([]);
+    setSearchClips([]);
+    setStats(null);
+    setPreviewItem(null);
+    setAvatarFailed(false);
+    setCategory("all");
+    setCrumbs([]);
+    setSearchTerm("");
+    setActiveSearch("");
+    setPage(0);
+    setError(null);
+  }, [authState.isAuthenticated, authState.user?.id, apiKey]);
+
   const currentPath = crumbs.length > 0 ? crumbs[crumbs.length - 1].relPath : "";
   const isSearching = activeSearch.trim().length > 0;
   // The discovery home: connected, no active search, sitting at the "all" root

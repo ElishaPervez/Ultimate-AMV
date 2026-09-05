@@ -184,6 +184,29 @@ async function renderRawGrid(items: TsukyioItem[]) {
 }
 
 describe("TsukyioPanel", () => {
+  it("browses with OAuth without requiring a saved API key", async () => {
+    setupConnectedMocks();
+    mockConfig({});
+    const calls = mockBrowse([clip("oauth", "oauth clip.mp4")]);
+    await renderConnected();
+    await openCategory("Raw", "oauth clip.mp4");
+    expect(calls[0].apiKey).toBeNull();
+    expect(screen.getByText("@tsukyiocreator")).toBeInTheDocument();
+    expect(screen.getByText("SUPER SUPPORTER")).toBeInTheDocument();
+  });
+
+  it("returns to the home when the connected account changes", async () => {
+    setupConnectedMocks();
+    mockConfig({});
+    mockBrowse([clip("old", "old account clip.mp4")]);
+    await renderConnected();
+    await openCategory("Raw", "old account clip.mp4");
+    mockInvoke("tsukyio_get_auth_state", async () => ({ isAuthenticated: true, user: { id: "new", username: "newuser", role: "user", premiumPlan: "FREE" } }));
+    await act(async () => { window.dispatchEvent(new Event("tsukyio-config-changed")); });
+    expect(await screen.findByText("Browse the anime asset vault")).toBeInTheDocument();
+    expect(screen.queryByText("old account clip.mp4")).not.toBeInTheDocument();
+  });
+
   describe("API key gating", () => {
     it("shows the connect card and never queries the vault without an API key", async () => {
       mockConfig({});
