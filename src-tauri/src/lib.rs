@@ -500,6 +500,7 @@ pub fn run() {
             tsukyio::tsukyio_cancel_download,
             tsukyio::tsukyio_set_session_key,
             tsukyio::tsukyio_start_device_auth,
+            tsukyio::tsukyio_cancel_device_auth,
             tsukyio::tsukyio_poll_device_auth,
             tsukyio::tsukyio_get_auth_state,
             tsukyio::tsukyio_disconnect,
