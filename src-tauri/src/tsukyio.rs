@@ -84,7 +84,7 @@ pub(crate) struct TsukyioUserProfile {
     pub premium_plan: String,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub(crate) struct TsukyioTokens {
     pub access_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -350,6 +350,10 @@ async fn fetch_user_info(access_token: &str) -> Result<TsukyioUserProfile, Strin
 
 /// Automatically refreshes the OAuth token if expired or close to expiry (within 60s).
 async fn refresh_token_if_needed(state: &TsukyioSession) -> Result<String, String> {
+    refresh_token_at(state, &format!("{TSUKYIO_BASE}/oauth/token")).await
+}
+
+async fn refresh_token_at(state: &TsukyioSession, token_url: &str) -> Result<String, String> {
     let _refresh = state.refresh_lock.lock().await;
     let revision = state.revision.load(Ordering::SeqCst);
     let existing = state.get_tokens();
@@ -377,7 +381,7 @@ async fn refresh_token_if_needed(state: &TsukyioSession) -> Result<String, Strin
     let params = json!({ "grant_type": "refresh_token", "client_id": OAUTH_CLIENT_ID, "refresh_token": refresh_token });
 
     let response = client
-        .post(format!("{TSUKYIO_BASE}/oauth/token"))
+        .post(token_url)
         .json(&params)
         .timeout(Duration::from_secs(20))
         .send()
@@ -1678,5 +1682,87 @@ mod tests {
         assert_eq!(session.get().as_deref(), Some("tsk_xyz"));
         session.set_legacy_key(None);
         assert_eq!(session.get(), None);
+    }
+
+    #[test]
+    fn canceled_device_response_cannot_save_a_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oauth.json");
+        let session = TsukyioSession::from_path(path.clone());
+        session.begin_auth("first".into());
+        session.attach_device_code("first", "code".into()).unwrap();
+        session.cancel_auth("first");
+        assert!(session.finish_auth("first", "code", TsukyioTokens::default()).is_err());
+        assert!(!path.exists());
+        assert!(session.get_tokens().is_none());
+    }
+
+    #[test]
+    fn old_cancellation_does_not_cancel_a_new_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oauth.json");
+        let session = TsukyioSession::from_path(path.clone());
+        session.begin_auth("first".into());
+        session.begin_auth("second".into());
+        session.cancel_auth("first");
+        session.attach_device_code("second", "code".into()).unwrap();
+        session.finish_auth("second", "code", TsukyioTokens { access_token: "second-account".into(), ..Default::default() }).unwrap();
+        assert_eq!(TsukyioSession::from_path(path).get().as_deref(), Some("second-account"));
+    }
+
+    #[test]
+    fn delayed_refresh_cannot_restore_a_disconnected_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oauth.json");
+        let session = TsukyioSession::from_path(path.clone());
+        session.set_tokens(Some(TsukyioTokens { access_token: "old".into(), ..Default::default() })).unwrap();
+        let revision = session.revision.load(Ordering::SeqCst);
+        session.clear_auth().unwrap();
+        assert!(session.replace_tokens(Some(revision), Some(TsukyioTokens { access_token: "late".into(), ..Default::default() })).is_err());
+        assert!(TsukyioSession::from_path(path).get_tokens().is_none());
+    }
+
+    #[test]
+    fn saving_failure_is_reported_without_claiming_connected() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked = directory.path().join("file-not-directory");
+        fs::write(&blocked, b"occupied").unwrap();
+        let session = TsukyioSession::from_path(blocked.join("oauth.json"));
+        assert!(session.set_tokens(Some(TsukyioTokens::default())).is_err());
+        assert!(session.get_tokens().is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_asset_requests_rotate_refresh_only_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8192];
+                let count = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                assert!(request.contains("application/json"));
+                assert!(request.contains("old-refresh"));
+                seen.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":900}"#;
+                let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                stream.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oauth.json");
+        let session = TsukyioSession::from_path(path.clone());
+        session.set_tokens(Some(TsukyioTokens {
+            access_token: "old-access".into(), refresh_token: Some("old-refresh".into()), expires_at: 1, user: None,
+        })).unwrap();
+        let results = futures_util::future::join_all((0..8).map(|_| refresh_token_at(&session, &url))).await;
+        assert!(results.iter().all(|result| result.as_deref() == Ok("new-access")));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(TsukyioSession::from_path(path).get_tokens().unwrap().refresh_token.as_deref(), Some("new-refresh"));
+        server.abort();
     }
 }
