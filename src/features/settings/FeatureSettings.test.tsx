@@ -90,6 +90,16 @@ describe('FeatureSettings', () => {
     expect(screen.getByRole('button', { name: 'Connect Tsukyio' })).toBeEnabled()
   })
 
+  it('replaces a failed account photo with the placeholder', async () => {
+    mockInvoke('tsukyio_get_auth_state', async () => ({ isAuthenticated: true, user: {
+      id: 'user', username: 'editor', image: 'https://example.com/photo.png', role: 'user', premiumPlan: 'FREE',
+    } }))
+    renderFeatureSettings()
+    fireEvent.error(await screen.findByRole('img', { name: 'editor' }))
+    expect(screen.queryByRole('img', { name: 'editor' })).not.toBeInTheDocument()
+    expect(screen.getByText('@editor')).toBeInTheDocument()
+  })
+
   it('renders without crashing', () => {
     renderFeatureSettings()
     expect(screen.getByText('Hover-to-Play previews')).toBeInTheDocument()

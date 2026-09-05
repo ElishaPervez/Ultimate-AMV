@@ -49,6 +49,8 @@ export function FeatureSettings({
 }: FeatureSettingsProps) {
   const { authState, error: authError, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect } = useTsukyioAuth();
   const [copiedCode, setCopiedCode] = React.useState(false);
+  const [avatarFailed, setAvatarFailed] = React.useState(false);
+  React.useEffect(() => { setAvatarFailed(false); }, [authState.user?.image]);
   // Local draft of the Tsukyio key so we don't fire a config write on every
   // keystroke; persist on Save (matching how the download path persists on a
   // discrete action rather than per-character).
@@ -141,8 +143,8 @@ export function FeatureSettings({
           <div className="setting-row">
             <div className="tsukyio-settings-account-card">
               <div className="tsukyio-settings-account-left">
-                {authState.user?.image ? (
-                  <img src={authState.user.image} alt={authState.user.username} className="tsukyio-settings-avatar" />
+                {authState.user?.image && !avatarFailed ? (
+                  <img src={authState.user.image} alt={authState.user.username} className="tsukyio-settings-avatar" onError={() => setAvatarFailed(true)} />
                 ) : (
                   <div className="tsukyio-settings-avatar placeholder">
                     <User size={18} />
