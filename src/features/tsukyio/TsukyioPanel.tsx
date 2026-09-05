@@ -432,9 +432,9 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
       const key = (payload.tsukyio_api_key ?? "").trim();
       setApiKey(key.length > 0 ? key : null);
       setDownloadPath((payload.download_path ?? "").trim());
-      if (key.length > 0) {
+      {
         try {
-          await invoke("tsukyio_set_session_key", { key });
+          await invoke("tsukyio_set_session_key", { key: key || null });
         } catch (keyErr) {
           logFrontend("warn", "tsukyio.session_key.error", "Could not set Tsukyio session key", {
             error: safeLogValue(keyErr),
@@ -837,6 +837,8 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
               </div>
             )}
 
+            {deviceFlow.status === "starting" && <p role="status">Connecting to Tsukyio...</p>}
+
             {(deviceFlow.status === "prompt" || deviceFlow.status === "polling") && (
               <div className="tsukyio-device-auth-box">
                 <div className="tsukyio-device-code-label">ENTER THIS CODE ON TSUKYIO:</div>
@@ -918,9 +920,9 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         </button>
 
         <div className="tsukyio-header-right">
-          {user ? (
+          {authState.isAuthenticated ? (
             <div className="tsukyio-user-pill">
-              {user.image && !avatarFailed ? (
+              {user?.image && !avatarFailed ? (
                 <img
                   src={user.image}
                   alt={user.username}
@@ -932,11 +934,11 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
                   <User size={14} />
                 </div>
               )}
-              <span className="tsukyio-user-name">@{user.username}</span>
-              {((user.premiumPlan || user.premium_plan) && (user.premiumPlan || user.premium_plan) !== "FREE") && (
-                <span className={`tsukyio-tier-badge is-${((user.premiumPlan || user.premium_plan) as string).toLowerCase()}`}>
+              <span className="tsukyio-user-name">{user?.username ? `@${user.username}` : "Tsukyio account"}</span>
+              {user?.premiumPlan && user.premiumPlan !== "FREE" && (
+                <span className={`tsukyio-tier-badge is-${user.premiumPlan.toLowerCase()}`}>
                   <ShieldCheck size={11} />
-                  <span>{((user.premiumPlan || user.premium_plan) as string).replace("_", " ")}</span>
+                  <span>{user.premiumPlan.replaceAll("_", " ")}</span>
                 </span>
               )}
               <button

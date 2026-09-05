@@ -136,11 +136,11 @@ export function FeatureSettings({
       <div className="settings-group glass">
         <div className="settings-group-header">Tsukyio Vault</div>
         
-        {authState.isAuthenticated && authState.user ? (
+        {authState.isAuthenticated ? (
           <div className="setting-row">
             <div className="tsukyio-settings-account-card">
               <div className="tsukyio-settings-account-left">
-                {authState.user.image ? (
+                {authState.user?.image ? (
                   <img src={authState.user.image} alt={authState.user.username} className="tsukyio-settings-avatar" />
                 ) : (
                   <div className="tsukyio-settings-avatar placeholder">
@@ -149,11 +149,11 @@ export function FeatureSettings({
                 )}
                 <div className="tsukyio-settings-user-info">
                   <div className="tsukyio-settings-name-row">
-                    <span className="tsukyio-settings-user-name">@{authState.user.username}</span>
-                    {((authState.user.premiumPlan || authState.user.premium_plan) && (authState.user.premiumPlan || authState.user.premium_plan) !== "FREE") && (
-                      <span className={`tsukyio-tier-badge is-${((authState.user.premiumPlan || authState.user.premium_plan) as string).toLowerCase()}`}>
+                    <span className="tsukyio-settings-user-name">{authState.user?.username ? `@${authState.user.username}` : "Tsukyio account"}</span>
+                    {authState.user?.premiumPlan && authState.user.premiumPlan !== "FREE" && (
+                      <span className={`tsukyio-tier-badge is-${authState.user.premiumPlan.toLowerCase()}`}>
                         <ShieldCheck size={11} />
-                        <span>{((authState.user.premiumPlan || authState.user.premium_plan) as string).replace("_", " ")}</span>
+                        <span>{authState.user.premiumPlan.replaceAll("_", " ")}</span>
                       </span>
                     )}
                   </div>
@@ -187,10 +187,11 @@ export function FeatureSettings({
               <button
                 type="button"
                 className="install-btn is-primary"
+                disabled={deviceFlow.status === "starting" || deviceFlow.status === "prompt" || deviceFlow.status === "polling"}
                 onClick={() => void startDeviceAuth()}
               >
                 <Sparkles size={15} />
-                <span>Connect Tsukyio</span>
+                <span>{deviceFlow.status === "starting" ? "Connecting..." : "Connect Tsukyio"}</span>
               </button>
             </div>
 
@@ -236,6 +237,9 @@ export function FeatureSettings({
               </div>
             )}
 
+            {deviceFlow.status === "error" && (
+              <p className="tsukyio-device-error-text" role="alert">{deviceFlow.message}</p>
+            )}
             <div className="setting-row" style={{ marginTop: 10 }}>
               <div className="setting-info" style={{ flex: 1, minWidth: 0 }}>
                 <span className="setting-label">Manual API Key (Legacy / Custom)</span>
