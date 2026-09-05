@@ -126,9 +126,7 @@ graphify-out/
 # Experimental code and artifacts. Nothing under this folder is shipped.
 /experiments/
 
-# Local-only setup, cleanup, and release infrastructure.
-/bundle-deps.ps1
+# Local-only setup and cleanup scripts.
 /cacheclean.bat
 /dev-uninstall.bat
 /manager.bat
-/.github/

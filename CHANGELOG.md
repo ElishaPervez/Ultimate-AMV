@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] : 2026-09-05
+
+### Added
+- Added browser-based Tsukyio account sign-in. Settings shows the device code, opens Tsukyio for approval, lets you copy or cancel the code, and displays the connected username and plan.
+- Added Tsukyio account controls for disconnecting, showing session status, and renewing access automatically.
+
+### Changed
+- Tsukyio Vault uses the signed-in account when available, while the manual API key field remains available for legacy and custom setups.
+- Vault searches, category counts, thumbnails, and downloads now follow the active account and clear when the account changes.
+
+### Fixed
+- Fixed cancelled, expired, declined, or interrupted sign-ins leaving stale account state or allowing an older login to overwrite a newer one.
+- Fixed saved Tsukyio sessions across app restarts and concurrent requests so a refresh token is rotated only once.
+- Fixed OAuth and profile failures being shown as readable messages, including a placeholder when the account photo cannot load.
+- Fixed the statistics permission being dropped during device authorization and unsaved sign-ins being reported as connected.
+
 ## [0.15.1] : 2026-08-27
 
 ### Changed
@@ -316,6 +332,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.15.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.2
 [0.15.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.1
 [0.15.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.0
 [0.14.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.14.0
