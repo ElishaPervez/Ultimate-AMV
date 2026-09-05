@@ -1606,6 +1606,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_key_does_not_replace_oauth() {
+        let session = TsukyioSession::default();
+        session.set_tokens(Some(TsukyioTokens {
+            access_token: "oauth-access".into(),
+            refresh_token: Some("oauth-refresh".into()),
+            expires_at: current_timestamp() + 900,
+            user: None,
+        }));
+        session.set_legacy_key(Some("old-api-key".into()));
+        assert_eq!(session.get().as_deref(), Some("oauth-access"));
+        session.set_legacy_key(None);
+        assert_eq!(session.get().as_deref(), Some("oauth-access"));
+    }
+
+    #[tokio::test]
+    async fn expired_access_token_without_refresh_is_rejected() {
+        let session = TsukyioSession::default();
+        session.set_tokens(Some(TsukyioTokens {
+            access_token: "expired-access".into(),
+            expires_at: 1,
+            ..Default::default()
+        }));
+        assert!(refresh_token_if_needed(&session).await.is_err());
+    }
+
+    #[test]
     fn session_key_trims_and_clears() {
         let session = TsukyioSession::default();
         session.set_tokens(None);
