@@ -3,16 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
+  Check,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Copy,
   Download,
   ExternalLink,
   Film,
   Folder,
   Image as ImageIcon,
+  KeyRound,
   Layers,
+  Loader2,
+  LogOut,
   Maximize2,
   Mic2,
   Music2,
@@ -20,13 +25,16 @@ import {
   Scissors,
   Search,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sparkles,
   Type,
+  User,
   Volume2,
   Wand2,
   Waves,
   X,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { formatBytes } from "../../lib/format";
 import { logFrontend, safeLogValue } from "../../lib/log";
 import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
@@ -38,6 +46,7 @@ import type {
   TsukyioItem,
   TsukyioSearchResponse,
   TsukyioStatsResponse,
+  TsukyioUserProfile,
 } from "../../types/tsukyio";
 import {
   CATEGORIES,
@@ -48,6 +57,7 @@ import {
   isRealCategory,
 } from "./categories";
 import { TsukyioPlayer } from "./TsukyioPlayer";
+import { useTsukyioAuth } from "./useTsukyioAuth";
 
 const TSUKYIO_SITE = "https://tsukyio.com";
 
@@ -331,9 +341,14 @@ interface TsukyioPanelProps {
 }
 
 export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
+  const { authState, loading: authLoading, deviceFlow, startDeviceAuth, cancelDeviceAuth, disconnect, checkAuth } = useTsukyioAuth();
+  const [copiedCode, setCopiedCode] = React.useState(false);
   const [apiKey, setApiKey] = React.useState<string | null>(null);
   const [downloadPath, setDownloadPath] = React.useState<string>("");
   const [configLoaded, setConfigLoaded] = React.useState(false);
+
+  const isConnected = authState.isAuthenticated || Boolean(apiKey);
+  const [avatarFailed, setAvatarFailed] = React.useState(false);
 
   const [category, setCategory] = React.useState<string>("all");
   const [crumbs, setCrumbs] = React.useState<Crumb[]>([]);
@@ -408,7 +423,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
   // it; the existing browse grid takes over.
   const isHome = !isSearching && category === "all" && crumbs.length === 0;
 
-  // ---- Config (API key) -------------------------------------------------
+  // ---- Config (API key fallback) ---------------------------------------
 
   const loadConfig = React.useCallback(async () => {
     try {
@@ -417,40 +432,35 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
       const key = (payload.tsukyio_api_key ?? "").trim();
       setApiKey(key.length > 0 ? key : null);
       setDownloadPath((payload.download_path ?? "").trim());
-      // Push the key into Rust session state so the `tsukyio://` streaming proxy
-      // can authenticate preview requests without the token ever entering the
-      // DOM. Pass an empty key when none is set so a removed key clears it (the
-      // proxy then replies 401 rather than serving stale media).
-      try {
-        await invoke("tsukyio_set_session_key", { key: key.length > 0 ? key : null });
-      } catch (keyErr) {
-        logFrontend("warn", "tsukyio.session_key.error", "Could not set Tsukyio session key", {
-          error: safeLogValue(keyErr),
-        });
+      if (key.length > 0) {
+        try {
+          await invoke("tsukyio_set_session_key", { key });
+        } catch (keyErr) {
+          logFrontend("warn", "tsukyio.session_key.error", "Could not set Tsukyio session key", {
+            error: safeLogValue(keyErr),
+          });
+        }
       }
+      await checkAuth();
     } catch (e) {
       logFrontend("warn", "tsukyio.config.error", "Could not read Tsukyio config", {
         error: safeLogValue(e),
       });
       setApiKey(null);
       setDownloadPath("");
-      void invoke("tsukyio_set_session_key", { key: null }).catch(() => {});
     } finally {
       setConfigLoaded(true);
     }
-  }, []);
+  }, [checkAuth]);
 
   React.useEffect(() => {
     void loadConfig();
-    // The key can change while we're mounted (user edits it in Settings and
-    // saves); pick that up so the empty-state clears without a remount.
     const onConfigSaved = () => void loadConfig();
     window.addEventListener("tsukyio-config-changed", onConfigSaved);
     return () => window.removeEventListener("tsukyio-config-changed", onConfigSaved);
   }, [loadConfig]);
 
-  // Re-read config whenever the panel becomes active (covers the common
-  // flow of: empty-state -> Settings -> save key -> back to panel).
+  // Re-read config whenever the panel becomes active
   React.useEffect(() => {
     if (active) void loadConfig();
   }, [active, loadConfig]);
@@ -458,10 +468,10 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
   // ---- Stats fetch (discovery-home tile counts) ------------------------
 
   const loadStats = React.useCallback(async () => {
-    if (!apiKey) return;
+    if (!isConnected) return;
     const token = ++statsToken.current;
     try {
-      const raw = await invoke<TsukyioStatsResponse>("tsukyio_test_connection", { apiKey });
+      const raw = await invoke<TsukyioStatsResponse>("tsukyio_test_connection", { apiKey: apiKey || null });
       if (token !== statsToken.current) return;
       const vault = raw?.data?.vault;
       const files: Record<string, number> = {};
@@ -477,18 +487,18 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         error: safeLogValue(e),
       });
     }
-  }, [apiKey]);
+  }, [isConnected, apiKey]);
 
   // Fetch stats once when the panel becomes active and connected. Re-fetches
-  // if the key changes. Cached in state across view changes.
+  // if the auth state changes. Cached in state across view changes.
   React.useEffect(() => {
-    if (active && apiKey && !stats) void loadStats();
-  }, [active, apiKey, stats, loadStats]);
+    if (active && isConnected && !stats) void loadStats();
+  }, [active, isConnected, stats, loadStats]);
 
   // ---- Data fetch (browse + search) ------------------------------------
 
   const runFetch = React.useCallback(async () => {
-    if (!apiKey) return;
+    if (!isConnected) return;
     // Bump the out-of-order guard FIRST, before the home short-circuit, so a
     // transition INTO the home (which does no fetch) still invalidates any
     // in-flight browse/search — otherwise a stale fan-out could resolve and
@@ -512,7 +522,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         const settled = await Promise.allSettled(
           REAL_CATEGORIES.map(async (cat) => {
             const raw = await invoke<TsukyioSearchResponse>("tsukyio_search", {
-              apiKey,
+              apiKey: apiKey || null,
               q: primary,
               category: cat.id,
             });
@@ -548,7 +558,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
         setExpandedSections({});
       } else {
         const raw = await invoke<TsukyioBrowseResponse>("tsukyio_browse", {
-          apiKey,
+          apiKey: apiKey || null,
           category: category === "all" ? null : category,
           path: currentPath || null,
           limit: PAGE_LIMIT,
@@ -574,14 +584,11 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
     } finally {
       if (token === fetchToken.current) setLoading(false);
     }
-  }, [apiKey, isHome, isSearching, activeSearch, category, currentPath, page]);
+  }, [isConnected, apiKey, isHome, isSearching, activeSearch, category, currentPath, page]);
 
   React.useEffect(() => {
-    if (active && apiKey) void runFetch();
-    // NOTE: the dock preview intentionally PERSISTS across view changes
-    // (category/folder/search/page) so playback keeps going while the user
-    // browses. Do not reset `previewItem` here.
-  }, [active, apiKey, runFetch]);
+    if (active && isConnected) void runFetch();
+  }, [active, isConnected, runFetch]);
 
   // ---- Grouped search result (derived) ---------------------------------
 
@@ -742,7 +749,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
   }
 
   async function startDownload(item: TsukyioItem) {
-    if (!apiKey) return;
+    if (!isConnected) return;
     cancellingRef.current.delete(item.id);
     setDownloads((prev) => ({
       ...prev,
@@ -750,7 +757,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
     }));
     try {
       await invoke<string>("tsukyio_download", {
-        apiKey,
+        apiKey: apiKey || null,
         assetId: item.id,
         name: item.name,
         category: item.category ?? (category === "all" ? null : category),
@@ -784,7 +791,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
 
   // ---- Render: not-yet-loaded / empty-state ----------------------------
 
-  if (!configLoaded) {
+  if (!configLoaded || authLoading) {
     return (
       <div className="tsukyio-panel">
         <div className="tsukyio-loading">
@@ -795,7 +802,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
     );
   }
 
-  if (!apiKey) {
+  if (!isConnected) {
     return (
       <div className="tsukyio-panel">
         <div className="tsukyio-connect">
@@ -804,24 +811,88 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
             <h2>Connect the Tsukyio Vault</h2>
             <p>
               Tsukyio is a curated anime asset library — precuts, raw footage, overlays,
-              green-screen, SFX, vocals and more. Connect your free API key to browse,
+              green-screen, SFX, vocals and more. Connect your Tsukyio account to browse,
               preview and download clips right inside Ultimate AMV.
             </p>
-            <div className="tsukyio-connect-actions">
-              <button type="button" className="install-btn" onClick={onOpenSettings}>
-                <SettingsIcon size={16} />
-                <span>Add API key in Settings</span>
-              </button>
-              <a
-                className="install-btn is-secondary"
-                href={TSUKYIO_SITE}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <ExternalLink size={16} />
-                <span>Get a free key at tsukyio.com</span>
-              </a>
-            </div>
+
+            {deviceFlow.status === "idle" && (
+              <div className="tsukyio-connect-actions">
+                <button type="button" className="install-btn is-primary" onClick={() => void startDeviceAuth()}>
+                  <Sparkles size={16} />
+                  <span>Log in with Tsukyio</span>
+                </button>
+                <button type="button" className="install-btn is-secondary" onClick={onOpenSettings}>
+                  <KeyRound size={16} />
+                  <span>Use API Key</span>
+                </button>
+                <a
+                  className="install-btn is-secondary"
+                  href={TSUKYIO_SITE}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={16} />
+                  <span>tsukyio.com</span>
+                </a>
+              </div>
+            )}
+
+            {(deviceFlow.status === "prompt" || deviceFlow.status === "polling") && (
+              <div className="tsukyio-device-auth-box">
+                <div className="tsukyio-device-code-label">ENTER THIS CODE ON TSUKYIO:</div>
+                <div className="tsukyio-device-code-display">
+                  <span className="tsukyio-device-code-text">{deviceFlow.userCode}</span>
+                  <button
+                    type="button"
+                    className="tsukyio-device-code-copy"
+                    title="Copy code"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(deviceFlow.userCode);
+                      setCopiedCode(true);
+                      setTimeout(() => setCopiedCode(false), 2000);
+                    }}
+                  >
+                    {copiedCode ? <Check size={16} color="#63e6a2" /> : <Copy size={16} />}
+                  </button>
+                </div>
+                <div className="tsukyio-device-instructions">
+                  Browser opened to{" "}
+                  <a
+                    href={`https://tsukyio.com/activate?code=${deviceFlow.userCode}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void openUrl(`https://tsukyio.com/activate?code=${deviceFlow.userCode}`);
+                    }}
+                  >
+                    tsukyio.com/activate
+                  </a>
+                  . Waiting for authorization…
+                </div>
+                <div className="tsukyio-device-actions">
+                  <span className="tsukyio-spinner sm" aria-hidden="true" />
+                  <button type="button" className="install-btn is-secondary" onClick={cancelDeviceAuth}>
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {deviceFlow.status === "error" && (
+              <div className="tsukyio-device-error-box">
+                <p className="tsukyio-device-error-text">{deviceFlow.message}</p>
+                <div className="tsukyio-connect-actions">
+                  <button type="button" className="install-btn is-primary" onClick={() => void startDeviceAuth()}>
+                    <span>Try Again</span>
+                  </button>
+                  <button type="button" className="install-btn is-secondary" onClick={cancelDeviceAuth}>
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <span className="tsukyio-credit">Powered by Tsukyio</span>
           </div>
         </div>
@@ -833,6 +904,7 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
 
   const showingFrom = total === 0 ? 0 : page * PAGE_LIMIT + 1;
   const showingTo = Math.min((page + 1) * PAGE_LIMIT, total);
+  const user = authState.user;
 
   return (
     <div className="tsukyio-panel">
@@ -844,10 +916,45 @@ export function TsukyioPanel({ active, onOpenSettings }: TsukyioPanelProps) {
             <h2>Tsukyio Vault</h2>
           </div>
         </button>
-        <a className="tsukyio-header-link" href={TSUKYIO_SITE} target="_blank" rel="noreferrer">
-          <span>Powered by Tsukyio — browse the full vault</span>
-          <ExternalLink size={14} />
-        </a>
+
+        <div className="tsukyio-header-right">
+          {user ? (
+            <div className="tsukyio-user-pill">
+              {user.image && !avatarFailed ? (
+                <img
+                  src={user.image}
+                  alt={user.username}
+                  className="tsukyio-user-avatar"
+                  onError={() => setAvatarFailed(true)}
+                />
+              ) : (
+                <div className="tsukyio-user-avatar placeholder">
+                  <User size={14} />
+                </div>
+              )}
+              <span className="tsukyio-user-name">@{user.username}</span>
+              {((user.premiumPlan || user.premium_plan) && (user.premiumPlan || user.premium_plan) !== "FREE") && (
+                <span className={`tsukyio-tier-badge is-${((user.premiumPlan || user.premium_plan) as string).toLowerCase()}`}>
+                  <ShieldCheck size={11} />
+                  <span>{((user.premiumPlan || user.premium_plan) as string).replace("_", " ")}</span>
+                </span>
+              )}
+              <button
+                type="button"
+                className="tsukyio-user-logout"
+                title="Disconnect account"
+                onClick={() => void disconnect()}
+              >
+                <LogOut size={13} />
+              </button>
+            </div>
+          ) : (
+            <a className="tsukyio-header-link" href={TSUKYIO_SITE} target="_blank" rel="noreferrer">
+              <span>Powered by Tsukyio — browse the full vault</span>
+              <ExternalLink size={14} />
+            </a>
+          )}
+        </div>
       </header>
 
       <div className="tsukyio-console u-material">

@@ -88,3 +88,32 @@ export type TsukyioDownloadProgress =
   | { type: "done"; assetId: string; path: string; downloadedBytes: number }
   | { type: "cancelled"; assetId: string }
   | { type: "error"; assetId: string; message: string };
+
+// Tsukyio OAuth 2.0 User Profile
+export type TsukyioUserProfile = {
+  id: string;
+  username: string;
+  name?: string | null;
+  email?: string | null;
+  image?: string | null;
+  role: string;
+  premiumPlan: "FREE" | "SUPPORTER" | "SUPER_SUPPORTER" | string;
+};
+
+// Tsukyio OAuth State
+export type TsukyioAuthState = {
+  isAuthenticated: boolean;
+  user?: TsukyioUserProfile | null;
+  expiresAt?: number | null;
+};
+
+// RFC 8628 Device Code Creation Response
+export type TsukyioDeviceAuthStartResponse = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
+};
+

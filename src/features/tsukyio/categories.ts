@@ -14,7 +14,6 @@ export const CATEGORIES: { id: string; label: string }[] = [
   { id: "sfx", label: "SFX" },
   { id: "remake_clips", label: "Remake" },
   { id: "green_screen", label: "Green Screen" },
-  { id: "credits", label: "Credits" },
 ];
 
 // The 9 real vault categories (excludes the "all" UI pseudo-category), in
