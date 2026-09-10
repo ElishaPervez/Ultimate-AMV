@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Clapperboard, Film, Info, Loader2, Scissors, Upload, X, Zap } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Clapperboard, FileDown, FileUp, Film, Info, Loader2, Scissors, Upload, X, Zap } from "lucide-react";
 import { Dropdown } from "../../components/Dropdown";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
@@ -30,7 +30,7 @@ import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import { VideoOutputControl } from "../video/VideoOutputControl";
 import { ClipRateControl } from "./ClipRateControl";
 
-const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi"];
+const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi", "umv", "json"];
 const clipInputAccept = extensionAccept(CLIP_INPUT_EXTENSIONS);
 
 let sceneProxyRequestSequence = 0;
@@ -58,6 +58,18 @@ import type {
 } from "../../types/clip";
 import type { ConversionProgress, VideoControlSpec, VideoGpuStatus } from "../../types/conversion";
 import { ClipCompatConvertModal } from "./ClipCompatConvertModal";
+import { RelinkMediaModal } from "./RelinkMediaModal";
+import {
+  createProjectManifest,
+  exportProjectFile,
+  importProjectFile,
+  remapClipsWithResolvedSources,
+} from "../../lib/projectManifest";
+import type {
+  ProjectSourceItem,
+  ResolvedSourceMedia,
+  UMVProjectManifest,
+} from "../../types/project";
 import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
@@ -437,6 +449,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   );
   const [exportSession, setExportSession] = React.useState<ClipExportSession | null>(null);
   const [exportMinimized, setExportMinimized] = React.useState(false);
+  const [relinkData, setRelinkData] = React.useState<{
+    open: boolean;
+    manifest: UMVProjectManifest | null;
+    projectFilePath: string;
+    sources: ResolvedSourceMedia[];
+  }>({
+    open: false,
+    manifest: null,
+    projectFilePath: "",
+    sources: [],
+  });
   const exportSessionRef = React.useRef<ClipExportSession | null>(null);
   const lastSelectedIdRef = React.useRef<string | null>(null);
   const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
@@ -458,8 +481,9 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   // fixes, just from a different entry point.
   function closeViewer() {
     setViewerClipId(null);
-    setActivationEpoch((value) => value + 1);
+    setActivationEpoch((epoch) => epoch + 1);
   }
+
   const wasActiveRef = React.useRef(active);
   React.useEffect(() => {
     if (active && !wasActiveRef.current) {
@@ -739,6 +763,18 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   function acceptVideos(paths: string[]) {
     if (paths.length === 0) return;
+
+    const projectFile = paths.find(
+      (p) => {
+        const lower = p.toLowerCase();
+        return lower.endsWith(".umv") || lower.endsWith(".json");
+      },
+    );
+    if (projectFile) {
+      void handleImportProject(projectFile);
+      return;
+    }
+
     const replacingDetection =
       clipBatchProgressRef.current != null
       || (isExtracting && !exportProgressActiveRef.current);
@@ -1033,6 +1069,216 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       }, 0),
     [displayedClips],
   );
+
+  const applyLoadedProject = React.useCallback(
+    (manifest: UMVProjectManifest, pathMap: Record<string, string>) => {
+      try {
+        const remappedClips = remapClipsWithResolvedSources(manifest.clips, pathMap);
+
+        const allSourcePaths = Array.from(
+          new Set(
+            manifest.sources.map((s) => pathMap[s.path] || s.path),
+          ),
+        );
+
+        setSelectedVideos(allSourcePaths);
+
+        const allScenes: ClipScene[] = [];
+        const reconstructedGrid: string[][] = [];
+
+        remappedClips.forEach((clip) => {
+          if (clip.isUnified && clip.segments && clip.segments.length > 0) {
+            const segIds: string[] = [];
+            clip.segments.forEach((seg) => {
+              const srcStem = fileStem(seg.source);
+              const sceneId = `${srcStem}-${seg.index}-${seg.start.toFixed(3)}`;
+              segIds.push(sceneId);
+              allScenes.push({
+                source: seg.source,
+                start: seg.start,
+                end: seg.end,
+                index: seg.index,
+                label: `Scene ${seg.index + 1}`,
+              });
+            });
+            reconstructedGrid.push(segIds);
+          } else {
+            const srcPath = clip.path || clip.sourceSrc;
+            const srcStem = fileStem(srcPath);
+            const sceneId = `${srcStem}-${clip.index}-${clip.sourceStart.toFixed(3)}`;
+            reconstructedGrid.push([sceneId]);
+            allScenes.push({
+              source: srcPath,
+              start: clip.sourceStart,
+              end: clip.sourceEnd,
+              index: clip.index,
+              label: clip.label || `Scene ${clip.index + 1}`,
+            });
+          }
+        });
+
+        const primaryFps = manifest.sources[0]?.fps || 23.976;
+        const totalDuration = manifest.sources.reduce(
+          (acc, s) => acc + (s.duration || 0),
+          0,
+        );
+
+        const syntheticResult: ClipExtractionResult = {
+          type: "done",
+          input: allSourcePaths[0] || "",
+          scenes: allScenes,
+          cuts: allScenes.map((s) => s.start),
+          sceneCount: allScenes.length,
+          fps: primaryFps,
+          duration: totalDuration,
+          totalSeconds: totalDuration,
+        };
+
+        setResult(syntheticResult);
+        setActiveGridItems(reconstructedGrid);
+        setPreviewStates({});
+
+        if (manifest.selectedClipIds) {
+          setSelectedClipIds(new Set(manifest.selectedClipIds));
+        } else {
+          setSelectedClipIds(new Set());
+        }
+
+        if (manifest.exportConfig) {
+          if (manifest.exportConfig.format) {
+            setExportFormat(manifest.exportConfig.format);
+          }
+          if (manifest.exportConfig.rateMode) {
+            setRateMode(manifest.exportConfig.rateMode);
+          }
+          if (
+            manifest.exportConfig.targetBitrateKbps &&
+            manifest.exportConfig.format
+          ) {
+            setExportBitrate((prev) => ({
+              ...prev,
+              [manifest.exportConfig!.format]:
+                manifest.exportConfig!.targetBitrateKbps!,
+            }));
+          }
+          if (
+            manifest.exportConfig.crf &&
+            manifest.exportConfig.format
+          ) {
+            setExportQuality((prev) => ({
+              ...prev,
+              [manifest.exportConfig!.format]: manifest.exportConfig!.crf!,
+            }));
+          }
+          if (manifest.exportConfig.audioSettings) {
+            writeClipAudioSettings(manifest.exportConfig.audioSettings);
+          }
+        }
+
+        setRelinkData({
+          open: false,
+          manifest: null,
+          projectFilePath: "",
+          sources: [],
+        });
+      } catch (err) {
+        logFrontend("error", "project.import.error", "Failed to apply loaded project", {
+          error: readBridgeError(err),
+        });
+      }
+    },
+    [],
+  );
+
+  const handleExportProject = React.useCallback(async () => {
+    if (!result || displayedClips.length === 0) return;
+
+    try {
+      const sources: ProjectSourceItem[] = (
+        selectedVideos.length > 0 ? selectedVideos : [result.input]
+      ).map((srcPath, idx) => ({
+        id: `src-${idx + 1}`,
+        path: srcPath,
+        filename: fileName(srcPath),
+        duration: result.duration || result.totalSeconds || 0,
+        fps: result.fps || 23.976,
+      }));
+
+      const projectName = selectedVideos[0]
+        ? `${fileStem(selectedVideos[0])}_project`
+        : "amv_project";
+
+      const currentAudio = readClipAudioSettings();
+
+      const manifest = createProjectManifest({
+        name: projectName,
+        sources,
+        clips: displayedClips,
+        selectedClipIds: Array.from(selectedClipIds),
+        exportConfig: {
+          format: exportFormat,
+          rateMode,
+          audioSettings: currentAudio,
+          targetBitrateKbps: exportBitrate[exportFormat],
+          crf: exportQuality[exportFormat],
+        },
+      });
+
+      await exportProjectFile(manifest, `${projectName}.umv`);
+    } catch (err) {
+      logFrontend("error", "project.export.error", "Failed to export project", {
+        error: readBridgeError(err),
+      });
+    }
+  }, [
+    result,
+    displayedClips,
+    selectedVideos,
+    selectedClipIds,
+    exportFormat,
+    rateMode,
+    exportBitrate,
+    exportQuality,
+  ]);
+
+  const handleImportProject = React.useCallback(
+    async (specifiedPath?: string) => {
+      try {
+        const loadResult = await importProjectFile(specifiedPath);
+        if (!loadResult) return;
+
+        if (loadResult.hasMissingMedia) {
+          setRelinkData({
+            open: true,
+            manifest: loadResult.manifest,
+            projectFilePath: loadResult.projectFilePath,
+            sources: loadResult.resolvedSources,
+          });
+        } else {
+          const initialMap: Record<string, string> = {};
+          loadResult.resolvedSources.forEach((s) => {
+            initialMap[s.source.path] = s.currentPath;
+          });
+          applyLoadedProject(loadResult.manifest, initialMap);
+        }
+      } catch (err) {
+        logFrontend("error", "project.import.error", "Failed to import project", {
+          error: readBridgeError(err),
+        });
+      }
+    },
+    [applyLoadedProject],
+  );
+
+  React.useEffect(() => {
+    void invoke<string | null>("get_startup_project_path")
+      .then((startupPath) => {
+        if (startupPath) {
+          void handleImportProject(startupPath);
+        }
+      })
+      .catch(() => {});
+  }, [handleImportProject]);
   const exportOptions = React.useMemo(
     () => clipExportOptions(clipMode, gpuStatus),
     [clipMode, gpuStatus],
@@ -2658,8 +2904,8 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     >
       <div className="drop-zone-overlay">
         <Upload size={32} strokeWidth={1.8} />
-        <span>Drop video(s) to scan for clips</span>
-        <small>MP4 · MKV · MOV · WEBM · AVI : multiple files accepted</small>
+        <span>Drop video(s) or .umv project to load</span>
+        <small>MP4 · MKV · MOV · WEBM · AVI · UMV : multiple files accepted</small>
       </div>
       <div className="clip-extractor-rail">
         <button type="button" className="clip-import-button glass spring-motion" onClick={pickVideo}>
@@ -2696,6 +2942,38 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         </div>
 
         <div className="clip-tool-stack" aria-label="Clip extractor actions">
+          <div style={{ display: "flex", gap: 8, width: "100%" }}>
+            <button
+              type="button"
+              className="clip-tool-button spring-motion"
+              onClick={() => void handleImportProject()}
+              title="Open an existing project file (.umv / .json)"
+              style={{ flex: 1, minWidth: 0 }}
+            >
+              <FileDown size={17} strokeWidth={2} />
+              <span>Import Project</span>
+            </button>
+            <button
+              type="button"
+              className="clip-tool-button spring-motion"
+              onClick={() => void handleExportProject()}
+              disabled={!result || displayedClips.length === 0}
+              title={
+                !result || displayedClips.length === 0
+                  ? "Extract scenes or load footage before exporting project"
+                  : "Save current cuts, real-time merges, and export settings to .umv"
+              }
+              style={{
+                flex: 1,
+                minWidth: 0,
+                opacity: !result || displayedClips.length === 0 ? 0.45 : 1,
+              }}
+            >
+              <FileUp size={17} strokeWidth={2} />
+              <span>Export Project</span>
+            </button>
+          </div>
+
           <button
             type="button"
             className={`clip-tool-button spring-motion ${gridPreview ? "is-active" : ""}`}
@@ -3195,6 +3473,24 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           isConverting={isConverting}
           onConvert={() => void handleConvertCompat()}
           onCancel={dismissCompatModal}
+        />
+
+        <RelinkMediaModal
+          open={relinkData.open}
+          sources={relinkData.sources}
+          onResolve={(pathMap) => {
+            if (relinkData.manifest) {
+              applyLoadedProject(relinkData.manifest, pathMap);
+            }
+          }}
+          onCancel={() =>
+            setRelinkData({
+              open: false,
+              manifest: null,
+              projectFilePath: "",
+              sources: [],
+            })
+          }
         />
 
         <SceneViewerModal clip={viewerClip} onClose={closeViewer} />
