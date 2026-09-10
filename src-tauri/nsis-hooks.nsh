@@ -24,3 +24,15 @@
   ; Brief settle so the OS finishes releasing file handles before File copy.
   Sleep 500
 !macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  DetailPrint "Registering .umv project icon..."
+  ${If} ${FileExists} "$INSTDIR\icons\project-file.ico"
+    WriteRegStr HKCU "Software\Classes\.umv\DefaultIcon" "" "$INSTDIR\icons\project-file.ico,0"
+    WriteRegStr HKCU "Software\Classes\UltimateAMV.umv\DefaultIcon" "" "$INSTDIR\icons\project-file.ico,0"
+  ${Else}
+    WriteRegStr HKCU "Software\Classes\.umv\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+    WriteRegStr HKCU "Software\Classes\UltimateAMV.umv\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  ${EndIf}
+  System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+!macroend

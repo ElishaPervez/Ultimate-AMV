@@ -361,6 +361,47 @@ fn write_file(path: String, content: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn read_file(path: String) -> Result<String, String> {
+    use std::fs;
+    log_info("fs.read_file.start", "Reading file", json!({ "path": &path }));
+    fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_file_exists(path: String) -> bool {
+    std::path::Path::new(&path).is_file()
+}
+
+#[tauri::command]
+fn scan_folder_for_files(dir: String, target_names: Vec<String>) -> std::collections::HashMap<String, String> {
+    let mut matches = std::collections::HashMap::new();
+    let target_set: std::collections::HashSet<String> = target_names.into_iter().map(|n| n.to_lowercase()).collect();
+    
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    let lower = file_name.to_lowercase();
+                    if target_set.contains(&lower) {
+                        matches.insert(file_name.to_string(), path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+    matches
+}
+
+#[tauri::command]
+fn get_startup_project_path() -> Option<String> {
+    std::env::args().skip(1).find(|arg| {
+        let lower = arg.to_lowercase();
+        lower.ends_with(".umv") || lower.ends_with(".json")
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     reset_app_logs();
@@ -507,7 +548,11 @@ pub fn run() {
             discord_set_state,
             discord_clear,
             eyedropper::sample_screen_color,
-            write_file
+            write_file,
+            read_file,
+            check_file_exists,
+            scan_folder_for_files,
+            get_startup_project_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
