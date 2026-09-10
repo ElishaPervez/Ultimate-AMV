@@ -27,12 +27,22 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   DetailPrint "Registering .umv project icon..."
+  WriteRegStr HKCU "Software\Classes\.umv" "" "UltimateAMV.umv"
+  WriteRegStr HKCU "Software\Classes\.umv\OpenWithProgids" "UltimateAMV.umv" ""
+  WriteRegStr HKCU "Software\Classes\UltimateAMV.umv" "" "Ultimate AMV Project"
   ${If} ${FileExists} "$INSTDIR\icons\project-file.ico"
-    WriteRegStr HKCU "Software\Classes\.umv\DefaultIcon" "" "$INSTDIR\icons\project-file.ico,0"
     WriteRegStr HKCU "Software\Classes\UltimateAMV.umv\DefaultIcon" "" "$INSTDIR\icons\project-file.ico,0"
+    WriteRegStr HKCU "Software\Classes\.umv\DefaultIcon" "" "$INSTDIR\icons\project-file.ico,0"
   ${Else}
-    WriteRegStr HKCU "Software\Classes\.umv\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
     WriteRegStr HKCU "Software\Classes\UltimateAMV.umv\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+    WriteRegStr HKCU "Software\Classes\.umv\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
   ${EndIf}
+  WriteRegStr HKCU "Software\Classes\UltimateAMV.umv\shell\open\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" "%1"'
+  System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  DeleteRegKey HKCU "Software\Classes\.umv"
+  DeleteRegKey HKCU "Software\Classes\UltimateAMV.umv"
   System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 !macroend
