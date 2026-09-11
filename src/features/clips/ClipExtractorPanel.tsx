@@ -298,6 +298,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const [clipMode, setClipMode] = React.useState<"cpu" | "gpu">("gpu");
   const [gridPreview, setGridPreview] = React.useState(true);
   const [hoverPlayOnly, setHoverPlayOnly] = React.useState<boolean>(false);
+  const [projectSyncEnabled, setProjectSyncEnabled] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     const handler = (e: Event) => {
@@ -305,6 +306,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     };
     window.addEventListener("clip-hover-preview-changed", handler);
     return () => window.removeEventListener("clip-hover-preview-changed", handler);
+  }, []);
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      setProjectSyncEnabled((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
+    };
+    window.addEventListener("project-sync-enabled-changed", handler);
+    return () => window.removeEventListener("project-sync-enabled-changed", handler);
   }, []);
   const [gridCols, setGridCols] = React.useState(4);
   const [mergeMode, setMergeMode] = React.useState(false);
@@ -579,6 +588,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
       const payload = parseBridgePayload<AppConfig>(raw);
       setClipMode(payload.clip_extraction_mode ?? "gpu");
       setHoverPlayOnly(payload.clip_hover_preview ?? false);
+      setProjectSyncEnabled(payload.enable_project_sync ?? false);
       /* Featherweight previews are the default; only an explicit `false` saved
        * by the Settings toggle routes back to the classic WebP/scene_clip path. */
       setFeatherweightPreviews(payload.featherweight_previews ?? true);
@@ -2942,37 +2952,39 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         </div>
 
         <div className="clip-tool-stack" aria-label="Clip extractor actions">
-          <div style={{ display: "flex", gap: 8, width: "100%" }}>
-            <button
-              type="button"
-              className="clip-tool-button spring-motion"
-              onClick={() => void handleImportProject()}
-              title="Open an existing project file (.umv / .json)"
-              style={{ flex: 1, minWidth: 0 }}
-            >
-              <FileDown size={17} strokeWidth={2} />
-              <span>Import Project</span>
-            </button>
-            <button
-              type="button"
-              className="clip-tool-button spring-motion"
-              onClick={() => void handleExportProject()}
-              disabled={!result || displayedClips.length === 0}
-              title={
-                !result || displayedClips.length === 0
-                  ? "Extract scenes or load footage before exporting project"
-                  : "Save current cuts, real-time merges, and export settings to .umv"
-              }
-              style={{
-                flex: 1,
-                minWidth: 0,
-                opacity: !result || displayedClips.length === 0 ? 0.45 : 1,
-              }}
-            >
-              <FileUp size={17} strokeWidth={2} />
-              <span>Export Project</span>
-            </button>
-          </div>
+          {projectSyncEnabled && (
+            <div style={{ display: "flex", gap: 8, width: "100%" }}>
+              <button
+                type="button"
+                className="clip-tool-button spring-motion"
+                onClick={() => void handleImportProject()}
+                title="Open an existing project file (.umv / .json)"
+                style={{ flex: 1, minWidth: 0 }}
+              >
+                <FileDown size={17} strokeWidth={2} />
+                <span>Import Project</span>
+              </button>
+              <button
+                type="button"
+                className="clip-tool-button spring-motion"
+                onClick={() => void handleExportProject()}
+                disabled={!result || displayedClips.length === 0}
+                title={
+                  !result || displayedClips.length === 0
+                    ? "Extract scenes or load footage before exporting project"
+                    : "Save current cuts, real-time merges, and export settings to .umv"
+                }
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  opacity: !result || displayedClips.length === 0 ? 0.45 : 1,
+                }}
+              >
+                <FileUp size={17} strokeWidth={2} />
+                <span>Export Project</span>
+              </button>
+            </div>
+          )}
 
           <button
             type="button"

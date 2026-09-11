@@ -51,6 +51,7 @@ export type AppConfig = {
   /** Playback multiplier for featherweight clip-grid tiles only. */
   clip_preview_speed: number;
   tsukyio_api_key: string;
+  enable_project_sync?: boolean;
 };
 
 export type BackgroundState = {
