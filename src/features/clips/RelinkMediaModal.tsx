@@ -120,16 +120,18 @@ export function RelinkMediaModal({
     onResolve(map);
   };
 
+  const missingCount = mediaList.filter((m) => m.status === "missing").length;
+
   return createPortal(
     <div className="episode-label-backdrop" role="dialog" aria-label="Relink Missing Media">
-      <div className="episode-label-modal" style={{ maxWidth: 640 }}>
+      <div className="episode-label-modal" style={{ width: "min(680px, 94vw)", maxWidth: 680, gap: 16 }}>
         <div className="episode-label-header">
           <div>
             <span className="episode-label-kicker" style={{ color: "#f59e0b" }}>
-              <FileWarning size={14} strokeWidth={2.2} /> Missing Media Files
+              <FileWarning size={14} strokeWidth={2.2} style={{ color: "#f59e0b" }} /> Missing Media Files
             </span>
             <h2 style={{ margin: "4px 0 6px" }}>Relink Source Media</h2>
-            <p style={{ margin: 0, fontSize: "0.85rem", opacity: 0.85 }}>
+            <p style={{ margin: 0, fontSize: "0.85rem", opacity: 0.85, maxWidth: "100%" }}>
               The project contains media files that were moved or created on another computer.
               Locate the corresponding files on this system to continue.
             </p>
@@ -144,12 +146,27 @@ export function RelinkMediaModal({
           </button>
         </div>
 
-        <div style={{ margin: "14px 0 8px", display: "flex", justifyContent: "flex-end" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "8px 12px",
+            borderRadius: 10,
+            background: "rgba(255, 255, 255, 0.03)",
+            border: "1px solid rgba(255, 255, 255, 0.06)",
+          }}
+        >
+          <span style={{ fontSize: "0.82rem", color: "#8896a3", fontWeight: 600 }}>
+            {missingCount === 0
+              ? "All files found"
+              : `${missingCount} missing ${missingCount === 1 ? "file" : "files"}`}
+          </span>
           <button
             type="button"
-            className="secondary-btn"
+            className="episode-label-secondary"
             onClick={handleScanFolder}
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: "0.82rem" }}
+            style={{ padding: "6px 12px", fontSize: "0.82rem" }}
           >
             <FolderSearch size={15} />
             Scan Folder for Media
@@ -163,7 +180,7 @@ export function RelinkMediaModal({
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            padding: "4px 0",
+            padding: "2px 0",
           }}
         >
           {mediaList.map((item, index) => {
@@ -178,41 +195,61 @@ export function RelinkMediaModal({
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  backgroundColor: "rgba(255, 255, 255, 0.04)",
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  backgroundColor: isOk
+                    ? "rgba(34, 197, 94, 0.04)"
+                    : "rgba(245, 158, 11, 0.04)",
                   border: isOk
-                    ? "1px solid rgba(34, 197, 94, 0.25)"
-                    : "1px solid rgba(245, 158, 11, 0.25)",
-                  gap: 12,
+                    ? "1px solid rgba(34, 197, 94, 0.22)"
+                    : "1px solid rgba(245, 158, 11, 0.28)",
+                  gap: 14,
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                  {isOk ? (
-                    <FileCheck2 size={18} color="#22c55e" style={{ flexShrink: 0 }} />
-                  ) : (
-                    <FileWarning size={18} color="#f59e0b" style={{ flexShrink: 0 }} />
-                  )}
-                  <div style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}>
+                  <div
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: 8,
+                      display: "grid",
+                      placeItems: "center",
+                      backgroundColor: isOk
+                        ? "rgba(34, 197, 94, 0.12)"
+                        : "rgba(245, 158, 11, 0.12)",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {isOk ? (
+                      <FileCheck2 size={17} color="#22c55e" />
+                    ) : (
+                      <FileWarning size={17} color="#f59e0b" />
+                    )}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
                     <div
                       style={{
-                        fontWeight: 600,
+                        fontWeight: 650,
                         fontSize: "0.88rem",
+                        color: "#eef3f8",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
                       }}
+                      title={fileNameStr}
                     >
                       {fileNameStr}
                     </div>
                     <div
                       style={{
-                        fontSize: "0.75rem",
-                        opacity: 0.6,
+                        fontSize: "0.76rem",
+                        color: isOk ? "#22c55e" : "#8896a3",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
+                        marginTop: 2,
                       }}
+                      title={item.currentPath || item.source.path}
                     >
                       {item.currentPath || item.source.path}
                     </div>
@@ -221,14 +258,11 @@ export function RelinkMediaModal({
 
                 <button
                   type="button"
-                  className="secondary-btn"
+                  className="episode-label-secondary"
                   onClick={() => handleBrowseSingle(index)}
                   style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "4px 10px",
-                    fontSize: "0.78rem",
+                    padding: "6px 12px",
+                    fontSize: "0.8rem",
                     flexShrink: 0,
                   }}
                 >
@@ -240,24 +274,18 @@ export function RelinkMediaModal({
           })}
         </div>
 
-        <div className="episode-label-actions" style={{ marginTop: 16 }}>
+        <div className="episode-label-actions" style={{ marginTop: 6 }}>
           <div className="episode-label-actions-right">
             <button type="button" className="episode-label-cancel" onClick={onCancel}>
               Cancel
             </button>
             <button
               type="button"
-              className="primary-btn"
+              className="episode-label-confirm"
               onClick={handleConfirm}
               disabled={!allResolved}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                opacity: allResolved ? 1 : 0.5,
-              }}
             >
-              <FileCheck2 size={15} />
+              <FileCheck2 size={16} />
               Load Project
             </button>
           </div>
