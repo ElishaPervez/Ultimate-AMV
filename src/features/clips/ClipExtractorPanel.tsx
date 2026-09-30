@@ -1332,8 +1332,13 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     [applyLoadedProject, isExtracting],
   );
 
+  // A double-clicked project is imported once per launch. handleImportProject
+  // changes identity whenever a scan or export starts or stops, so without this
+  // guard the effect would re-run and reload the project over the user's work.
+  const startupProjectRequestedRef = React.useRef(false);
   React.useEffect(() => {
-    if (!projectSyncEnabled) return;
+    if (!projectSyncEnabled || startupProjectRequestedRef.current) return;
+    startupProjectRequestedRef.current = true;
     void invoke<string | null>("get_startup_project_path")
       .then((startupPath) => {
         if (startupPath) {

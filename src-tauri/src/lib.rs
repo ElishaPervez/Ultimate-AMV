@@ -404,12 +404,21 @@ async fn scan_folder_for_files(dir: String, target_names: Vec<String>) -> std::c
     .unwrap_or_default()
 }
 
+// Set the first time the frontend asks for the double-clicked project, so the
+// launch argument is handed out once per app launch. The process arguments never
+// change, so without this every later call would reload the project over
+// whatever the user has done since.
+static STARTUP_PROJECT_CONSUMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[tauri::command]
 fn get_startup_project_path() -> Option<String> {
-    std::env::args().skip(1).find(|arg| {
-        let lower = arg.to_lowercase();
-        lower.ends_with(".umv") || lower.ends_with(".json")
-    })
+    if STARTUP_PROJECT_CONSUMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    std::env::args()
+        .skip(1)
+        .find(|arg| arg.to_lowercase().ends_with(".umv"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
