@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ClipPreviewItem } from "../types/clip";
-import type { ProjectSourceItem, UAMVProjectManifest } from "../types/project";
+import type { ProjectSourceItem } from "../types/project";
 import {
   createProjectManifest,
   extractDirectoryFromPath,

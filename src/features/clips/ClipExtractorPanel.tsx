@@ -30,7 +30,7 @@ import { parseBridgePayload, readBridgeError } from "../../utils/bridge";
 import { VideoOutputControl } from "../video/VideoOutputControl";
 import { ClipRateControl } from "./ClipRateControl";
 
-const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi", "umv", "json"];
+const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi"];
 const clipInputAccept = extensionAccept(CLIP_INPUT_EXTENSIONS);
 
 let sceneProxyRequestSequence = 0;
@@ -1158,6 +1158,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
         setResult(syntheticResult);
         setActiveGridItems(reconstructedGrid);
         setPreviewStates({});
+        setMergeMode(false);
+        setMergeOrder([]);
+        setError(null);
+        setCompatModal(null);
 
         if (manifest.selectedClipIds) {
           setSelectedClipIds(new Set(manifest.selectedClipIds));
@@ -1215,8 +1219,24 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (!result || displayedClips.length === 0) return;
 
     try {
+      // Build episode list from paths the scenes actually carry so UNC/resolved paths match
+      const distinctSourcePaths = Array.from(
+        new Set(
+          displayedClips
+            .flatMap((clip) => {
+              if (clip.isUnified && clip.segments) {
+                return clip.segments.map((s) => s.source);
+              }
+              return [clip.path || clip.sourceSrc];
+            })
+            .concat(result.scenes ? result.scenes.map((s) => s.source) : [])
+            .concat(selectedVideos)
+            .filter(Boolean)
+        )
+      );
+
       const sources: ProjectSourceItem[] = (
-        selectedVideos.length > 0 ? selectedVideos : [result.input]
+        distinctSourcePaths.length > 0 ? distinctSourcePaths : [result.input]
       ).map((srcPath, idx) => ({
         id: `src-${idx + 1}`,
         path: srcPath,
