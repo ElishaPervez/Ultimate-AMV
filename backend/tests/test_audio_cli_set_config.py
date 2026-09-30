@@ -844,7 +844,7 @@ class TestSetConfigScenePreviewHeight:
 
 
 # ---------------------------------------------------------------------------
-# set_config — enable_project_sync
+# set_config - enable_project_sync
 # ---------------------------------------------------------------------------
 
 class TestSetConfigEnableProjectSync:
