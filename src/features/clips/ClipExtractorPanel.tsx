@@ -1304,6 +1304,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           clipAbortRef.current = null;
           clipCancellingRef.current = false;
           setIsExtracting(false);
+          // Mark the old run as superseded, exactly like a replacement drop, so
+          // its awaited result, error, and finally block leave the project alone.
+          clipBatchProgressRef.current = null;
+          clipProgressGenerationRef.current = resetClipRunProgress();
         }
 
         setError(null);
