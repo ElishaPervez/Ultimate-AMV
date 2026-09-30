@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ClipPreviewItem } from "../types/clip";
 import type { ProjectSourceItem } from "../types/project";
 import {
+  collectProjectSourcePaths,
   createProjectManifest,
   extractDirectoryFromPath,
   extractFilenameFromPath,
@@ -9,6 +10,13 @@ import {
   remapClipsWithResolvedSources,
   serializeProjectManifest,
 } from "./projectManifest";
+
+// What the app stores in sourceSrc: the in-app preview address for the file
+// (the Windows form of convertFileSrc), not the file path itself. The real
+// path lives in `path` and in each merged segment's `source`.
+function assetUrl(filePath: string): string {
+  return `http://asset.localhost/${encodeURIComponent(filePath)}`;
+}
 
 describe("projectManifest helpers", () => {
   it("extracts filenames and directories correctly across path styles", () => {
@@ -38,7 +46,8 @@ describe("projectManifest helpers", () => {
       label: "Scene 1",
       range: "00:01:00 - 00:01:05",
       sourceName: "Frieren_01.mp4",
-      sourceSrc: "D:\\Footage\\Frieren_01.mp4",
+      sourceSrc: assetUrl("D:\\Footage\\Frieren_01.mp4"),
+      path: "D:\\Footage\\Frieren_01.mp4",
       sourceStart: 60,
       sourceEnd: 65,
       previewStart: 60.1,
@@ -52,7 +61,8 @@ describe("projectManifest helpers", () => {
       label: "Merged Clip (2, 3)",
       range: "2 clips merged · 10.0s",
       sourceName: "Frieren_01.mp4",
-      sourceSrc: "D:\\Footage\\Frieren_01.mp4",
+      sourceSrc: assetUrl("D:\\Footage\\Frieren_01.mp4"),
+      path: "D:\\Footage\\Frieren_01.mp4",
       sourceStart: 120,
       sourceEnd: 130,
       previewStart: 120,
@@ -129,7 +139,8 @@ describe("projectManifest helpers", () => {
         label: "Scene 1",
         range: "00:00:10 - 00:00:15",
         sourceName: "ep1.mp4",
-        sourceSrc: oldPath,
+        sourceSrc: assetUrl(oldPath),
+        path: oldPath,
         sourceStart: 10,
         sourceEnd: 15,
         previewStart: 10,
@@ -144,7 +155,8 @@ describe("projectManifest helpers", () => {
         label: "Merged Clip (2, 3)",
         range: "2 clips merged",
         sourceName: "ep1.mp4",
-        sourceSrc: oldPath,
+        sourceSrc: assetUrl(oldPath),
+        path: oldPath,
         sourceStart: 20,
         sourceEnd: 30,
         previewStart: 20,
@@ -172,18 +184,20 @@ describe("projectManifest helpers", () => {
 
     const remapped = remapClipsWithResolvedSources(clips, { [oldPath]: newPath });
 
-    expect(remapped[0].sourceSrc).toBe(newPath);
+    expect(remapped[0].path).toBe(newPath);
     expect(remapped[0].playbackSrc).toBeUndefined(); // Cleared machine-specific proxy
-    expect(remapped[1].sourceSrc).toBe(newPath);
+    expect(remapped[1].path).toBe(newPath);
     expect(remapped[1].segments?.[0].source).toBe(newPath);
     expect(remapped[1].segments?.[1].source).toBe(newPath);
   });
 
   it("remaps clips across mapped drive letters and UNC network paths", () => {
-    const mappedPath = "Z:\\Anime\\ep01.mp4";
     const uncPath = "\\\\NAS\\Anime\\ep01.mp4";
     const localPath = "C:\\LocalAnime\\ep01.mp4";
 
+    // The user picked Z:\Anime\ep01.mp4 on a mapped drive; the scanner rewrote it
+    // to the UNC form, so the scene and the manifest both carry uncPath. Another
+    // PC then relinks that episode to a local copy.
     const clips: ClipPreviewItem[] = [
       {
         id: "clip-1",
@@ -191,8 +205,8 @@ describe("projectManifest helpers", () => {
         label: "Scene 1",
         range: "00:00:10 - 00:00:15",
         sourceName: "ep01.mp4",
-        sourceSrc: mappedPath,
-        path: mappedPath,
+        sourceSrc: assetUrl(uncPath),
+        path: uncPath,
         sourceStart: 10,
         sourceEnd: 15,
         previewStart: 10,
@@ -201,9 +215,47 @@ describe("projectManifest helpers", () => {
       },
     ];
 
-    // Manifest recorded UNC path, but user resolved to localPath
     const remapped = remapClipsWithResolvedSources(clips, { [uncPath]: localPath });
-    expect(remapped[0].sourceSrc).toBe(localPath);
     expect(remapped[0].path).toBe(localPath);
+  });
+
+  it("lists an episode once when the picked path differs from the scene's path", () => {
+    const pickedPath = "Z:\\Anime\\ep01.mp4";
+    const scannedPath = "\\\\NAS\\Anime\\ep01.mp4";
+
+    const paths = collectProjectSourcePaths(
+      [scannedPath, scannedPath],
+      [pickedPath],
+      { [pickedPath]: scannedPath },
+    );
+
+    expect(paths).toEqual([scannedPath]);
+  });
+
+  it("keeps picked episodes that no scene references, each only once", () => {
+    const scannedEp1 = "\\\\NAS\\Anime\\ep01.mp4";
+    const scannedEp2 = "\\\\NAS\\Anime\\ep02.mp4";
+
+    const paths = collectProjectSourcePaths(
+      [scannedEp1],
+      ["Z:\\Anime\\ep01.mp4", "Z:\\Anime\\ep02.mp4", "Z:\\Anime\\ep03.mp4"],
+      {
+        "Z:\\Anime\\ep01.mp4": scannedEp1,
+        // Scanned but produced no scenes: listed by the scanner's path.
+        "Z:\\Anime\\ep02.mp4": scannedEp2,
+        // ep03 was never scanned (batch cancelled): listed as picked.
+      },
+    );
+
+    expect(paths).toEqual([scannedEp1, scannedEp2, "Z:\\Anime\\ep03.mp4"]);
+  });
+
+  it("treats paths that differ only by case or slash direction as one episode", () => {
+    const paths = collectProjectSourcePaths(
+      ["D:\\Footage\\Frieren_01.mp4", ""],
+      ["d:/footage/FRIEREN_01.mp4"],
+    );
+
+    expect(paths).toEqual(["D:\\Footage\\Frieren_01.mp4"]);
   });
 });

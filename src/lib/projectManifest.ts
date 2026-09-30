@@ -152,6 +152,30 @@ export function normalizePath(filePath: string): string {
   return filePath.replace(/\\/g, "/").toLowerCase();
 }
 
+// Lists each episode once for a project file. Scene paths come first because
+// the scanner rewrites what it opens (a mapped drive such as Z:\ comes back as
+// \\server\share\), so they are what the project actually references. A picked
+// path is only added when no scene references that episode, first translated
+// through scannedPathByPick (what the scanner reported for that pick) so a
+// picked path and its rewritten twin are never both listed.
+export function collectProjectSourcePaths(
+  scenePaths: string[],
+  pickedPaths: string[],
+  scannedPathByPick: Record<string, string> = {},
+): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  const add = (path: string) => {
+    const key = normalizePath(path);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    paths.push(path);
+  };
+  scenePaths.forEach(add);
+  pickedPaths.forEach((path) => add(scannedPathByPick[path] || path));
+  return paths;
+}
+
 export async function resolveProjectSources(
   sources: ProjectSourceItem[],
   projectFilePath?: string

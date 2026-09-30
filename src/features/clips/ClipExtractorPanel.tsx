@@ -64,6 +64,7 @@ import type { ConversionProgress, VideoControlSpec, VideoGpuStatus } from "../..
 import { ClipCompatConvertModal } from "./ClipCompatConvertModal";
 import { RelinkMediaModal } from "./RelinkMediaModal";
 import {
+  collectProjectSourcePaths,
   createProjectManifest,
   exportProjectFile,
   importProjectFile,
@@ -1075,6 +1076,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   const canExtract = selectedVideos.length > 0 && !isExtracting;
   const clipCancellingRef = React.useRef(false);
   const clipAbortRef = React.useRef<((reason: Error) => void) | null>(null);
+  // Picked episode path -> the path the scanner reported for it (a mapped drive
+  // comes back as its \\server\share form). Lets a project export tell that a
+  // picked path and a scene path are the same episode without touching the disk.
+  const scannedSourceByPickRef = React.useRef<Record<string, string>>({});
   const readyPreviewCount = React.useMemo(
     () => displayedClips.reduce((count, clip) => count + (clip.previewState?.status === "ready" ? 1 : 0), 0),
     [displayedClips],
@@ -1220,20 +1225,19 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     if (!result || displayedClips.length === 0) return;
 
     try {
-      // Build episode list from paths the scenes actually carry so UNC/resolved paths match
-      const distinctSourcePaths = Array.from(
-        new Set(
-          displayedClips
-            .flatMap((clip) => {
-              if (clip.isUnified && clip.segments) {
-                return clip.segments.map((s) => s.source);
-              }
-              return [clip.path || clip.sourceSrc];
-            })
-            .concat(result.scenes ? result.scenes.map((s) => s.source) : [])
-            .concat(selectedVideos)
-            .filter(Boolean)
-        )
+      // Build episode list from paths the scenes actually carry so UNC/resolved
+      // paths match. sourceSrc is the in-app preview address, never an episode.
+      const distinctSourcePaths = collectProjectSourcePaths(
+        displayedClips
+          .flatMap((clip) => {
+            if (clip.isUnified && clip.segments) {
+              return clip.segments.map((s) => s.source);
+            }
+            return [clip.path ?? ""];
+          })
+          .concat(result.scenes ? result.scenes.map((s) => s.source) : []),
+        selectedVideos,
+        scannedSourceByPickRef.current,
       );
 
       const sources: ProjectSourceItem[] = (
@@ -2112,6 +2116,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
             }
           : rawPayload;
         if (!isCurrentRun()) return;
+        scannedSourceByPickRef.current[rawPath] = payload.input;
         results.push(payload);
         setResult(combineClipResults(results, clipMode));
         publishDetectionProgress(runGeneration, {

@@ -124,7 +124,7 @@ import React from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { dispatchTauriEvent, mockInvoke, mockInvokeFn } from '../../../tests/setup/tauri'
-import { mockDialogOpen } from '../../../tests/setup/dialog'
+import { mockDialogOpen, mockDialogSave } from '../../../tests/setup/dialog'
 import {
   ClipExtractorPanel,
   GRID_GRAB_DRAG_THRESHOLD_PX,
@@ -1609,6 +1609,31 @@ describe('ClipExtractorPanel - .umv project files', () => {
     await dropFiles(['C:\\ep1.mkv', 'C:\\ep1.info.json'])
     await screen.findByText('ep1.mkv')
     expect(invokeCalls('read_file')).toHaveLength(0)
+  })
+
+  it('saves a mapped-drive episode once when the scanner reports its network path', async () => {
+    installProjectMocks(true)
+    const pickedPath = 'Z:\\Anime\\ep01.mkv'
+    const scannedPath = '\\\\NAS\\Anime\\ep01.mkv'
+    mockInvoke('clip_extract', () => sceneExtractionResult(scannedPath, 'Network scene'))
+    let savedContent = ''
+    mockInvoke('write_file', (args: { content: string }) => {
+      savedContent = args.content
+      return null
+    })
+    mockDialogOpen.mockResolvedValueOnce([pickedPath])
+    mockDialogSave.mockResolvedValueOnce('C:\\Projects\\out.umv')
+
+    const user = userEvent.setup()
+    await renderPanel()
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await screen.findByText('Network scene')
+    await user.click(screen.getByRole('button', { name: /export project/i }))
+    await waitFor(() => expect(savedContent).not.toBe(''))
+
+    const saved = JSON.parse(savedContent) as { sources: Array<{ path: string }> }
+    expect(saved.sources.map((source) => source.path)).toEqual([scannedPath])
   })
 
   it('only mentions .umv in the drop overlay when project sync is on', async () => {
