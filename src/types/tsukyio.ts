@@ -12,7 +12,7 @@ export type TsukyioCategoryId =
   | "sfx"
   | "remake_clips"
   | "green_screen"
-  | "credits";
+  | "edit_audios";
 
 export type TsukyioItemType = "folder" | "video" | "audio";
 

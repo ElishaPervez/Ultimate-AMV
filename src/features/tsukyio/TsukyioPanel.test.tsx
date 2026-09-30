@@ -149,7 +149,7 @@ async function renderConnected() {
   const result = render(<TsukyioPanel active onOpenSettings={onOpenSettings} />);
   await screen.findByText("Browse the anime asset vault");
   // Wait for the stats fetch to land too, so it can't resolve outside act().
-  await screen.findByText("1,234 clips");
+  await screen.findByText("1,234 Precuts");
   return { ...result, onOpenSettings };
 }
 
@@ -248,7 +248,7 @@ describe("TsukyioPanel", () => {
       });
 
       expect(await screen.findByText("Browse the anime asset vault")).toBeInTheDocument();
-      expect(await screen.findByText("1,234 clips")).toBeInTheDocument();
+      expect(await screen.findByText("1,234 Precuts")).toBeInTheDocument();
     });
 
     it("loads the discovery home with stats (and no browse) when a key is configured", async () => {

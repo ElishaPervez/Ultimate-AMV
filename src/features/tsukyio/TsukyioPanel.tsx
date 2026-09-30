@@ -27,7 +27,6 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   Sparkles,
-  Type,
   User,
   Volume2,
   Wand2,
@@ -52,6 +51,7 @@ import {
   CATEGORIES,
   CATEGORY_ACCENTS,
   REAL_CATEGORIES,
+  categoryCountLabel,
   categoryIdFromDisplay,
   categoryLabel,
   isRealCategory,
@@ -131,7 +131,7 @@ const CATEGORY_ICONS: Record<string, React.ComponentType<{ size?: number; stroke
   sfx: Volume2,
   remake_clips: Wand2,
   green_screen: ImageIcon,
-  credits: Type,
+  edit_audios: Music2,
 };
 
 // Public origin that actually serves the vault's static files (thumbnails).
@@ -1385,7 +1385,9 @@ function DiscoveryHome({
               </span>
               <span className="tsukyio-tile-name">{cat.label}</span>
               <span className="tsukyio-tile-count">
-                {typeof count === "number" ? `${formatCount(count)} clips` : "Browse"}
+                {typeof count === "number"
+                  ? `${formatCount(count)} ${categoryCountLabel(cat.id)}`
+                  : "Browse"}
               </span>
             </button>
           );

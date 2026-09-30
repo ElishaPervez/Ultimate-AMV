@@ -1399,7 +1399,7 @@
 .tsukyio-tile.accent-sfx { --tile-a: #f59e0b; --tile-b: #f97316; }
 .tsukyio-tile.accent-remake { --tile-a: #8b5cf6; --tile-b: #ec4899; }
 .tsukyio-tile.accent-green { --tile-a: #22c55e; --tile-b: #16a34a; }
-.tsukyio-tile.accent-credits { --tile-a: #64748b; --tile-b: #475569; }
+.tsukyio-tile.accent-editaudios { --tile-a: #6366f1; --tile-b: #ec4899; }
 
 /* ============================================================
    GROUPED SEARCH RESULTS (stacked sections)
