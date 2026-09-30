@@ -1510,6 +1510,67 @@ describe('ClipExtractorPanel - .umv project files', () => {
     rectSpy = null
   })
 
+  it('imports a double-clicked project once, even after a scan starts', async () => {
+    installProjectMocks(true)
+    // Returns the path on every call so the panel alone must stop the reload.
+    mockInvoke('get_startup_project_path', () => PROJECT_PATH)
+    const detectionResolvers: Array<(value: string) => void> = []
+    mockInvoke('clip_extract', () => new Promise<string>((resolve) => {
+      detectionResolvers.push(resolve)
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\new.mkv'])
+
+    const user = userEvent.setup()
+    await renderPanel()
+    await screen.findByText('Project scene')
+
+    await user.click(screen.getByRole('button', { name: /change episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(detectionResolvers).toHaveLength(1))
+    await act(async () => {
+      detectionResolvers[0](sceneExtractionResult('C:\\new.mkv', 'New scene'))
+    })
+    await screen.findByText('New scene')
+
+    expect(invokeCalls('get_startup_project_path')).toHaveLength(1)
+    expect(invokeCalls('read_file')).toHaveLength(1)
+    expect(invokeCalls('cancel_clip')).toHaveLength(0)
+    expect(screen.queryByText('Project scene')).not.toBeInTheDocument()
+  })
+
+  it('keeps a scan stopped by a project import from reporting over the project', async () => {
+    installProjectMocks(false)
+    mockInvoke('get_startup_project_path', () => PROJECT_PATH)
+    let rejectScan: ((reason: Error) => void) | null = null
+    mockInvoke('clip_extract', () => new Promise<string>((_resolve, reject) => {
+      rejectScan = reject
+    }))
+    mockDialogOpen.mockResolvedValueOnce(['C:\\old.mkv'])
+
+    const user = userEvent.setup()
+    await renderPanel()
+    await user.click(await screen.findByRole('button', { name: /select episodes/i }))
+    await user.click(await screen.findByRole('button', { name: /extract clips/i }))
+    await waitFor(() => expect(rejectScan).not.toBeNull())
+
+    // Turning project sync on mid-scan imports the launch project.
+    act(() => {
+      window.dispatchEvent(new CustomEvent('project-sync-enabled-changed', { detail: { enabled: true } }))
+    })
+    await screen.findByText('Project scene')
+    expect(invokeCalls('cancel_clip')).toHaveLength(1)
+
+    await act(async () => {
+      rejectScan!(new Error('Old scan failed late'))
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(screen.queryByText(/Old scan failed late/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/can't be read directly/)).not.toBeInTheDocument()
+    expect(screen.getByText('Project scene')).toBeInTheDocument()
+  })
+
   it('opens a dropped .umv as a project when project sync is on', async () => {
     installProjectMocks(true)
     await renderPanel()
