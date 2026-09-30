@@ -178,4 +178,32 @@ describe("projectManifest helpers", () => {
     expect(remapped[1].segments?.[0].source).toBe(newPath);
     expect(remapped[1].segments?.[1].source).toBe(newPath);
   });
+
+  it("remaps clips across mapped drive letters and UNC network paths", () => {
+    const mappedPath = "Z:\\Anime\\ep01.mp4";
+    const uncPath = "\\\\NAS\\Anime\\ep01.mp4";
+    const localPath = "C:\\LocalAnime\\ep01.mp4";
+
+    const clips: ClipPreviewItem[] = [
+      {
+        id: "clip-1",
+        index: 1,
+        label: "Scene 1",
+        range: "00:00:10 - 00:00:15",
+        sourceName: "ep01.mp4",
+        sourceSrc: mappedPath,
+        path: mappedPath,
+        sourceStart: 10,
+        sourceEnd: 15,
+        previewStart: 10,
+        previewEnd: 15,
+        fps: 24,
+      },
+    ];
+
+    // Manifest recorded UNC path, but user resolved to localPath
+    const remapped = remapClipsWithResolvedSources(clips, { [uncPath]: localPath });
+    expect(remapped[0].sourceSrc).toBe(localPath);
+    expect(remapped[0].path).toBe(localPath);
+  });
 });

@@ -774,16 +774,27 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
   function acceptVideos(paths: string[]) {
     if (paths.length === 0) return;
 
-    const projectFile = paths.find(
-      (p) => {
-        const lower = p.toLowerCase();
-        return lower.endsWith(".umv") || lower.endsWith(".json");
-      },
-    );
-    if (projectFile) {
-      void handleImportProject(projectFile);
-      return;
+    const videoExts = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv", ".wmv", ".mpeg", ".mpg"];
+    const videoPaths = paths.filter((p) => {
+      const lower = p.toLowerCase();
+      return videoExts.some((ext) => lower.endsWith(ext));
+    });
+
+    // If project sync is enabled, check if a single project file was dropped without video files
+    if (projectSyncEnabled && videoPaths.length === 0 && paths.length === 1) {
+      const lower = paths[0].toLowerCase();
+      if (lower.endsWith(".umv") || lower.endsWith(".json")) {
+        void handleImportProject(paths[0]);
+        return;
+      }
     }
+
+    // When video files are present (even if downloader metadata .json was dropped alongside them), only load videos
+    const targetPaths = videoPaths.length > 0 ? videoPaths : paths.filter((p) => {
+      const lower = p.toLowerCase();
+      return !lower.endsWith(".json") && !lower.endsWith(".umv");
+    });
+    if (targetPaths.length === 0) return;
 
     const replacingDetection =
       clipBatchProgressRef.current != null
@@ -1255,8 +1266,27 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     async (specifiedPath?: string) => {
       try {
         const loadResult = await importProjectFile(specifiedPath);
-        if (!loadResult) return;
+        if (!loadResult) {
+          if (specifiedPath) {
+            setError(`Failed to open project: "${fileName(specifiedPath)}" could not be parsed.`);
+          }
+          return;
+        }
 
+        // Cancel any active scene detection before applying the new project
+        if (
+          clipBatchProgressRef.current != null
+          || (isExtracting && !exportProgressActiveRef.current)
+        ) {
+          clipCancellingRef.current = true;
+          void invoke("cancel_clip").catch(() => {});
+          clipAbortRef.current?.(new Error("SOURCE_REPLACED"));
+          clipAbortRef.current = null;
+          clipCancellingRef.current = false;
+          setIsExtracting(false);
+        }
+
+        setError(null);
         if (loadResult.hasMissingMedia) {
           setRelinkData({
             open: true,
@@ -1272,23 +1302,27 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
           applyLoadedProject(loadResult.manifest, initialMap);
         }
       } catch (err) {
+        const errorMsg = readBridgeError(err);
+        setError(`Failed to open project: ${errorMsg}`);
         logFrontend("error", "project.import.error", "Failed to import project", {
-          error: readBridgeError(err),
+          error: errorMsg,
         });
       }
     },
-    [applyLoadedProject],
+    [applyLoadedProject, isExtracting],
   );
 
   React.useEffect(() => {
+    if (!projectSyncEnabled) return;
     void invoke<string | null>("get_startup_project_path")
       .then((startupPath) => {
         if (startupPath) {
+          window.dispatchEvent(new CustomEvent("navigate-section", { detail: "clip-hunting" }));
           void handleImportProject(startupPath);
         }
       })
       .catch(() => {});
-  }, [handleImportProject]);
+  }, [projectSyncEnabled, handleImportProject]);
   const exportOptions = React.useMemo(
     () => clipExportOptions(clipMode, gpuStatus),
     [clipMode, gpuStatus],
@@ -2958,8 +2992,17 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                 type="button"
                 className="clip-tool-button spring-motion"
                 onClick={() => void handleImportProject()}
-                title="Open an existing project file (.umv / .json)"
-                style={{ flex: 1, minWidth: 0 }}
+                disabled={isExtracting || clipBatchProgressRef.current != null}
+                title={
+                  isExtracting || clipBatchProgressRef.current != null
+                    ? "Cannot import project while scene extraction is running"
+                    : "Open an existing project file (.umv / .json)"
+                }
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  opacity: isExtracting || clipBatchProgressRef.current != null ? 0.45 : 1,
+                }}
               >
                 <FileDown size={17} strokeWidth={2} />
                 <span>Import Project</span>

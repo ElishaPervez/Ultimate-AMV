@@ -147,6 +147,11 @@ export async function scanFolderForFiles(
   }
 }
 
+export function normalizePath(filePath: string): string {
+  if (!filePath) return "";
+  return filePath.replace(/\\/g, "/").toLowerCase();
+}
+
 export async function resolveProjectSources(
   sources: ProjectSourceItem[],
   projectFilePath?: string
@@ -154,22 +159,29 @@ export async function resolveProjectSources(
   const projectDir = projectFilePath ? extractDirectoryFromPath(projectFilePath) : "";
   const missingNames: string[] = [];
 
-  const intermediateList: Array<{
-    source: ProjectSourceItem;
-    currentPath: string;
-    status: "resolved" | "missing";
-  }> = [];
+  const checks = await Promise.all(
+    sources.map(async (source) => {
+      try {
+        const exists = await checkFileExists(source.path);
+        return { source, exists };
+      } catch {
+        return { source, exists: false };
+      }
+    })
+  );
 
-  for (const source of sources) {
-    const originalExists = await checkFileExists(source.path);
-    if (originalExists) {
+  const intermediateList: ResolvedSourceMedia[] = [];
+
+  for (const { source, exists } of checks) {
+    if (exists) {
       intermediateList.push({
         source,
         currentPath: source.path,
         status: "resolved",
       });
     } else {
-      missingNames.push(source.filename || extractFilenameFromPath(source.path));
+      const name = source.filename || extractFilenameFromPath(source.path);
+      missingNames.push(name);
       intermediateList.push({
         source,
         currentPath: source.path,
@@ -180,16 +192,23 @@ export async function resolveProjectSources(
 
   // If there are missing files and a project directory is available, check for same-named files there
   if (missingNames.length > 0 && projectDir) {
-    const matchedFiles = await scanFolderForFiles(projectDir, missingNames);
-    for (const item of intermediateList) {
-      if (item.status === "missing") {
-        const filename = item.source.filename || extractFilenameFromPath(item.source.path);
-        const autoFound = matchedFiles[filename] || matchedFiles[filename.toLowerCase()];
-        if (autoFound) {
-          item.currentPath = autoFound;
-          item.status = "resolved";
+    try {
+      const matchedFiles = await scanFolderForFiles(projectDir, missingNames);
+      for (const item of intermediateList) {
+        if (item.status === "missing") {
+          const filename = item.source.filename || extractFilenameFromPath(item.source.path);
+          const autoFound =
+            matchedFiles[filename] ||
+            matchedFiles[filename.toLowerCase()] ||
+            matchedFiles[normalizePath(filename)];
+          if (autoFound) {
+            item.currentPath = autoFound;
+            item.status = "resolved";
+          }
         }
       }
+    } catch {
+      // Ignore scan failures; manual relink remains available
     }
   }
 
@@ -202,9 +221,33 @@ export function remapClipsWithResolvedSources(
 ): ClipPreviewItem[] {
   if (!pathMap || Object.keys(pathMap).length === 0) return clips;
 
+  const exactMap: Record<string, string> = {};
+  const normalizedMap: Record<string, string> = {};
+  const filenameMap: Record<string, string> = {};
+
+  for (const [orig, resolved] of Object.entries(pathMap)) {
+    if (!orig || !resolved) continue;
+    exactMap[orig] = resolved;
+    normalizedMap[normalizePath(orig)] = resolved;
+    const fname = extractFilenameFromPath(orig).toLowerCase();
+    if (fname) {
+      filenameMap[fname] = resolved;
+    }
+  }
+
+  function resolvePath(orig: string | undefined): string | undefined {
+    if (!orig) return undefined;
+    if (exactMap[orig]) return exactMap[orig];
+    const norm = normalizePath(orig);
+    if (normalizedMap[norm]) return normalizedMap[norm];
+    const fname = extractFilenameFromPath(orig).toLowerCase();
+    if (filenameMap[fname]) return filenameMap[fname];
+    return orig;
+  }
+
   return clips.map((clip) => {
-    const newSource = pathMap[clip.sourceSrc] || clip.sourceSrc;
-    const newPath = clip.path && pathMap[clip.path] ? pathMap[clip.path] : newSource;
+    const newSource = resolvePath(clip.sourceSrc) || clip.sourceSrc;
+    const newPath = resolvePath(clip.path) || newSource;
     const newSourceName = extractFilenameFromPath(newSource);
 
     const remapped: ClipPreviewItem = {
@@ -221,7 +264,7 @@ export function remapClipsWithResolvedSources(
     if (clip.segments && Array.isArray(clip.segments)) {
       remapped.segments = clip.segments.map((seg) => ({
         ...seg,
-        source: pathMap[seg.source] || seg.source,
+        source: resolvePath(seg.source) || seg.source,
         playbackSrc: undefined,
         playbackMode: undefined,
       }));

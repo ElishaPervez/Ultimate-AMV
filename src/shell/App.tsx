@@ -287,6 +287,16 @@ export function App() {
       setOpenGroups((g) => ({ ...g, media: true }));
     }
   }, []);
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      const target = (e as CustomEvent<SectionId>).detail;
+      if (target) handleHomeNavigate(target);
+    };
+    window.addEventListener("navigate-section", handler);
+    return () => window.removeEventListener("navigate-section", handler);
+  }, [handleHomeNavigate]);
+
   // Remember the last tool the user opened so Home can offer a one-click way
   // back. Watching `active` catches every route in — sidebar, icon rail and
   // Home's own cards — instead of wrapping fourteen separate click handlers.

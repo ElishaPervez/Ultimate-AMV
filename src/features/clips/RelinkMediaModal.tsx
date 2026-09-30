@@ -279,6 +279,16 @@ export function RelinkMediaModal({
             <button type="button" className="episode-label-cancel" onClick={onCancel}>
               Cancel
             </button>
+            {!allResolved && (
+              <button
+                type="button"
+                className="episode-label-secondary"
+                onClick={handleConfirm}
+                title="Load project using the available resolved media files (missing footage will retain original paths)"
+              >
+                Skip Missing & Load
+              </button>
+            )}
             <button
               type="button"
               className="episode-label-confirm"

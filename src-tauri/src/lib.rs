@@ -369,29 +369,39 @@ fn read_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn check_file_exists(path: String) -> bool {
-    std::path::Path::new(&path).is_file()
+async fn check_file_exists(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::path::Path::new(&path).is_file()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tauri::command]
-fn scan_folder_for_files(dir: String, target_names: Vec<String>) -> std::collections::HashMap<String, String> {
-    let mut matches = std::collections::HashMap::new();
-    let target_set: std::collections::HashSet<String> = target_names.into_iter().map(|n| n.to_lowercase()).collect();
-    
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    let lower = file_name.to_lowercase();
-                    if target_set.contains(&lower) {
-                        matches.insert(file_name.to_string(), path.to_string_lossy().to_string());
+async fn scan_folder_for_files(dir: String, target_names: Vec<String>) -> std::collections::HashMap<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut matches = std::collections::HashMap::new();
+        let target_set: std::collections::HashSet<String> = target_names.into_iter().map(|n| n.to_lowercase()).collect();
+        
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                        let lower = file_name.to_lowercase();
+                        if target_set.contains(&lower) {
+                            let path_str = path.to_string_lossy().to_string();
+                            matches.insert(file_name.to_string(), path_str.clone());
+                            matches.insert(lower, path_str);
+                        }
                     }
                 }
             }
         }
-    }
-    matches
+        matches
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]

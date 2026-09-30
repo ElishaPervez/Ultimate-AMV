@@ -48,7 +48,7 @@
       "../python": "python",
       "../backend": "backend",
       "../tools.json": "tools.json",
-      "icons": "icons"
+      "icons/project-file.ico": "icons/project-file.ico"
     },
     "windows": {
       "nsis": {
