@@ -27,9 +27,16 @@
 
 // Must mock @tauri-apps/api/webview BEFORE any component import that triggers
 // useFileDrop, because vitest hoists vi.mock() calls to the top of the file.
+// The drag-drop listener is kept so tests can simulate an OS file drop.
+const webviewMock = vi.hoisted(() => ({
+  dragDropHandler: null as null | ((event: { payload: unknown }) => void),
+}))
 vi.mock('@tauri-apps/api/webview', () => ({
   getCurrentWebview: () => ({
-    onDragDropEvent: () => Promise.resolve(() => {}),
+    onDragDropEvent: (handler: (event: { payload: unknown }) => void) => {
+      webviewMock.dragDropHandler = handler
+      return Promise.resolve(() => {})
+    },
   }),
 }))
 
@@ -1428,5 +1435,130 @@ describe('ClipExtractorPanel â final review regressions', () => {
       expect(grantedTile.querySelector('.clip-video-placeholder.is-loading')).not.toBeInTheDocument()
     })
     expect(ungrantedTile.querySelector('.clip-offset-video')).not.toBeInTheDocument()
+  })
+})
+
+describe('ClipExtractorPanel - .umv project files', () => {
+  const PROJECT_PATH = 'C:\\Projects\\edit.umv'
+
+  function projectManifestJson(source: string, label: string) {
+    return JSON.stringify({
+      schemaVersion: '1.0.0',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      modifiedAt: '2026-01-01T00:00:00.000Z',
+      name: 'edit',
+      sources: [{ id: 'src-1', path: source, filename: 'ep.mkv', duration: 3, fps: 24 }],
+      clips: [{
+        id: 'ep-0-1.000',
+        index: 0,
+        label,
+        range: '00:01 - 00:03',
+        sourceName: 'ep',
+        sourceSrc: `http://asset.localhost/${encodeURIComponent(source)}`,
+        path: source,
+        sourceStart: 1,
+        sourceEnd: 3,
+        previewStart: 1,
+        previewEnd: 3,
+        fps: 24,
+      }],
+    })
+  }
+
+  function installProjectMocks(projectSync: boolean) {
+    installScenePanelMocks(false)
+    mockInvoke('get_config', () => JSON.stringify({
+      clip_extraction_mode: 'cpu',
+      clip_hover_preview: false,
+      featherweight_previews: false,
+      enable_project_sync: projectSync,
+    }))
+    mockInvoke('get_startup_project_path', () => null)
+    mockInvoke('read_file', () => projectManifestJson('C:\\ep.mkv', 'Project scene'))
+    mockInvoke('check_file_exists', () => true)
+    mockInvoke('cancel_clip', () => null)
+  }
+
+  function invokeCalls(command: string) {
+    return mockInvokeFn.mock.calls.filter(([name]) => name === command)
+  }
+
+  async function dropFiles(paths: string[]) {
+    await act(async () => {
+      webviewMock.dragDropHandler?.({
+        payload: { type: 'drop', paths, position: { x: 10, y: 10 } },
+      })
+    })
+  }
+
+  async function renderPanel() {
+    render(<ClipExtractorPanel active />)
+    await waitFor(() => expect(invokeCalls('get_config').length).toBeGreaterThan(0))
+    await waitFor(() => expect(webviewMock.dragDropHandler).not.toBeNull())
+  }
+
+  let rectSpy: { mockRestore: () => void } | null = null
+  beforeEach(() => {
+    // jsdom has no layout, so give every element a real box for drop hit-testing.
+    rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 0, bottom: 1000, left: 0, right: 1000, width: 1000, height: 1000, x: 0, y: 0,
+      toJSON: () => {},
+    } as DOMRect)
+  })
+  afterEach(() => {
+    rectSpy?.mockRestore()
+    rectSpy = null
+  })
+
+  it('opens a dropped .umv as a project when project sync is on', async () => {
+    installProjectMocks(true)
+    await renderPanel()
+    await dropFiles([PROJECT_PATH])
+    await screen.findByText('Project scene')
+    expect(invokeCalls('read_file')[0]?.[1]).toEqual({ path: PROJECT_PATH })
+  })
+
+  it('loads the videos of a mixed drop and says the .umv was skipped', async () => {
+    installProjectMocks(true)
+    await renderPanel()
+    await dropFiles(['C:\\ep1.mkv', PROJECT_PATH])
+    await screen.findByText('ep1.mkv')
+    expect((await screen.findAllByText(/Skipped edit\.umv/)).length).toBeGreaterThan(0)
+    expect(invokeCalls('read_file')).toHaveLength(0)
+  })
+
+  it('ignores .umv drops when project sync is off but still loads videos', async () => {
+    installProjectMocks(false)
+    await renderPanel()
+    await dropFiles([PROJECT_PATH])
+    expect(screen.getByText('No episode selected')).toBeInTheDocument()
+
+    await dropFiles(['C:\\ep1.mkv', PROJECT_PATH])
+    await screen.findByText('ep1.mkv')
+    expect(screen.queryByText(/Skipped/)).not.toBeInTheDocument()
+    expect(invokeCalls('read_file')).toHaveLength(0)
+  })
+
+  it('never treats a dropped .json as a project', async () => {
+    installProjectMocks(true)
+    await renderPanel()
+    await dropFiles(['C:\\ep1.info.json'])
+    expect(screen.getByText('No episode selected')).toBeInTheDocument()
+
+    await dropFiles(['C:\\ep1.mkv', 'C:\\ep1.info.json'])
+    await screen.findByText('ep1.mkv')
+    expect(invokeCalls('read_file')).toHaveLength(0)
+  })
+
+  it('only mentions .umv in the drop overlay when project sync is on', async () => {
+    installProjectMocks(false)
+    await renderPanel()
+    expect(screen.getByText('Drop video(s) to scan for clips')).toBeInTheDocument()
+    expect(screen.queryByText(/\.umv/)).not.toBeInTheDocument()
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('project-sync-enabled-changed', { detail: { enabled: true } }))
+    })
+    expect(screen.getByText('Drop video(s) to scan, or a .umv project to open')).toBeInTheDocument()
   })
 })

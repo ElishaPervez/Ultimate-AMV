@@ -32,6 +32,10 @@ import { ClipRateControl } from "./ClipRateControl";
 
 const CLIP_INPUT_EXTENSIONS = ["mp4", "mkv", "mov", "webm", "avi"];
 const clipInputAccept = extensionAccept(CLIP_INPUT_EXTENSIONS);
+// Only .umv is a project file. The drop zone lets it through only while
+// project sync is on; the video picker never offers it.
+const isProjectFilePath = extensionAccept(["umv"]);
+const clipInputOrProjectAccept = extensionAccept([...CLIP_INPUT_EXTENSIONS, "umv"]);
 
 let sceneProxyRequestSequence = 0;
 function createSceneProxyRequestId(): string {
@@ -773,29 +777,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
 
   function acceptVideos(paths: string[]) {
     if (paths.length === 0) return;
-
-    const videoExts = [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv", ".wmv", ".mpeg", ".mpg"];
-    const videoPaths = paths.filter((p) => {
-      const lower = p.toLowerCase();
-      return videoExts.some((ext) => lower.endsWith(ext));
-    });
-
-    // If project sync is enabled, check if a single project file was dropped without video files
-    if (projectSyncEnabled && videoPaths.length === 0 && paths.length === 1) {
-      const lower = paths[0].toLowerCase();
-      if (lower.endsWith(".umv") || lower.endsWith(".json")) {
-        void handleImportProject(paths[0]);
-        return;
-      }
-    }
-
-    // When video files are present (even if downloader metadata .json was dropped alongside them), only load videos
-    const targetPaths = videoPaths.length > 0 ? videoPaths : paths.filter((p) => {
-      const lower = p.toLowerCase();
-      return !lower.endsWith(".json") && !lower.endsWith(".umv");
-    });
-    if (targetPaths.length === 0) return;
-
     const replacingDetection =
       clipBatchProgressRef.current != null
       || (isExtracting && !exportProgressActiveRef.current);
@@ -866,10 +847,30 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     acceptVideos(normalizeSelectedPaths(selected));
   }
 
+  // Videos win a mixed drop: they load and the .umv is skipped with a message,
+  // so a drop never silently replaces the episodes with a project. A .umv
+  // opens as a project only when it is the only file dropped.
+  function acceptDroppedFiles(paths: string[]) {
+    const projectPaths = paths.filter(isProjectFilePath);
+    const videoPaths = paths.filter((path) => !isProjectFilePath(path));
+    if (videoPaths.length > 0) {
+      acceptVideos(videoPaths);
+      if (projectPaths.length > 0) {
+        setError(`Skipped ${fileName(projectPaths[0])}: drop a project file on its own to open it.`);
+      }
+      return;
+    }
+    if (projectPaths.length === 1) {
+      void handleImportProject(projectPaths[0]);
+      return;
+    }
+    setError("Drop one project file at a time to open it.");
+  }
+
   const dropZone = useFileDrop({
-    accept: clipInputAccept,
+    accept: projectSyncEnabled ? clipInputOrProjectAccept : clipInputAccept,
     enabled: !isExtracting,
-    onDrop: acceptVideos,
+    onDrop: acceptDroppedFiles,
   });
 
   const selectedVideo = selectedVideos[0] ?? null;
@@ -2977,8 +2978,12 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     >
       <div className="drop-zone-overlay">
         <Upload size={32} strokeWidth={1.8} />
-        <span>Drop video(s) or .umv project to load</span>
-        <small>MP4 · MKV · MOV · WEBM · AVI · UMV : multiple files accepted</small>
+        <span>{projectSyncEnabled ? "Drop video(s) to scan, or a .umv project to open" : "Drop video(s) to scan for clips"}</span>
+        <small>
+          {projectSyncEnabled
+            ? "MP4 · MKV · MOV · WEBM · AVI : multiple files accepted · UMV : one project"
+            : "MP4 · MKV · MOV · WEBM · AVI : multiple files accepted"}
+        </small>
       </div>
       <div className="clip-extractor-rail">
         <button type="button" className="clip-import-button glass spring-motion" onClick={pickVideo}>
