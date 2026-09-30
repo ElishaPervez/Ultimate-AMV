@@ -280,4 +280,35 @@ describe('FeatureSettings', () => {
       .find((element) => element.getAttribute('type') === 'number')
     expect(speedNumber).toHaveValue(1.75)
   })
+
+  it('toggling project file sync invokes set_config and dispatches event', async () => {
+    const user = userEvent.setup()
+    const events: CustomEvent<{ enabled: boolean }>[] = []
+    const listener = (e: Event) => events.push(e as CustomEvent<{ enabled: boolean }>)
+    window.addEventListener('project-sync-enabled-changed', listener)
+
+    renderFeatureSettings({
+      backendConfig: { ...baseConfig, enable_project_sync: false },
+    })
+
+    const toggle = screen.getByRole('switch', { name: 'Project file sync (.umv)' })
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+
+    await user.click(toggle)
+
+    await waitFor(() => {
+      const calls = mockInvokeFn.mock.calls
+      const configCall = calls.find(
+        (call) =>
+          call[0] === 'set_config' &&
+          (call[1] as Record<string, unknown>)?.key === 'enable_project_sync' &&
+          (call[1] as Record<string, unknown>)?.value === 'true',
+      )
+      expect(configCall).toBeDefined()
+    })
+
+    window.removeEventListener('project-sync-enabled-changed', listener)
+    expect(events).toHaveLength(1)
+    expect(events[0].detail.enabled).toBe(true)
+  })
 })

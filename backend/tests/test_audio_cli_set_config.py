@@ -36,6 +36,7 @@ BASE_CFG = {
     "featherweight_previews": True,
     "scene_preview_height": 240,
     "clip_preview_speed": 1.0,
+    "enable_project_sync": False,
 }
 
 EXPECTED_CONFIG_PAYLOAD = {
@@ -60,6 +61,7 @@ EXPECTED_CONFIG_PAYLOAD = {
     "featherweight_previews": True,
     "scene_preview_height": 240,
     "clip_preview_speed": 1.0,
+    "enable_project_sync": False,
 }
 
 
@@ -839,6 +841,34 @@ class TestSetConfigScenePreviewHeight:
         mock_save.assert_not_called()
         payload = mock_emit.call_args[0][0]
         assert payload["type"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# set_config — enable_project_sync
+# ---------------------------------------------------------------------------
+
+class TestSetConfigEnableProjectSync:
+    @pytest.mark.parametrize("val,expected", [
+        ("true", True),
+        ("True", True),
+        ("TRUE", True),
+        ("false", False),
+        ("False", False),
+        ("anything", False),
+    ])
+    @patch("audio_cli.emit")
+    @patch("audio_cli.save_config")
+    @patch("audio_cli.load_config")
+    def test_enable_project_sync_coercion(self, mock_load, mock_save, mock_emit, val, expected):
+        mock_load.return_value = base_cfg()
+        from audio_cli import set_config
+        result = set_config("enable_project_sync", val)
+        assert result is None
+        mock_save.assert_called_once()
+        saved = mock_save.call_args[0][0]
+        assert saved["enable_project_sync"] is expected
+        payload = mock_emit.call_args[0][0]
+        assert payload["enable_project_sync"] is expected
 
 
 # ---------------------------------------------------------------------------

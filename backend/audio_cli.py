@@ -96,6 +96,7 @@ def _config_payload(cfg):
         "scene_preview_height": int(cfg.get("scene_preview_height", 240)),
         "clip_preview_speed": float(cfg.get("clip_preview_speed", 1.0)),
         "tsukyio_api_key": cfg.get("tsukyio_api_key", ""),
+        "enable_project_sync": bool(cfg.get("enable_project_sync", False)),
     }
 
 
@@ -248,6 +249,8 @@ def set_config(key, value):
         cfg["scene_preview_height"] = number
     elif key == "tsukyio_api_key":
         cfg["tsukyio_api_key"] = (value or "").strip()
+    elif key == "enable_project_sync":
+        cfg["enable_project_sync"] = value.lower() == "true"
     save_config(cfg)
     emit(_config_payload(cfg))
 

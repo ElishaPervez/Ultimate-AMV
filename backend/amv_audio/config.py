@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "scene_preview_height": 240,
     "clip_preview_speed": 1.0,
     "tsukyio_api_key": "",
+    "enable_project_sync": False,
 }
 
 

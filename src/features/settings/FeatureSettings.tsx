@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   Film,
+  FolderSync,
   Music,
   FileAudio,
   LogOut,
@@ -79,6 +80,14 @@ export function FeatureSettings({
   React.useEffect(() => {
     setClipPreviewSpeed(backendConfig?.clip_preview_speed ?? 1);
   }, [backendConfig?.clip_preview_speed]);
+
+  const [projectSyncEnabled, setProjectSyncEnabled] = React.useState(
+    backendConfig?.enable_project_sync ?? false,
+  );
+
+  React.useEffect(() => {
+    setProjectSyncEnabled(backendConfig?.enable_project_sync ?? false);
+  }, [backendConfig?.enable_project_sync]);
 
   React.useEffect(() => {
     const handler = (event: Event) => {
@@ -436,6 +445,46 @@ export function FeatureSettings({
               );
             }}
           />
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <span className="setting-label">Project file sync (.umv)</span>
+            <span className="setting-desc">
+              Enable lightweight project file export and multi-PC sync for scene cuts, real-time merges, and relinking without moving large raw video files.
+            </span>
+          </div>
+          <div className="settings-toggle-wrap">
+            <span className="settings-toggle-icon" aria-hidden="true">
+              <FolderSync size={16} strokeWidth={2.3} />
+            </span>
+            <span className={`settings-toggle-label ${projectSyncEnabled ? "is-on" : "is-off"}`}>
+              {projectSyncEnabled ? "Enabled" : "Disabled"}
+            </span>
+            <button
+              type="button"
+              className="settings-toggle-switch spring-motion"
+              role="switch"
+              aria-checked={projectSyncEnabled}
+              aria-label="Project file sync (.umv)"
+              data-on={projectSyncEnabled ? "true" : "false"}
+              onClick={() => {
+                const next = !projectSyncEnabled;
+                setProjectSyncEnabled(next);
+                void invoke("set_config", { key: "enable_project_sync", value: next ? "true" : "false" });
+                window.dispatchEvent(
+                  new CustomEvent("project-sync-enabled-changed", { detail: { enabled: next } }),
+                );
+              }}
+              title={projectSyncEnabled ? "Disable project file sync" : "Enable project file sync"}
+            >
+              <span className="settings-toggle-track" aria-hidden="true">
+                <span className="settings-toggle-track-on">ON</span>
+                <span className="settings-toggle-track-off">OFF</span>
+                <span className="settings-toggle-knob" />
+              </span>
+            </button>
+          </div>
         </div>
       </div>
 
