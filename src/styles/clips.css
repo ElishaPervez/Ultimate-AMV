@@ -1335,6 +1335,29 @@
   animation: clip-offset-video-in 250ms ease-out;
 }
 
+/* No decoded picture yet: keep the black video box hidden so the placeholder
+ * and its loading spinner show through. Dropping the class restarts the
+ * fade-in above, so the first frame fades in instead of popping. */
+.clip-offset-video.is-waiting {
+  opacity: 0;
+  animation: none;
+}
+
+/* The spinner over a waiting live tile comes in after a short beat, so a tile
+ * whose first frame lands quickly never flashes it. */
+.clip-offset-video + .clip-video-loading {
+  animation: clip-video-loading-in 180ms ease-out 220ms both;
+}
+
+@keyframes clip-video-loading-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 @keyframes clip-offset-video-in {
   from {
     opacity: 0;

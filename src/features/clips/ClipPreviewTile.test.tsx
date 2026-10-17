@@ -347,6 +347,43 @@ describe('ClipPreviewTile — featherweight mayMountVideo gate', () => {
     )
     expect(container.querySelector('.clip-offset-video')).not.toBeInTheDocument()
   })
+
+  it('shows a loading spinner instead of a black box until the live video has a picture', () => {
+    const clip = makeFeatherweightClip()
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={true} paused={false} />
+    )
+    const video = container.querySelector('.clip-offset-video') as HTMLVideoElement
+    expect(video).toHaveClass('is-waiting')
+    expect(container.querySelector('.clip-video-loading')).toBeInTheDocument()
+
+    // The first decoded frame arrives.
+    Object.defineProperty(video, 'readyState', { configurable: true, get: () => 2 })
+    fireEvent(video, new Event('loadeddata'))
+    expect(video).not.toHaveClass('is-waiting')
+    expect(container.querySelector('.clip-video-loading')).not.toBeInTheDocument()
+  })
+
+  it('shows the loading spinner on a merged playlist tile until it has a picture', () => {
+    const clip = makeFeatherweightClip({
+      isUnified: true,
+      isContiguous: false,
+      segments: [
+        { source: '/video/ep01.mp4', start: 1, end: 3, index: 0, fps: 24, previewStart: 1.1, previewEnd: 2.9 },
+        { source: '/video/ep01.mp4', start: 8, end: 10, index: 1, fps: 24, previewStart: 8.1, previewEnd: 9.9 },
+      ],
+    })
+    const { container } = render(
+      <ClipPreviewTile {...featherweightProps} clip={clip} mayMountVideo={true} paused={false} />
+    )
+    const video = container.querySelector('.clip-offset-video') as HTMLVideoElement
+    expect(video).toHaveClass('is-waiting')
+    expect(container.querySelector('.clip-video-loading')).toBeInTheDocument()
+    Object.defineProperty(video, 'readyState', { configurable: true, get: () => 4 })
+    fireEvent(video, new Event('loadeddata'))
+    expect(video).not.toHaveClass('is-waiting')
+    expect(container.querySelector('.clip-video-loading')).not.toBeInTheDocument()
+  })
 })
 
 // ─── clip label and metadata rendering ───────────────────────────────────────

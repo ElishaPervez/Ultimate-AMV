@@ -458,6 +458,33 @@ export function ClipPreviewTile({
   );
 }
 
+/* True once a live tile's <video> has a decoded picture to show. Until then the
+ * layer keeps the video invisible and shows the loading sweep + spinner, so a
+ * slow first seek (deep into a long source) reads as "loading" instead of a
+ * plain black box. It only listens to events the element already fires: no
+ * extra decode, nothing pre-warmed. Must be called AFTER the layer's
+ * imperative-src effect so a src change is already applied when it checks. */
+function useVideoHasFrame(
+  videoRef: React.RefObject<HTMLVideoElement | null>,
+  src: string,
+): boolean {
+  const [hasFrame, setHasFrame] = React.useState(false);
+  React.useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return undefined;
+    // 2 = HAVE_CURRENT_DATA: the frame at the current position is decoded.
+    const check = () => setHasFrame(video.readyState >= 2);
+    check();
+    video.addEventListener("loadeddata", check);
+    video.addEventListener("emptied", check);
+    return () => {
+      video.removeEventListener("loadeddata", check);
+      video.removeEventListener("emptied", check);
+    };
+  }, [videoRef, src]);
+  return hasFrame;
+}
+
 /* DEV TOOLS: featherweight offset <video> layer. Mounts a single muted,
  * playsInline <video> on the resolved playbackSrc and loops the margined window
  * [sourceStart + startMargin, sourceEnd - endMargin] via the PROVEN useOffsetLoop
@@ -551,6 +578,7 @@ function OffsetVideoLayer({
       video.load();
     };
   }, [src]);
+  const hasFrame = useVideoHasFrame(videoRef, src);
 
   useOffsetLoop(videoRef, {
     startSec,
@@ -590,9 +618,14 @@ function OffsetVideoLayer({
         muted
         playsInline
         preload="metadata"
-        className="clip-offset-video"
+        className={`clip-offset-video${hasFrame ? "" : " is-waiting"}`}
         onError={onError}
       />
+      {!hasFrame && (
+        <span className="clip-video-loading" aria-hidden="true">
+          <span />
+        </span>
+      )}
       {/* Per-clip progress bar, driven imperatively (scaleX) from the offset-video's
           real loop position via handleProgress — no CSS animation, no per-frame React. */}
       <span className="clip-offset-progress" aria-hidden="true">
@@ -716,6 +749,7 @@ function OffsetPlaylistLayer({
       video.load();
     };
   }, [src]);
+  const hasFrame = useVideoHasFrame(videoRef, src);
 
   usePlaylistLoop(videoRef, {
     segments: playlistSegments,
@@ -741,9 +775,14 @@ function OffsetPlaylistLayer({
         muted
         playsInline
         preload="metadata"
-        className="clip-offset-video"
+        className={`clip-offset-video${hasFrame ? "" : " is-waiting"}`}
         onError={onError}
       />
+      {!hasFrame && (
+        <span className="clip-video-loading" aria-hidden="true">
+          <span />
+        </span>
+      )}
       {/* STEP D — SEGMENTED FILMSTRIP: one proportional cell per playlist segment
           (STRICT clip.segments order), thin dividers between. The active cell fills
           imperatively (scaleX) via handleProgress; cells before it are full, after it
