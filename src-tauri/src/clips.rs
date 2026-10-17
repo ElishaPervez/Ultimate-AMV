@@ -1528,6 +1528,391 @@ fn padded_clip_range(clip: &ExportClip) -> (f64, f64) {
     (start, duration)
 }
 
+// How far before a merged clip its coarse keyframe seek lands (2 to 3 s, see
+// merge_clip_seek). Long enough that the decoder has settled (open-GOP leading
+// frames, AAC overlap after a seek) well before the first kept frame.
+const MERGE_SEEK_PREROLL_SECS: u64 = 2;
+
+// Neighbouring clips in a merge (same source, in playback order) share one
+// opened input when the stretch between them is at most this long: decoding
+// through a few seconds costs less than opening the source again and decoding
+// another preroll.
+const MERGE_SHARED_INPUT_MAX_GAP_SECS: f64 = 4.0;
+
+// Every opened input keeps its own decoder and buffers alive for the whole
+// merge: measured at roughly 10 to 15 MB each for a 1080p H.264 source (a
+// 30-clip libx264 merge peaked at 1.5 GB against 1.1 GB for 2 clips, 80 clips
+// at 2.3 GB). Past this many inputs the closest neighbouring clips are folded
+// onto shared inputs, so a huge merge stays near 2 GB; the price is decoding
+// the stretch between folded clips (80 clips a minute apart, folded to 64
+// inputs: 84 s and 1.9 GB instead of 69 s and 2.3 GB, against 207 s for the
+// old unseeked graph).
+const MERGE_MAX_INPUTS: usize = 64;
+
+// A clip start as whole milliseconds, rounded exactly as the `{start:.3}` the
+// old single-input graph trimmed at.
+fn merge_start_millis(start: f64) -> u64 {
+    format!("{:.3}", start.max(0.0))
+        .parse::<f64>()
+        .map(|value| (value * 1000.0).round() as u64)
+        .unwrap_or(0)
+}
+
+// The coarse keyframe seek placed before `-i` for an input whose first clip
+// starts at `start`: whole seconds, 2 to 3 s ahead of the cut. 0 = no seek.
+fn merge_coarse_seek_secs(start: f64) -> u64 {
+    (merge_start_millis(start) / 1000).saturating_sub(MERGE_SEEK_PREROLL_SECS)
+}
+
+// Where the trim filter cuts a clip starting at `start` on an input opened
+// with a `coarse_secs` seek: the exact millisecond remainder.
+fn merge_fine_offset(start: f64, coarse_secs: u64) -> String {
+    let fine_ms = merge_start_millis(start).saturating_sub(coarse_secs * 1000);
+    format!("{}.{:03}", fine_ms / 1000, fine_ms % 1000)
+}
+
+// Splits a merged clip's start into the dual seek: a coarse keyframe seek
+// placed before `-i`, in whole seconds 2 to 3 s ahead of the cut, and the
+// precise remainder that the trim filter decodes forward to. Both parts are
+// exact millisecond decimals that add up to the same `{start:.3}` the old
+// single-input graph trimmed at, so the kept frames are the same. Whole seconds
+// convert exactly into every stream timebase and sample rate, so the split
+// never moves the cut by a rounding step. Returns (coarse seconds, precise
+// remainder); coarse 0 means "no input seek". The graph builder applies the
+// same two steps per input; this one-clip form pins the arithmetic in tests.
+#[cfg(test)]
+fn merge_clip_seek(start: f64) -> (u64, String) {
+    let coarse_secs = merge_coarse_seek_secs(start);
+    (coarse_secs, merge_fine_offset(start, coarse_secs))
+}
+
+// The gap between the end of one run of clips and the start of the next, if
+// the two could be read from one input: same source, and the second starts at
+// or after the end of the first. A clip that starts earlier would need the
+// source to run backwards, so it always gets its own input.
+fn merge_run_gap(
+    runs: &[Vec<usize>],
+    run: usize,
+    ranges: &[(f64, f64)],
+    input_index_for_clip: &[usize],
+) -> Option<f64> {
+    let last = *runs[run].last()?;
+    let next = *runs.get(run + 1)?.first()?;
+    if input_index_for_clip[last] != input_index_for_clip[next] {
+        return None;
+    }
+    let gap = ranges[next].0 - ranges[last].1;
+    (gap >= 0.0).then_some(gap)
+}
+
+// Groups the merge, in its own order, into runs of clips that are read from
+// one opened input. Returns the clip indices of each run.
+fn merge_input_runs(clips: &[ExportClip], input_index_for_clip: &[usize]) -> Vec<Vec<usize>> {
+    let ranges: Vec<(f64, f64)> = clips
+        .iter()
+        .map(|clip| {
+            let (start, duration) = padded_clip_range(clip);
+            (start, start + duration)
+        })
+        .collect();
+    let mut runs: Vec<Vec<usize>> = (0..clips.len()).map(|i| vec![i]).collect();
+
+    let mut run = 0;
+    while run + 1 < runs.len() {
+        match merge_run_gap(&runs, run, &ranges, input_index_for_clip) {
+            Some(gap) if gap <= MERGE_SHARED_INPUT_MAX_GAP_SECS => {
+                let next = runs.remove(run + 1);
+                runs[run].extend(next);
+            }
+            _ => run += 1,
+        }
+    }
+
+    while runs.len() > MERGE_MAX_INPUTS {
+        let closest = (0..runs.len() - 1)
+            .filter_map(|run| {
+                merge_run_gap(&runs, run, &ranges, input_index_for_clip).map(|gap| (run, gap))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((run, _)) = closest else { break };
+        let next = runs.remove(run + 1);
+        runs[run].extend(next);
+    }
+    runs
+}
+
+// Inputs and per-clip filter chains shared by the merged export and the merged
+// preview. Each caller appends its own concat node and encoder settings.
+struct MergeGraph {
+    input_args: Vec<String>,
+    filter_parts: Vec<String>,
+    concat_inputs: String,
+    total_duration: f64,
+    any_has_audio: bool,
+}
+
+// Each run of merged clips (see merge_input_runs; usually one clip) gets its
+// OWN ffmpeg input, opened with a coarse `-ss` before `-i` (dual seek, see
+// docs/agent/CLAUDE-NOTES.md). A single shared input with trim filters has no
+// seek at all, so ffmpeg decoded the source from t=0 up to the last clip:
+// minutes of dead decoding for a clip deep in a movie, with the progress bar
+// frozen the whole time. The trim filter still does the precise,
+// frame-accurate part, from the same raw source times (padded_clip_range), and
+// decoding stays in software.
+fn build_merge_graph(
+    clips: &[ExportClip],
+    input_paths: &[PathBuf],
+    input_index_for_clip: &[usize],
+    input_has_audio: &[bool],
+) -> MergeGraph {
+    let any_has_audio = input_has_audio.iter().any(|&h| h);
+    let runs = merge_input_runs(clips, input_index_for_clip);
+    let mut input_args: Vec<String> = Vec::with_capacity(runs.len() * 4);
+    // Per clip: the ffmpeg input it is read from and its trim start there.
+    let mut clip_input: Vec<(usize, String)> = vec![(0, String::new()); clips.len()];
+    for (input_no, run) in runs.iter().enumerate() {
+        let (first_start, _) = padded_clip_range(&clips[run[0]]);
+        let coarse_secs = merge_coarse_seek_secs(first_start);
+        if coarse_secs > 0 {
+            input_args.push("-ss".to_string());
+            input_args.push(coarse_secs.to_string());
+        }
+        input_args.push("-i".to_string());
+        input_args.push(input_paths[input_index_for_clip[run[0]]].to_string_lossy().to_string());
+        for &i in run {
+            let (start, _) = padded_clip_range(&clips[i]);
+            clip_input[i] = (input_no, merge_fine_offset(start, coarse_secs));
+        }
+    }
+
+    let mut filter_parts: Vec<String> = Vec::new();
+    let mut concat_inputs = String::new();
+    let mut total_duration = 0.0_f64;
+    for (i, clip) in clips.iter().enumerate() {
+        let source_idx = input_index_for_clip[i];
+        let (_, duration) = padded_clip_range(clip);
+        total_duration += duration;
+        let (input_no, fine) = &clip_input[i];
+        filter_parts.push(format!(
+            "[{input_no}:v]trim=start={fine}:duration={duration:.3},setpts=PTS-STARTPTS[v{i}]"
+        ));
+        if any_has_audio {
+            if input_has_audio[source_idx] {
+                filter_parts.push(format!(
+                    "[{input_no}:a]atrim=start={fine}:duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
+                ));
+            } else {
+                filter_parts.push(format!(
+                    "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
+                ));
+            }
+            concat_inputs.push_str(&format!("[v{i}][a{i}]"));
+        } else {
+            concat_inputs.push_str(&format!("[v{i}]"));
+        }
+    }
+    MergeGraph {
+        input_args,
+        filter_parts,
+        concat_inputs,
+        total_duration,
+        any_has_audio,
+    }
+}
+
+#[cfg(test)]
+mod merge_graph_tests {
+    use super::{build_merge_graph, merge_clip_seek, padded_clip_range, ExportClip};
+    use std::path::PathBuf;
+
+    fn clip(source: &str, start: f64, end: f64) -> ExportClip {
+        ExportClip { source: source.to_string(), start, end, index: 0, fps: Some(24.0) }
+    }
+
+    fn millis(text: &str) -> u64 {
+        (text.parse::<f64>().unwrap() * 1000.0).round() as u64
+    }
+
+    #[test]
+    fn the_split_seek_adds_up_to_the_old_trim_start_exactly() {
+        for start in [0.0, 0.0625, 1.5, 2.9994, 3.2, 300.0625, 5400.123456, 5999.9996] {
+            let (coarse, fine) = merge_clip_seek(start);
+            let old = format!("{start:.3}");
+            assert_eq!(coarse * 1000 + millis(&fine), millis(&old), "start {start}");
+        }
+    }
+
+    #[test]
+    fn a_deep_clip_seeks_two_to_three_seconds_ahead() {
+        let (coarse, fine) = merge_clip_seek(5400.5);
+        assert_eq!(coarse, 5398);
+        assert_eq!(fine, "2.500");
+        let (coarse, fine) = merge_clip_seek(300.999);
+        assert_eq!(coarse, 298);
+        assert_eq!(fine, "2.999");
+    }
+
+    #[test]
+    fn a_clip_near_the_start_keeps_the_old_unseeked_trim() {
+        for start in [0.0, 1.5, 2.999] {
+            let (coarse, fine) = merge_clip_seek(start);
+            assert_eq!(coarse, 0);
+            assert_eq!(fine, format!("{start:.3}"));
+        }
+    }
+
+    #[test]
+    fn every_clip_gets_its_own_seeked_input() {
+        let clips = vec![clip("a.mkv", 300.0, 303.0), clip("a.mkv", 1.0, 4.0), clip("b.mkv", 5400.0, 5403.0)];
+        let paths = vec![PathBuf::from("a.mkv"), PathBuf::from("b.mkv")];
+        let graph = build_merge_graph(&clips, &paths, &[0, 0, 1], &[true, false]);
+
+        assert_eq!(
+            graph.input_args,
+            ["-ss", "298", "-i", "a.mkv", "-i", "a.mkv", "-ss", "5398", "-i", "b.mkv"]
+        );
+        let (start0, duration0) = padded_clip_range(&clips[0]);
+        let (_, fine0) = merge_clip_seek(start0);
+        assert_eq!(
+            graph.filter_parts[0],
+            format!("[0:v]trim=start={fine0}:duration={duration0:.3},setpts=PTS-STARTPTS[v0]")
+        );
+        assert!(graph.filter_parts[1].starts_with(&format!("[0:a]atrim=start={fine0}:")));
+        // The unseeked clip trims at exactly the old absolute start.
+        let (start1, _) = padded_clip_range(&clips[1]);
+        assert!(graph.filter_parts[2].starts_with(&format!("[1:v]trim=start={start1:.3}:")));
+        // A source without audio is padded with silence, as before.
+        assert!(graph.filter_parts[5].starts_with("anullsrc="));
+        assert!(graph.filter_parts[5].ends_with("[a2]"));
+        assert_eq!(graph.concat_inputs, "[v0][a0][v1][a1][v2][a2]");
+        assert!(graph.any_has_audio);
+    }
+
+    fn input_count(graph: &super::MergeGraph) -> usize {
+        graph.input_args.iter().filter(|arg| *arg == "-i").count()
+    }
+
+    #[test]
+    fn neighbouring_clips_share_one_seeked_input() {
+        // Scenes 100-103 s and 104-107 s: about a second apart in the same file.
+        let clips = vec![clip("a.mkv", 100.0, 103.0), clip("a.mkv", 104.0, 107.0)];
+        let paths = vec![PathBuf::from("a.mkv")];
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[true]);
+
+        assert_eq!(graph.input_args, ["-ss", "98", "-i", "a.mkv"]);
+        // Both trims sit on input 0, each at its exact offset from the 98 s
+        // seek: the old absolute trim start minus 98 s.
+        let offset_from_seek = |clip: &ExportClip| {
+            let (start, _) = padded_clip_range(clip);
+            let ms = millis(&format!("{start:.3}")) - 98_000;
+            format!("{}.{:03}", ms / 1000, ms % 1000)
+        };
+        let (fine0, fine1) = (offset_from_seek(&clips[0]), offset_from_seek(&clips[1]));
+        assert!(fine0.starts_with("2.06") && fine1.starts_with("6.06"), "{fine0} {fine1}");
+        assert!(graph.filter_parts[0].starts_with(&format!("[0:v]trim=start={fine0}:")));
+        assert!(graph.filter_parts[1].starts_with(&format!("[0:a]atrim=start={fine0}:")));
+        assert!(graph.filter_parts[2].starts_with(&format!("[0:v]trim=start={fine1}:")));
+        assert!(graph.filter_parts[3].starts_with(&format!("[0:a]atrim=start={fine1}:")));
+        assert_eq!(graph.concat_inputs, "[v0][a0][v1][a1]");
+    }
+
+    #[test]
+    fn far_apart_or_backward_clips_get_their_own_inputs() {
+        let clips = vec![
+            clip("a.mkv", 100.0, 103.0),
+            clip("a.mkv", 600.0, 603.0),
+            clip("a.mkv", 300.0, 303.0),
+        ];
+        let paths = vec![PathBuf::from("a.mkv")];
+        let graph = build_merge_graph(&clips, &paths, &[0, 0, 0], &[false]);
+        assert_eq!(
+            graph.input_args,
+            ["-ss", "98", "-i", "a.mkv", "-ss", "598", "-i", "a.mkv", "-ss", "298", "-i", "a.mkv"]
+        );
+        assert!(graph.filter_parts[0].starts_with("[0:v]trim=start=2.06"));
+        assert!(graph.filter_parts[1].starts_with("[1:v]trim=start=2.06"));
+        assert!(graph.filter_parts[2].starts_with("[2:v]trim=start=2.06"));
+    }
+
+    #[test]
+    fn a_long_merge_folds_the_closest_clips_to_cap_open_inputs() {
+        // Two more scenes than the cap, a minute apart, except two pairs that
+        // are closer together.
+        let count = super::MERGE_MAX_INPUTS + 2;
+        let mut starts: Vec<f64> = (0..count).map(|k| 100.0 + 60.0 * k as f64).collect();
+        starts[5] = starts[4] + 10.0;
+        starts[21] = starts[20] + 12.0;
+        let clips: Vec<ExportClip> = starts.iter().map(|&s| clip("a.mkv", s, s + 3.0)).collect();
+        let paths = vec![PathBuf::from("a.mkv")];
+        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false]);
+
+        assert_eq!(input_count(&graph), super::MERGE_MAX_INPUTS);
+        // Every clip still has its own trim, in merge order.
+        assert_eq!(graph.filter_parts.len(), count);
+        assert_eq!(graph.concat_inputs, (0..count).map(|i| format!("[v{i}]")).collect::<String>());
+        // The closest pair was folded first: clip 5 reads from clip 4's input.
+        let input_of = |part: &str| part[1..part.find(':').unwrap()].parse::<usize>().unwrap();
+        assert_eq!(input_of(&graph.filter_parts[4]), input_of(&graph.filter_parts[5]));
+        assert_eq!(input_of(&graph.filter_parts[20]), input_of(&graph.filter_parts[21]));
+    }
+
+    #[test]
+    fn a_backward_merge_cannot_fold_and_keeps_one_input_per_clip() {
+        let count = super::MERGE_MAX_INPUTS + 8;
+        let clips: Vec<ExportClip> = (0..count)
+            .rev()
+            .map(|k| clip("a.mkv", 100.0 + 60.0 * k as f64, 103.0 + 60.0 * k as f64))
+            .collect();
+        let paths = vec![PathBuf::from("a.mkv")];
+        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false]);
+        assert_eq!(input_count(&graph), count);
+    }
+
+    // DEVTOOL, skipped by default: prints the merge inputs and filter chains
+    // the app builds for a clip list, so a scratch benchmark can run the exact
+    // command against a real source. MERGE_GRAPH_CLIPS holds JSON
+    // [{"source","start","end","fps"}] (one source path for all clips).
+    //   cargo test merge_graph_devtool -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn merge_graph_devtool() {
+        let Ok(spec) = std::env::var("MERGE_GRAPH_CLIPS") else { return };
+        let raw: Vec<serde_json::Value> = serde_json::from_str(&spec).unwrap();
+        let clips: Vec<ExportClip> = raw
+            .iter()
+            .enumerate()
+            .map(|(index, c)| ExportClip {
+                source: c["source"].as_str().unwrap().to_string(),
+                start: c["start"].as_f64().unwrap(),
+                end: c["end"].as_f64().unwrap(),
+                index,
+                fps: c["fps"].as_f64(),
+            })
+            .collect();
+        let paths = vec![PathBuf::from(&clips[0].source)];
+        let graph = build_merge_graph(&clips, &paths, &vec![0; clips.len()], &[true]);
+        println!(
+            "MERGE_GRAPH {}",
+            serde_json::json!({
+                "inputArgs": graph.input_args,
+                "filterParts": graph.filter_parts,
+                "concatInputs": graph.concat_inputs,
+                "totalDuration": graph.total_duration,
+            })
+        );
+    }
+
+    #[test]
+    fn a_silent_merge_concats_video_only() {
+        let clips = vec![clip("a.mkv", 10.0, 12.0), clip("a.mkv", 20.0, 22.0)];
+        let paths = vec![PathBuf::from("a.mkv")];
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[false]);
+        assert_eq!(graph.filter_parts.len(), 2);
+        assert_eq!(graph.concat_inputs, "[v0][v1]");
+        assert!(!graph.any_has_audio);
+    }
+}
+
 // Called at the top of every export: a cancel request belongs to the export it
 // was made during, never to the next one.
 fn begin_clip_export() {
@@ -2050,37 +2435,14 @@ fn run_clip_export_merged(
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
     ];
-    for path in &input_paths {
-        args.push("-i".to_string());
-        args.push(path.to_string_lossy().to_string());
-    }
-
-    let mut filter_parts: Vec<String> = Vec::new();
-    let mut concat_inputs = String::new();
-    let mut total_duration = 0.0_f64;
-    for (i, clip) in clips.iter().enumerate() {
-        let input_idx = input_index_for_clip[i];
-        let (start, duration) = padded_clip_range(clip);
-        total_duration += duration;
-        filter_parts.push(format!(
-            "[{input_idx}:v]trim=start={start:.3}:duration={duration:.3},setpts=PTS-STARTPTS[v{i}]"
-        ));
-        if any_has_audio {
-            let clip_has_audio = input_has_audio[input_idx];
-            if clip_has_audio {
-                filter_parts.push(format!(
-                    "[{input_idx}:a]atrim=start={start:.3}:duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
-                ));
-            } else {
-                filter_parts.push(format!(
-                    "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
-                ));
-            }
-            concat_inputs.push_str(&format!("[v{i}][a{i}]"));
-        } else {
-            concat_inputs.push_str(&format!("[v{i}]"));
-        }
-    }
+    let MergeGraph {
+        input_args,
+        mut filter_parts,
+        concat_inputs,
+        total_duration,
+        ..
+    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio);
+    args.extend(input_args);
     let n = clips.len();
     // filter_complex (trim/concat) strips stream-level color metadata, so we
     // re-stamp it inside the graph with setparams (matched by the output -color*
@@ -4777,8 +5139,6 @@ fn run_clip_preview_merge(
         let has_audio = probe_has_audio_stream(&ffprobe, path).unwrap_or(false);
         input_has_audio.push(has_audio);
     }
-    let any_has_audio = input_has_audio.iter().any(|&h| h);
-
     let mut args: Vec<String> = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
@@ -4786,37 +5146,16 @@ fn run_clip_preview_merge(
         "-loglevel".to_string(),
         "error".to_string(),
     ];
-    for path in &input_paths {
-        args.push("-i".to_string());
-        args.push(path.to_string_lossy().to_string());
-    }
-
-    let mut filter_parts: Vec<String> = Vec::new();
-    let mut concat_inputs = String::new();
-    let mut total_duration = 0.0_f64;
-    for (i, clip) in clips.iter().enumerate() {
-        let input_idx = input_index_for_clip[i];
-        let (start, duration) = padded_clip_range(clip);
-        total_duration += duration;
-        filter_parts.push(format!(
-            "[{input_idx}:v]trim=start={start:.3}:duration={duration:.3},setpts=PTS-STARTPTS[v{i}]"
-        ));
-        if any_has_audio {
-            let clip_has_audio = input_has_audio[input_idx];
-            if clip_has_audio {
-                filter_parts.push(format!(
-                    "[{input_idx}:a]atrim=start={start:.3}:duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
-                ));
-            } else {
-                filter_parts.push(format!(
-                    "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
-                ));
-            }
-            concat_inputs.push_str(&format!("[v{i}][a{i}]"));
-        } else {
-            concat_inputs.push_str(&format!("[v{i}]"));
-        }
-    }
+    // Same per-clip dual-seek inputs as the merged export, so this background
+    // render no longer decodes the source from the start either.
+    let MergeGraph {
+        input_args,
+        mut filter_parts,
+        concat_inputs,
+        total_duration,
+        any_has_audio,
+    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio);
+    args.extend(input_args);
     let n = clips.len();
     if any_has_audio {
         filter_parts.push(format!(
