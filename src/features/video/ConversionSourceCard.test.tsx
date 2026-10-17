@@ -109,4 +109,27 @@ describe('ConversionSourceCard', () => {
     )
     expect(screen.getByText('Source video')).toBeInTheDocument()
   })
+
+  it('keeps the path on one line with a tooltip but lets the action description wrap', () => {
+    const path = 'C:\\Videos\\Some very long folder name\\clip.mp4'
+    const description = 'High-quality editing-ready format for maximum detail'
+    render(
+      <ConversionSourceCard
+        icon={<FileVideo size={24} />}
+        label="Source video"
+        selectedFiles={[path]}
+        pickLabel="Change videos"
+        onPick={vi.fn()}
+        disabled={false}
+        actionTitle="ProRes 422 HQ"
+        actionSubtitle={description}
+      />,
+    )
+    const pathLine = screen.getByText(path)
+    expect(pathLine).toHaveClass('source-card-path')
+    expect(pathLine).toHaveAttribute('title', path)
+    const descriptionLine = screen.getByText(description)
+    expect(descriptionLine).toHaveClass('source-card-action-desc')
+    expect(descriptionLine).not.toHaveClass('source-card-path')
+  })
 })

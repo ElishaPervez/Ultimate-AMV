@@ -32,12 +32,12 @@ export function ConversionSourceCard({
       <div className="source-card-info">
         <small>{label}</small>
         <strong>{selectedLabel}</strong>
-        {selectedPathLabel && <p>{selectedPathLabel}</p>}
+        {selectedPathLabel && <p className="source-card-path" title={selectedPathLabel}>{selectedPathLabel}</p>}
         {actionTitle && (
           <div className="source-card-action">
             <small>Action</small>
             <strong>{actionTitle}</strong>
-            {actionSubtitle && <p>{actionSubtitle}</p>}
+            {actionSubtitle && <p className="source-card-action-desc">{actionSubtitle}</p>}
           </div>
         )}
       </div>

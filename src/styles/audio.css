@@ -1112,9 +1112,19 @@
   max-width: 100%;
   font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
   font-size: 11.5px;
+}
+
+/* Only the file path is cut to one line (full path in its tooltip); the
+   preset description under ACTION wraps so it is always readable. */
+.source-card p.source-card-path {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.source-card p.source-card-action-desc {
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .conversion-pick-btn,
