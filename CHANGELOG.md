@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] : 2026-10-17
+
+### Added
+- Added optional Scene Splitter project files (.umv). Turn on "Project file sync (.umv)" in Settings to save your cuts, merges, and export settings to a small project file and reopen them later or on another PC, without moving the video files.
+- Opening a .umv project by double-clicking it or dropping it on the Scene Splitter loads it straight into the panel.
+- When a project's videos are not where they were saved, a relink window lets you point the project at their new location.
+- Added the Edit Audios category to Tsukyio Vault.
+
+### Changed
+- Merged exports and merged previews now jump straight to each clip instead of reading the source from the start. Merging scenes from late in a long movie takes seconds instead of minutes, with the same frames as before.
+- The export progress bar no longer freezes during a merge, and shows when the export is seeking to the next clip.
+- Tsukyio Vault home tiles now name what each category holds, for example "1,234 Raw Clips" or "56 Vocals".
+- Removed the Credits category from Tsukyio Vault.
+
+### Fixed
+- Fixed the Video Conversion density box cutting off the last digit of four-digit values, so 1040 no longer reads as 104.
+- Fixed the up and down arrows covering the number in the Video Conversion density box and the Scene Splitter bitrate box.
+- Fixed the Video Conversion preset description being cut off; it now wraps so you can read all of it.
+- Fixed the BG Remover comparison controls and timecode running off the panel in narrow windows, and the layout toggle labels breaking across lines.
+- Fixed the BG Remover original preview staying black with no message for files the preview cannot show, such as ProRes MOV files with audio. It now says the format has no preview.
+- Scene Splitter tiles show a loading spinner instead of a black box while their preview is loading.
+- Fixed the same episode being listed twice in a project exported from a mapped network drive.
+- Fixed a double-clicked project reloading over your work when a scan or export started or stopped.
+- Fixed a stopped scan showing an error or a convert prompt over a project you just imported.
+
 ## [0.15.2] : 2026-09-05
 
 ### Added
@@ -332,6 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.16.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.16.0
 [0.15.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.2
 [0.15.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.1
 [0.15.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.0
