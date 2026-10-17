@@ -1952,6 +1952,34 @@ fn run_clip_ffmpeg(
     result
 }
 
+// run_clip_ffmpeg for a merge: while ffmpeg is still reading the source on its
+// way to the next clip there is no new output to count, so the progress line
+// says that instead of sitting still.
+fn run_clip_merge_ffmpeg(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    args: Vec<String>,
+    duration: f64,
+    label: &str,
+) -> Result<(), String> {
+    if clip_export_cancelled() {
+        return Err(format!("{label} cancelled."));
+    }
+    let result = crate::video_cmds::run_ffmpeg_with_progress_idle(
+        window,
+        ffmpeg,
+        args,
+        duration,
+        label,
+        Some(&CLIP_CHILD_PID),
+        "seeking to the next clip in the source...",
+    );
+    if clip_export_cancelled() {
+        return Err(format!("{label} cancelled."));
+    }
+    result
+}
+
 fn run_clip_export(
     window: tauri::Window,
     clips: Vec<ExportClip>,
@@ -2600,7 +2628,7 @@ fn run_clip_export_merged(
         None,
         None,
     );
-    let primary_result = run_clip_ffmpeg(
+    let primary_result = run_clip_merge_ffmpeg(
         &window,
         &ffmpeg,
         args,
@@ -2643,7 +2671,7 @@ fn run_clip_export_merged(
                 "-stats_period".to_string(), "0.5".to_string(),
                 output.to_string_lossy().to_string(),
             ]);
-            run_clip_ffmpeg(
+            run_clip_merge_ffmpeg(
                 &window,
                 &ffmpeg,
                 fallback_args,

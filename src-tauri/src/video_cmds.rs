@@ -584,6 +584,42 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
     pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
     progress_tap: Option<(&str, &str, &str)>,
 ) -> Result<(), String> {
+    run_ffmpeg_progress_job(window, ffmpeg, args, duration, label, pid_slot, progress_tap, None)
+}
+
+// Same as run_ffmpeg_with_progress, for jobs where ffmpeg can spend seconds
+// reading the source before it writes the next piece of output (a merge
+// jumping to a clip further into the movie). ffmpeg reports nothing but
+// finished output time, so the bar would sit still with no explanation; once
+// the output has not moved for a moment, `idle_message` is shown instead, with
+// the bar held where it was.
+pub(crate) fn run_ffmpeg_with_progress_idle(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    args: Vec<String>,
+    duration: f64,
+    label: &str,
+    pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
+    idle_message: &str,
+) -> Result<(), String> {
+    run_ffmpeg_progress_job(window, ffmpeg, args, duration, label, pid_slot, None, Some(idle_message))
+}
+
+// How long the output may stand still before the idle message replaces the
+// usual "time / total" line.
+const PROGRESS_IDLE_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
+
+#[allow(clippy::too_many_arguments)]
+fn run_ffmpeg_progress_job(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    args: Vec<String>,
+    duration: f64,
+    label: &str,
+    pid_slot: Option<&OnceLock<Mutex<Option<u32>>>>,
+    progress_tap: Option<(&str, &str, &str)>,
+    idle_message: Option<&str>,
+) -> Result<(), String> {
     let job_start = std::time::Instant::now();
     let progress_destination = progress_destination(progress_tap.is_some());
     log_info(
@@ -633,10 +669,46 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
         tail
     });
 
+    // Progress lines are read on their own thread so this loop also wakes up
+    // while ffmpeg is silent, which the idle message needs. Without an idle
+    // message the loop does exactly what a plain line-by-line read would.
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<std::io::Result<String>>();
+    let stdout_handle = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
     let mut fps: Option<String> = None;
     let mut speed: Option<String> = None;
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| error.to_string())?;
+    let mut last_percent: f32 = 0.0;
+    let mut last_done = 0.0_f64;
+    let mut last_advance = std::time::Instant::now();
+    // Once ffmpeg reports the end it is only finishing the file; the idle
+    // message must not replace "Finalizing output..." then.
+    let mut ended = false;
+    loop {
+        let line = match line_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(line) => line.map_err(|error| error.to_string())?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(idle) = idle_message {
+                    if !ended && last_advance.elapsed() >= PROGRESS_IDLE_AFTER {
+                        emit_conversion_progress(
+                            window,
+                            "processing",
+                            Some(last_percent),
+                            format!("{label}: {idle}"),
+                            fps.clone(),
+                            speed.clone(),
+                        );
+                    }
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -647,12 +719,22 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
                 if duration > 0.0 {
                     if let Ok(raw) = value.trim().parse::<f64>() {
                         let done = raw / 1_000_000.0;
+                        if done > last_done {
+                            last_done = done;
+                            last_advance = std::time::Instant::now();
+                        }
                         let percent = ((done / duration) * 100.0).clamp(0.0, 99.0) as f32;
-                        let message = format!(
-                            "{label}: {} / {}",
-                            format_seconds(done),
-                            format_seconds(duration)
-                        );
+                        last_percent = percent;
+                        let message = match idle_message {
+                            Some(idle) if last_advance.elapsed() >= PROGRESS_IDLE_AFTER => {
+                                format!("{label}: {idle}")
+                            }
+                            _ => format!(
+                                "{label}: {} / {}",
+                                format_seconds(done),
+                                format_seconds(duration)
+                            ),
+                        };
                         dispatch_progress_destination(
                             progress_destination,
                             || emit_conversion_progress(
@@ -676,6 +758,7 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
                 }
             }
             "progress" if value.trim() == "end" => {
+                ended = true;
                 dispatch_progress_destination(
                     progress_destination,
                     || emit_conversion_progress(
@@ -699,6 +782,7 @@ pub(crate) fn run_ffmpeg_with_progress_tap(
             _ => {}
         }
     }
+    let _ = stdout_handle.join();
 
     let status = child.wait().map_err(|error| error.to_string())?;
     if let Some(slot) = pid_slot {
