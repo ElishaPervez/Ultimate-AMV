@@ -82,4 +82,16 @@ describe('VideoOutputControl', () => {
     await user.tab() // blur
     expect(onChange).toHaveBeenCalledWith(proresLtSpec.defaultValue)
   })
+
+  it('sizes the number box for the widest value the preset allows', () => {
+    const proresHqSpec = { ...proresLtSpec, min: 400, max: 1400, defaultValue: 800 }
+    const { rerender } = render(
+      <VideoOutputControl spec={proresHqSpec} value={800} disabled={false} onChange={vi.fn()} />,
+    )
+    const input = screen.getByRole('spinbutton', { name: 'Bitrate density' })
+    // 1400 has four digits, so a value like 1040 is never clipped to "104".
+    expect(input.style.getPropertyValue('--value-chars')).toBe('4')
+    rerender(<VideoOutputControl spec={proresLtSpec} value={360} disabled={false} onChange={vi.fn()} />)
+    expect(input.style.getPropertyValue('--value-chars')).toBe('3')
+  })
 })

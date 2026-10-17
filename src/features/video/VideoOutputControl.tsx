@@ -14,6 +14,9 @@ export function VideoOutputControl({
 }) {
   const percent = ((value - spec.min) / (spec.max - spec.min)) * 100;
   const [draftValue, setDraftValue] = React.useState(String(value));
+  // The number box is as wide as the longest value it can show: the range
+  // ends, or whatever is being typed right now.
+  const valueChars = Math.max(String(spec.min).length, String(spec.max).length, draftValue.length);
 
   React.useEffect(() => {
     setDraftValue(String(value));
@@ -56,6 +59,7 @@ export function VideoOutputControl({
                 event.currentTarget.blur();
               }
             }}
+            style={{ "--value-chars": valueChars } as React.CSSProperties}
             aria-label={spec.label}
           />
           <b>{spec.suffix}</b>

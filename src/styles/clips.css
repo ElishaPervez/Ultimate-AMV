@@ -402,10 +402,20 @@
   font-size: 14px;
   font-weight: 860;
   text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
 }
 
 .clip-bitrate-value input:focus {
   color: var(--cyan);
+}
+
+/* Same as the video output box: the native arrows would cover the digits. */
+.clip-bitrate-value input::-webkit-outer-spin-button,
+.clip-bitrate-value input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .clip-bitrate-value span {

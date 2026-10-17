@@ -944,7 +944,7 @@
 
 .video-output-value {
   display: grid;
-  grid-template-columns: auto 52px auto;
+  grid-template-columns: auto auto auto;
   align-items: center;
   gap: 7px;
   min-height: 34px;
@@ -964,24 +964,35 @@
   text-transform: uppercase;
 }
 
+/* Sized from the widest value the control can hold (--value-chars, set by
+   VideoOutputControl), so a four-digit density like 1040 is never clipped.
+   52px stays the floor so three-digit presets keep their old layout. */
 .video-output-value input {
-  width: 52px;
+  width: max(52px, calc(var(--value-chars, 3) * 1ch + 8px));
+  padding: 0;
   border: 0;
   color: #f4fbff;
   background: transparent;
   font-size: 17px;
   font-weight: 880;
+  font-variant-numeric: tabular-nums;
   text-align: center;
   outline: none;
+  appearance: textfield;
+  -moz-appearance: textfield;
 }
 
 .video-output-value input:focus {
   color: var(--cyan);
 }
 
+/* The native up/down arrows sit on top of the digits; the slider and typing
+   already cover the job, so hide them. */
 .video-output-value input::-webkit-outer-spin-button,
 .video-output-value input::-webkit-inner-spin-button {
   margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .video-output-slider {
