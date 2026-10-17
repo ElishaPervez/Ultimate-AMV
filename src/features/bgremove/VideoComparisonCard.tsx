@@ -193,20 +193,32 @@ export function VideoComparisonCard({
         gap: "16px",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
+      {/* Wraps in a narrow column: the layout toggle drops under the title
+          instead of squeezing its labels onto several lines. */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "10px 16px",
+        }}
+      >
+        <div style={{ flex: "1 1 220px", minWidth: 0 }}>
           <h4 style={{ margin: "0 0 4px 0", fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
             <Film size={16} style={{ color: "var(--accent-a)" }} />
             Result Comparison
           </h4>
           <p className="dim-text" style={{ fontSize: "12px", margin: 0 }}>
-            Original vs isolated output — play in parallel or step to any frame.
+            Original vs isolated output: play in parallel or step to any frame.
           </p>
         </div>
 
         <div
           style={{
             display: "flex",
+            flexShrink: 0,
+            whiteSpace: "nowrap",
             background: "rgba(0,0,0,0.2)",
             padding: "2px",
             borderRadius: "6px",
@@ -304,7 +316,7 @@ export function VideoComparisonCard({
           )}
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "12px" }}>
           <div
             style={{
               background: "#0c0d0e",
@@ -340,8 +352,9 @@ export function VideoComparisonCard({
         </div>
       )}
 
-      {/* Transport: play both in sync, scrub, or step exact frames */}
-      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+      {/* Transport: play both in sync, scrub, or step exact frames. In a narrow
+          column the scrub bar shrinks and the timecode moves to its own line. */}
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px 10px" }}>
         <button type="button" aria-label={isPlaying ? "Pause" : "Play"} style={transportButtonStyle} onClick={togglePlay}>
           {isPlaying ? <Pause size={14} /> : <Play size={14} />}
         </button>
@@ -360,11 +373,11 @@ export function VideoComparisonCard({
           value={Math.min(currentTime, duration || 0)}
           disabled={!duration}
           onChange={(event) => seekTo(Number(event.target.value))}
-          style={{ flex: 1, accentColor: "rgb(var(--theme-accent-rgb))" }}
+          style={{ flex: "1 1 80px", minWidth: 0, accentColor: "rgb(var(--theme-accent-rgb))" }}
         />
         <span
           className="dim-text"
-          style={{ fontSize: "11px", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}
+          style={{ marginLeft: "auto", fontSize: "11px", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}
         >
           {formatTime(currentTime)} / {formatTime(duration)} · frame {Math.round(currentTime * effectiveFps)}
         </span>
