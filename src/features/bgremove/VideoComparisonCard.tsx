@@ -46,7 +46,7 @@ function formatTime(seconds: number): string {
 // Synchronized before/after player for a finished video isolation: the
 // original source and the showcase WebM (VP9 + alpha re-encode of the export)
 // play in parallel, with wipe and side-by-side layouts, seeking, and
-// frame-stepping. The isolated video is the sync master — its codec is under
+// frame-stepping. The isolated video is the sync master: its codec is under
 // our control, while the original may not even decode in WebView2.
 export function VideoComparisonCard({
   original,
@@ -148,12 +148,31 @@ export function VideoComparisonCard({
     onEnded: pauseBoth,
   };
 
+  // A new source gets a fresh chance to play.
+  React.useEffect(() => {
+    setOriginalUnplayable(false);
+  }, [original]);
+
+  // WebView2 opens some files (e.g. a ProRes or Animation MOV that also has
+  // audio) as audio-only: no error fires, the picture is simply dropped and
+  // the pane stays black. A video with no picture size has nothing to show,
+  // so treat it exactly like a decode error.
+  const markOriginalUnplayableWithoutPicture = (event: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      video.pause();
+      setOriginalUnplayable(true);
+    }
+  };
+
   const originalVideoProps = {
     src: original,
     muted: true,
     playsInline: true,
     preload: "auto" as const,
     onError: () => setOriginalUnplayable(true),
+    onLoadedMetadata: markOriginalUnplayableWithoutPicture,
+    onLoadedData: markOriginalUnplayableWithoutPicture,
   };
 
   const modeButtonStyle = (active: boolean): React.CSSProperties => ({
@@ -248,7 +267,7 @@ export function VideoComparisonCard({
 
       {originalUnplayable && (
         <p className="dim-text" style={{ fontSize: "12px", margin: 0 }}>
-          The original video can&apos;t be decoded for playback here — showing the isolated output only.
+          The original video can&apos;t be decoded for playback here, so only the isolated output is shown.
         </p>
       )}
 
@@ -327,7 +346,22 @@ export function VideoComparisonCard({
               border: "1px solid rgba(255,255,255,0.06)",
             }}
           >
-            {!originalUnplayable && (
+            {originalUnplayable ? (
+              <div
+                className="dim-text"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "grid",
+                  placeItems: "center",
+                  padding: "12px",
+                  fontSize: "12px",
+                  textAlign: "center",
+                }}
+              >
+                No preview for this file&apos;s format
+              </div>
+            ) : (
               <video ref={originalRef} {...originalVideoProps} style={VIDEO_FILL} />
             )}
             <div style={{ ...CORNER_LABEL, top: undefined, bottom: "8px", left: "8px", fontSize: "10px", padding: "2px 6px" }}>
