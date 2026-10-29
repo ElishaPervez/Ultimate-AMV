@@ -2265,6 +2265,7 @@ fn run_clip_export(
                 &format!("Smart cut clip {}/{}", i + 1, clips.len()),
                 i as f32 * span,
                 span,
+                false,
             )?;
             exported_paths.push(output.to_string_lossy().to_string());
             continue;
@@ -3472,6 +3473,12 @@ const SMART_CUT_BODY_FRAME_SLACK: usize = 4;
 // the probe window) makes the whole clip a single re-encode. Refuses (Err) on
 // codecs and frame rates that cannot be spliced. Every ffmpeg run goes through
 // CLIP_CHILD_PID so cancel kills whichever child is live.
+//
+// `audio_follows_video` is set for merge segments: the sound is then cut to
+// the length of the picture actually built (which can run a few frames past
+// the requested end) instead of to the requested length, ending with the last
+// frame or at most one sound packet after it. A single-clip export keeps the
+// requested length.
 #[allow(clippy::too_many_arguments)]
 fn run_smart_cut_clip(
     window: &tauri::Window,
@@ -3485,6 +3492,7 @@ fn run_smart_cut_clip(
     label: &str,
     percent_from: f32,
     percent_span: f32,
+    audio_follows_video: bool,
 ) -> Result<(), String> {
     let params = probe_source_video_params(ffprobe, input)?;
     let fps = smart_cut_fps(&params)?;
@@ -3521,32 +3529,35 @@ fn run_smart_cut_clip(
                 None,
             );
             let staged = StagedOutput::new(output);
-            let mut copy_args = vec![
-                "-y".to_string(),
-                "-hide_banner".to_string(),
-                "-nostdin".to_string(),
-                "-loglevel".to_string(),
-                "error".to_string(),
-                "-ss".to_string(),
-                format!("{kf:.6}"),
-                "-i".to_string(),
-                input.to_string_lossy().to_string(),
-                "-t".to_string(),
-                format!("{length:.3}"),
-            ];
-            append_clip_stream_maps(&mut copy_args, &["0:v:0", "0:a:0?"]);
-            copy_args.extend([
-                "-c".to_string(),
-                "copy".to_string(),
-                "-avoid_negative_ts".to_string(),
-                "make_zero".to_string(),
-            ]);
+            let copy_args = |length: f64| {
+                let mut copy_args = vec![
+                    "-y".to_string(),
+                    "-hide_banner".to_string(),
+                    "-nostdin".to_string(),
+                    "-loglevel".to_string(),
+                    "error".to_string(),
+                    "-ss".to_string(),
+                    format!("{kf:.6}"),
+                    "-i".to_string(),
+                    input.to_string_lossy().to_string(),
+                    "-t".to_string(),
+                    format!("{length:.3}"),
+                ];
+                append_clip_stream_maps(&mut copy_args, &["0:v:0", "0:a:0?"]);
+                copy_args.extend([
+                    "-c".to_string(),
+                    "copy".to_string(),
+                    "-avoid_negative_ts".to_string(),
+                    "make_zero".to_string(),
+                ]);
+                copy_args.extend(tag_args.iter().cloned());
+                copy_args
+            };
             run_clip_ffmpeg(
                 window,
                 ffmpeg,
-                copy_args
+                copy_args(length)
                     .into_iter()
-                    .chain(tag_args.iter().cloned())
                     .chain([
                     "-progress".to_string(),
                     "pipe:1".to_string(),
@@ -3558,6 +3569,25 @@ fn run_smart_cut_clip(
                 length,
                 "Smart cut (stream copy)",
             )?;
+            // In a merge, the copied picture runs past the requested end while
+            // the sound stops on it: give the sound the picture's length so the
+            // join to the next clip has no gap.
+            if audio_follows_video {
+                match_copy_cut_audio(
+                    window,
+                    ffmpeg,
+                    ffprobe,
+                    staged.path(),
+                    &|extra, target| {
+                        let mut args = copy_args(length + extra);
+                        args.push(target.to_string_lossy().to_string());
+                        args
+                    },
+                    &tag_args,
+                    length,
+                    "Smart cut (matching the sound)",
+                )?;
+            }
             return staged.commit();
         }
     }
@@ -3751,6 +3781,20 @@ fn run_smart_cut_clip(
     // backoff window extra.
     let audio = temp_dir.join("audio.mka");
     let seek_from = (start - SMART_CUT_AUDIO_BACKOFF).max(0.0);
+    // In a merge the sound has to last as long as the picture actually built,
+    // which can run a few frames past `duration` (the body copy stops in decode
+    // order): cut to the requested length, the sound ran out early and the join
+    // played the rest as a gap (130 to 230 ms per join measured). The length is
+    // measured on the timeline the mux below puts the picture on, which starts
+    // where the file reports its start. The sound is then cut a second longer
+    // and the mux keeps just enough of it.
+    let picture_length = if audio_follows_video {
+        probe_segment_timing(ffprobe, &video)
+            .and_then(|timing| stream_end(&timing.video).map(|end| end - timing.start_time))
+    } else {
+        None
+    };
+    let audio_length = picture_length.map_or(duration, |length| length + 1.0);
     emit_conversion_progress(
         window,
         "encode",
@@ -3772,7 +3816,7 @@ fn run_smart_cut_clip(
         "-ss".to_string(),
         format!("{:.3}", start - seek_from),
         "-t".to_string(),
-        format!("{duration:.3}"),
+        format!("{audio_length:.3}"),
     ];
     append_clip_stream_maps(&mut audio_args, &["0:a:0"]);
     audio_args.extend([
@@ -3790,6 +3834,24 @@ fn run_smart_cut_clip(
         "Smart cut audio",
     )?;
 
+    // How much of that longer sound the mux keeps: whole packets up to the one
+    // that plays through the last frame. The mux shifts the sound to start
+    // where its file reports its start, and an input -t counts from there, so
+    // the packets are measured from that point too. If the sound cannot be
+    // read, it is simply cut at the picture's length.
+    let audio_limit = picture_length.map(|length| {
+        probe_segment_timing(ffprobe, &audio)
+            .and_then(|timing| {
+                let shifted: Vec<(f64, f64)> = timing
+                    .audio
+                    .iter()
+                    .map(|(packet_start, packet_length)| (packet_start - timing.start_time, *packet_length))
+                    .collect();
+                audio_cut_point(&shifted, audio_packets_to_cover(&shifted, length))
+            })
+            .unwrap_or(length)
+    });
+
     emit_conversion_progress(
         window,
         "encode",
@@ -3805,9 +3867,11 @@ fn run_smart_cut_clip(
         "-nostdin".to_string(),
         "-i".to_string(),
         video.to_string_lossy().to_string(),
-        "-i".to_string(),
-        audio.to_string_lossy().to_string(),
     ];
+    if let Some(limit) = audio_limit {
+        mux_args.extend(["-t".to_string(), format!("{limit:.6}")]);
+    }
+    mux_args.extend(["-i".to_string(), audio.to_string_lossy().to_string()]);
     append_clip_stream_maps(&mut mux_args, &["0:v:0", "1:a:0"]);
     mux_args.extend(["-c".to_string(), "copy".to_string()]);
     run_clip_ffmpeg(
@@ -3898,6 +3962,7 @@ fn run_smart_cut_merge(
             &format!("Smart cut segment {}/{}", i + 1, clips.len()),
             i as f32 * span,
             span,
+            true,
         )?;
         segment_paths.push(segment);
     }
@@ -3906,13 +3971,14 @@ fn run_smart_cut_merge(
         .first()
         .map(|profile| mp4_codec_tag_args(output, &profile.video.codec))
         .unwrap_or_default();
+    let join_durations = probe_segment_join_durations(ffprobe, &segment_paths);
     let staged = StagedOutput::new(output);
     concat_copy_segments(
         window,
         ffmpeg,
         &temp_dir,
         &segment_paths,
-        &[],
+        &join_durations,
         total_duration,
         staged.path(),
         None,
