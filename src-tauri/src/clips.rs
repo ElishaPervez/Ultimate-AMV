@@ -2645,6 +2645,7 @@ fn run_clip_export_merged(
         return run_lossless_cut_merge(
             &window,
             &ffmpeg,
+            &ffprobe,
             &clips,
             &input_paths,
             &input_index_for_clip,
@@ -2986,13 +2987,17 @@ fn create_segment_temp_dir(out_dir: &Path, prefix: &str) -> Result<PathBuf, Stri
 // packets tidied on the way through (smart cut strips the access-unit
 // delimiters its transport-stream intermediates add); it never re-encodes.
 // `extra_output_args` carries container metadata (the MP4 `hvc1` tag); it never
-// re-encodes either.
+// re-encodes either. `join_durations` (see segment_join_durations) is written
+// into the list as each segment's length, so the join places the next segment
+// exactly where this one's sound ends; empty leaves the join to read lengths
+// off the files.
 #[allow(clippy::too_many_arguments)]
 fn concat_copy_segments(
     window: &tauri::Window,
     ffmpeg: &Path,
     temp_dir: &Path,
     segments: &[PathBuf],
+    join_durations: &[f64],
     total_duration: f64,
     output: &Path,
     bitstream_filter: Option<&str>,
@@ -3002,9 +3007,12 @@ fn concat_copy_segments(
     label: &str,
 ) -> Result<(), String> {
     let mut concat_list = String::new();
-    for segment in segments {
+    for (i, segment) in segments.iter().enumerate() {
         let escaped = segment.to_string_lossy().replace('\'', "'\\''");
         concat_list.push_str(&format!("file '{escaped}'\n"));
+        if let Some(duration) = join_durations.get(i) {
+            concat_list.push_str(&format!("duration {duration:.6}\n"));
+        }
     }
 
     let list_path = temp_dir.join("concat.txt");
@@ -3043,6 +3051,396 @@ fn concat_copy_segments(
         total_duration,
         label,
     )
+}
+
+// Packet timing of a short stream-copied segment: each stream's packets as
+// (start, length) in seconds, sorted by start, and the start the file reports.
+// That reported start is not always the first packet's: an AAC packet that
+// carries encoder-delay trimming moves it later, and ffmpeg measures an input
+// `-t` from it, so it is kept alongside the packets.
+#[derive(Debug, Default, PartialEq)]
+struct SegmentTiming {
+    video: Vec<(f64, f64)>,
+    audio: Vec<(f64, f64)>,
+    start_time: f64,
+}
+
+// Reads ffprobe's JSON for `stream=index,codec_type`, `packet=stream_index,
+// pts_time,duration_time` and `format=start_time`. Only the first video and the
+// first audio stream are kept. A packet length ffprobe leaves out (some
+// containers store none) is filled in with the stream's usual packet spacing.
+fn parse_segment_timing(json_text: &str) -> Option<SegmentTiming> {
+    let value: Value = serde_json::from_str(json_text).ok()?;
+    let streams = value.get("streams").and_then(Value::as_array)?;
+    let first_index = |kind: &str| {
+        streams
+            .iter()
+            .find(|stream| stream.get("codec_type").and_then(Value::as_str) == Some(kind))
+            .and_then(|stream| stream.get("index").and_then(Value::as_i64))
+    };
+    let (video_index, audio_index) = (first_index("video"), first_index("audio"));
+    let seconds = |item: &Value, key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .and_then(|text| text.trim().parse::<f64>().ok())
+            .filter(|number| number.is_finite())
+    };
+    let mut timing = SegmentTiming {
+        start_time: value
+            .get("format")
+            .and_then(|format| seconds(format, "start_time"))
+            .unwrap_or(0.0),
+        ..SegmentTiming::default()
+    };
+    for packet in value.get("packets").and_then(Value::as_array).into_iter().flatten() {
+        let Some(start) = seconds(packet, "pts_time") else { continue };
+        let length = seconds(packet, "duration_time").filter(|l| *l > 0.0).unwrap_or(0.0);
+        let index = packet.get("stream_index").and_then(Value::as_i64);
+        if index.is_some() && index == video_index {
+            timing.video.push((start, length));
+        } else if index.is_some() && index == audio_index {
+            timing.audio.push((start, length));
+        }
+    }
+    for packets in [&mut timing.video, &mut timing.audio] {
+        packets.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let spacing = usual_packet_spacing(packets);
+        for packet in packets.iter_mut().filter(|packet| packet.1 <= 0.0) {
+            packet.1 = spacing;
+        }
+    }
+    Some(timing)
+}
+
+fn probe_segment_timing(ffprobe: &Path, input: &Path) -> Option<SegmentTiming> {
+    let output = cmd(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-show_entries")
+        .arg("stream=index,codec_type:packet=stream_index,pts_time,duration_time:format=start_time")
+        .arg("-of").arg("json")
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_segment_timing(&String::from_utf8_lossy(&output.stdout))
+}
+
+// Average distance between packet starts (packets sorted by start). Averaged
+// over the whole run rather than read off one packet, because MKV stores
+// timestamps in whole milliseconds: one AAC packet reads 21 or 22 ms, the
+// average reads the true 21.33.
+fn usual_packet_spacing(packets: &[(f64, f64)]) -> f64 {
+    match (packets.first(), packets.last()) {
+        (Some(first), Some(last)) if packets.len() > 1 => {
+            (last.0 - first.0) / (packets.len() - 1) as f64
+        }
+        (Some(only), _) => only.1,
+        _ => 0.0,
+    }
+}
+
+fn stream_end(packets: &[(f64, f64)]) -> Option<f64> {
+    packets.iter().map(|(start, length)| start + length).max_by(f64::total_cmp)
+}
+
+// How many sound packets (sorted by start, counted from the first) it takes to
+// keep playing until `video_end`, so the sound ends with the last frame or at
+// most one packet after it. If the packets run out first, the missing stretch
+// is counted in packets of the usual spacing. One millisecond of slack absorbs
+// MKV's millisecond timestamps.
+fn audio_packets_to_cover(audio: &[(f64, f64)], video_end: f64) -> usize {
+    const SLACK: f64 = 0.001;
+    if let Some(index) = audio.iter().position(|(start, length)| start + length >= video_end - SLACK) {
+        return index + 1;
+    }
+    let spacing = usual_packet_spacing(audio);
+    let Some(end) = stream_end(audio) else { return 0 };
+    if spacing <= 0.0 {
+        return audio.len();
+    }
+    audio.len() + ((video_end - SLACK - end) / spacing).ceil().max(1.0) as usize
+}
+
+// How far the stream-copy join should move on after each segment but the last,
+// so the next segment's first sound packet starts exactly where this segment's
+// sound ends.
+//
+// Left to itself, the join shifts each segment's packets back by the start the
+// file reports but moves on by the file's stored length, which MKV measures
+// from zero. Whenever a segment's reported start is above zero (its first
+// sound packet sits a few milliseconds in, or carries the source's
+// encoder-delay trim), the join left a hole of exactly that size: 27 to 38 ms
+// per join on an MKV source even once each segment's sound matched its
+// picture. Spelled out here, the next segment lands with no hole and no
+// overlap. Continuity follows the sound when the next segment has any, else the
+// picture. Empty when any segment cannot be read, which keeps the old join.
+fn segment_join_durations(timings: &[SegmentTiming]) -> Vec<f64> {
+    let mut durations = Vec::with_capacity(timings.len().saturating_sub(1));
+    for pair in timings.windows(2) {
+        let (this, next) = (&pair[0], &pair[1]);
+        let end = match (stream_end(&this.video), stream_end(&this.audio)) {
+            (Some(video), Some(audio)) => video.max(audio),
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => return Vec::new(),
+        };
+        let Some(&(next_first, _)) = next.audio.first().or(next.video.first()) else {
+            return Vec::new();
+        };
+        let duration = (end - this.start_time) + (next.start_time - next_first);
+        if !duration.is_finite() || duration <= 0.0 {
+            return Vec::new();
+        }
+        durations.push(duration);
+    }
+    durations
+}
+
+// Probes every finished segment and works out the join lengths above.
+fn probe_segment_join_durations(ffprobe: &Path, segments: &[PathBuf]) -> Vec<f64> {
+    let timings: Option<Vec<SegmentTiming>> = segments
+        .iter()
+        .map(|segment| probe_segment_timing(ffprobe, segment))
+        .collect();
+    timings.map(|timings| segment_join_durations(&timings)).unwrap_or_default()
+}
+
+// A time limit that keeps exactly the first `count` sound packets: halfway
+// through the last one wanted, so the next packet (which starts a full packet
+// later) is past it whichever way the container rounded the timestamps.
+fn audio_cut_point(audio: &[(f64, f64)], count: usize) -> Option<f64> {
+    let (start, length) = audio.get(count.checked_sub(1)?)?;
+    Some(start + length / 2.0)
+}
+
+// A stream-copy cut that writes picture and sound into one file can only stop
+// each stream on a whole packet, and the two stop in different places: the
+// picture is cut in decode order and runs a few frames past the requested end,
+// the sound stops right on it. In a merge, the join lines the next clip up after
+// the longer picture, so the sound's shortfall played as a gap at every join
+// (93 to 226 ms measured on lossless merges).
+//
+// This re-cuts the sound only. `recut` repeats the original cut into the given
+// file with `extra` seconds added to its length: the same seek reads the same
+// packets onto the same timeline, just with more sound. The segment is then
+// remuxed from its own picture and just enough of the longer cut's sound to play
+// through the last frame (never more than one sound packet, about 21 ms, past
+// it). The picture is untouched and nothing is re-encoded. A segment whose sound
+// already ends with its picture, that has no sound, or that cannot be read is
+// left exactly as it was.
+//
+// Why not one cut with a packet cap per stream: in ffmpeg 8 the first stream to
+// reach its cap ends the whole file, cutting the other stream short.
+#[allow(clippy::too_many_arguments)]
+fn match_copy_cut_audio(
+    window: &tauri::Window,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    segment: &Path,
+    recut: &dyn Fn(f64, &Path) -> Vec<String>,
+    extra_output_args: &[String],
+    length: f64,
+    label: &str,
+) -> Result<(), String> {
+    let Some(timing) = probe_segment_timing(ffprobe, segment) else { return Ok(()) };
+    let (Some(video_end), Some(audio_end)) = (stream_end(&timing.video), stream_end(&timing.audio)) else {
+        return Ok(());
+    };
+    let wanted = audio_packets_to_cover(&timing.audio, video_end);
+    if wanted == timing.audio.len() {
+        return Ok(());
+    }
+
+    let parent = segment.parent().unwrap_or_else(|| Path::new("."));
+    let stem = segment
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "segment".to_string());
+    let ext = segment
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mkv".to_string());
+    let longer = parent.join(format!(".{stem}.longer.{ext}"));
+    let matched = parent.join(format!(".{stem}.matched.{ext}"));
+    let cleanup = || {
+        let _ = fs::remove_file(&longer);
+        let _ = fs::remove_file(&matched);
+    };
+
+    let extra = (video_end - audio_end).max(0.0) + 1.0;
+    if let Err(error) = run_clip_ffmpeg(window, ffmpeg, recut(extra, &longer), length + extra, label) {
+        cleanup();
+        return Err(error);
+    }
+    // The longer cut has to have started on the very same sound packet, or its
+    // sound would land shifted against the picture. If it did not (or cannot be
+    // read), the segment keeps its original sound.
+    let longer_timing = probe_segment_timing(ffprobe, &longer);
+    let cut = longer_timing.as_ref().and_then(|longer_timing| {
+        let same_start = match (longer_timing.audio.first(), timing.audio.first()) {
+            (Some(a), Some(b)) => (a.0 - b.0).abs() < 1e-6,
+            _ => false,
+        };
+        let cut = audio_cut_point(&longer_timing.audio, wanted)?;
+        same_start.then_some(cut - longer_timing.start_time)
+    });
+    let Some(cut) = cut else {
+        log_warn(
+            "clip.merge.audio_match_skipped",
+            "Could not line up a longer sound cut with its segment; keeping the original sound",
+            json!({ "segment": segment.to_string_lossy() }),
+        );
+        cleanup();
+        return Ok(());
+    };
+
+    // -copyts keeps both inputs on the timeline the cuts wrote, so the picture
+    // and the longer sound line up exactly as they did in the original segment.
+    let mut args: Vec<String> = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-nostdin".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-copyts".to_string(),
+        "-i".to_string(),
+        segment.to_string_lossy().to_string(),
+        "-t".to_string(),
+        format!("{cut:.6}"),
+        "-i".to_string(),
+        longer.to_string_lossy().to_string(),
+    ];
+    append_clip_stream_maps(&mut args, &["0:v:0", "1:a:0"]);
+    args.extend(["-c".to_string(), "copy".to_string()]);
+    args.extend(extra_output_args.iter().cloned());
+    args.push(matched.to_string_lossy().to_string());
+    let result = run_clip_ffmpeg(window, ffmpeg, args, length, label).and_then(|()| {
+        fs::rename(&matched, segment).map_err(|e| format!("Could not write the matched segment: {e}"))
+    });
+    cleanup();
+    result
+}
+
+#[cfg(test)]
+mod copy_cut_audio_tests {
+    use super::{audio_cut_point, audio_packets_to_cover, parse_segment_timing, stream_end};
+
+    // AAC at 48 kHz: 1024-sample packets, 21.333 ms apart.
+    const AAC: f64 = 1024.0 / 48000.0;
+
+    fn aac_packets(count: usize, first: f64) -> Vec<(f64, f64)> {
+        (0..count).map(|k| (first + k as f64 * AAC, AAC)).collect()
+    }
+
+    #[test]
+    fn sound_that_stops_short_is_counted_on_to_the_last_frame() {
+        // 150 packets end at 3.2 s; a picture ending at 3.5 s needs 15 more
+        // (14.02 packets' worth, rounded up), so the sound ends 20 ms after the
+        // last frame: never short of it, never a whole packet past it.
+        let audio = aac_packets(150, 0.0);
+        let wanted = audio_packets_to_cover(&audio, 3.5);
+        assert_eq!(wanted, 165);
+        let end = wanted as f64 * AAC;
+        assert!(end >= 3.5 - 0.001 && end < 3.5 + AAC, "{end}");
+    }
+
+    #[test]
+    fn sound_that_already_covers_the_picture_keeps_its_packets() {
+        let audio = aac_packets(150, 0.0);
+        let end = stream_end(&audio).unwrap();
+        assert_eq!(audio_packets_to_cover(&audio, end), 150);
+        // Within MKV's millisecond rounding counts as covering.
+        assert_eq!(audio_packets_to_cover(&audio, end + 0.0008), 150);
+    }
+
+    #[test]
+    fn sound_that_runs_a_packet_past_the_picture_is_trimmed_to_it() {
+        let audio = aac_packets(150, 0.0);
+        // The picture ends inside packet 140 (index 139): keep 140 packets.
+        let video_end = 139.5 * AAC;
+        assert_eq!(audio_packets_to_cover(&audio, video_end), 140);
+    }
+
+    #[test]
+    fn the_cut_point_falls_inside_the_last_wanted_packet() {
+        let audio = aac_packets(10, 0.014);
+        let cut = audio_cut_point(&audio, 4).unwrap();
+        assert!(cut > audio[3].0 && cut < audio[4].0, "{cut}");
+        assert_eq!(audio_cut_point(&audio, 0), None);
+        assert_eq!(audio_cut_point(&audio, 11), None);
+    }
+
+    #[test]
+    fn segment_timing_reads_both_streams_and_fills_missing_lengths() {
+        let json = r#"{
+            "packets": [
+                {"stream_index": 0, "pts_time": "0.080000"},
+                {"stream_index": 1, "pts_time": "0.004000", "duration_time": "0.023000"},
+                {"stream_index": 1, "pts_time": "0.027000", "duration_time": "0.023000"},
+                {"stream_index": 0, "pts_time": "0.160000", "duration_time": "0.040000"},
+                {"stream_index": 0, "pts_time": "0.120000", "duration_time": "0.040000"},
+                {"stream_index": 2, "pts_time": "0.000000", "duration_time": "1.000000"}
+            ],
+            "streams": [
+                {"index": 0, "codec_type": "video"},
+                {"index": 1, "codec_type": "audio"},
+                {"index": 2, "codec_type": "subtitle"}
+            ],
+            "format": {"start_time": "0.027000"}
+        }"#;
+        let timing = parse_segment_timing(json).unwrap();
+        // Sorted by start; the missing length is the usual 40 ms spacing.
+        assert_eq!(timing.video.len(), 3);
+        assert_eq!(timing.video[0].0, 0.08);
+        assert!((timing.video[0].1 - 0.04).abs() < 1e-9);
+        assert!((stream_end(&timing.video).unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(timing.audio, vec![(0.004, 0.023), (0.027, 0.023)]);
+        assert_eq!(timing.start_time, 0.027);
+        assert!(parse_segment_timing("not json").is_none());
+    }
+
+    #[test]
+    fn the_join_places_each_segment_where_the_last_ones_sound_ends() {
+        use super::{segment_join_durations, SegmentTiming};
+        // An MKV segment: picture from 0.080 to 3.640, sound from 0.004 to
+        // 3.649, and a reported start of 0.027 (encoder-delay trim on the
+        // first sound packet). The next one starts its sound at 0.015 and
+        // reports 0.038.
+        let first = SegmentTiming {
+            video: vec![(0.08, 0.04), (3.6, 0.04)],
+            audio: vec![(0.004, 0.023), (3.626, 0.023)],
+            start_time: 0.027,
+        };
+        let second = SegmentTiming {
+            video: vec![(0.08, 0.04)],
+            audio: vec![(0.015, 0.023), (0.038, 0.023)],
+            start_time: 0.038,
+        };
+        let durations = segment_join_durations(&[first, second]);
+        assert_eq!(durations.len(), 1);
+        // The join shifts the first segment back by 0.027 (its sound ends at
+        // 3.622) and the second back by 0.038 (its first packet at -0.023):
+        // moving on by 3.645 puts that packet at 3.622 exactly.
+        assert!((durations[0] - 3.645).abs() < 1e-9, "{}", durations[0]);
+        let shifted_end = 3.649 - 0.027;
+        let next_first = durations[0] + (0.015 - 0.038);
+        assert!((shifted_end - next_first).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_silent_segment_joins_on_its_picture_and_an_unreadable_one_keeps_the_old_join() {
+        use super::{segment_join_durations, SegmentTiming};
+        let silent = |first: f64| SegmentTiming {
+            video: vec![(first, 0.04), (2.0, 0.04)],
+            audio: vec![],
+            start_time: first,
+        };
+        assert_eq!(segment_join_durations(&[silent(0.0), silent(0.0)]), vec![2.04]);
+        let unreadable = SegmentTiming::default();
+        assert!(segment_join_durations(&[silent(0.0), unreadable]).is_empty());
+        assert!(segment_join_durations(&[silent(0.0)]).is_empty());
+    }
 }
 
 // How far back the audio cut seeks before the requested start. The demuxer
@@ -3292,6 +3690,7 @@ fn run_smart_cut_clip(
                 ffmpeg,
                 &temp_dir,
                 &[head, body],
+                &[],
                 duration,
                 &video,
                 Some(&format!("{}_metadata=aud=remove", params.codec)),
@@ -3513,6 +3912,7 @@ fn run_smart_cut_merge(
         ffmpeg,
         &temp_dir,
         &segment_paths,
+        &[],
         total_duration,
         staged.path(),
         None,
@@ -3541,9 +3941,11 @@ fn run_smart_cut_merge(
 // have none in the concat (the concat demuxer tolerates a missing audio stream
 // across parts so long as the muxer settings line up, which they do for
 // same-codec same-source segments).
+#[allow(clippy::too_many_arguments)]
 fn run_lossless_cut_merge(
     window: &tauri::Window,
     ffmpeg: &Path,
+    ffprobe: &Path,
     clips: &[ExportClip],
     input_paths: &[PathBuf],
     input_index_for_clip: &[usize],
@@ -3562,27 +3964,30 @@ fn run_lossless_cut_merge(
         total_duration += duration;
 
         let segment = temp_dir.join(format!("seg_{i:04}.mkv"));
-        let mut args: Vec<String> = vec![
-            "-y".to_string(),
-            "-hide_banner".to_string(),
-            "-nostdin".to_string(),
-            "-loglevel".to_string(),
-            "error".to_string(),
-            "-ss".to_string(),
-            format!("{start:.3}"),
-            "-i".to_string(),
-            input.to_string_lossy().to_string(),
-            "-t".to_string(),
-            format!("{duration:.3}"),
-        ];
-        append_clip_stream_maps(&mut args, &["0:v:0", "0:a:0?"]);
-        args.extend([
-            "-c".to_string(),
-            "copy".to_string(),
-            "-avoid_negative_ts".to_string(),
-            "make_zero".to_string(),
-            segment.to_string_lossy().to_string(),
-        ]);
+        let cut_args = |length: f64, target: &Path| {
+            let mut args: Vec<String> = vec![
+                "-y".to_string(),
+                "-hide_banner".to_string(),
+                "-nostdin".to_string(),
+                "-loglevel".to_string(),
+                "error".to_string(),
+                "-ss".to_string(),
+                format!("{start:.3}"),
+                "-i".to_string(),
+                input.to_string_lossy().to_string(),
+                "-t".to_string(),
+                format!("{length:.3}"),
+            ];
+            append_clip_stream_maps(&mut args, &["0:v:0", "0:a:0?"]);
+            args.extend([
+                "-c".to_string(),
+                "copy".to_string(),
+                "-avoid_negative_ts".to_string(),
+                "make_zero".to_string(),
+                target.to_string_lossy().to_string(),
+            ]);
+            args
+        };
         emit_conversion_progress(
             window,
             "decode",
@@ -3594,19 +3999,34 @@ fn run_lossless_cut_merge(
         run_clip_ffmpeg(
             window,
             ffmpeg,
-            args,
+            cut_args(duration, &segment),
             duration,
             "Cutting lossless segment",
+        )?;
+        // The keyframe-snapped picture runs past the requested end while the
+        // sound stops on it; give the sound the same length so the join leaves
+        // no gap.
+        match_copy_cut_audio(
+            window,
+            ffmpeg,
+            ffprobe,
+            &segment,
+            &|extra, target| cut_args(duration + extra, target),
+            &[],
+            duration,
+            "Matching lossless segment sound",
         )?;
 
         segment_paths.push(segment);
     }
 
+    let join_durations = probe_segment_join_durations(ffprobe, &segment_paths);
     concat_copy_segments(
         window,
         ffmpeg,
         &temp_dir,
         &segment_paths,
+        &join_durations,
         total_duration,
         output,
         None,
