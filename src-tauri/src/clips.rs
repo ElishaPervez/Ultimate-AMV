@@ -2103,6 +2103,7 @@ fn clip_frame_count(packets: &[(f64, bool)], start: f64, duration: f64) -> usize
 // The same count from a listing read around the clip, or None when it cannot
 // be trusted: it does not reach back to the clip's first frame (unreadable, or
 // an index that lies) or holds none of the clip.
+#[cfg(test)]
 fn listed_clip_frame_count(packets: &[(f64, bool)], start: f64, duration: f64) -> Option<usize> {
     let (from, to) = clip_frame_bounds(start, duration);
     listed_frames_between(packets, from, to)
@@ -4393,6 +4394,14 @@ fn run_smart_cut_clip(
     let tolerance = 0.5 / fps;
     let end = start + duration;
     let seek_start = millisecond_seek(start);
+    // Where the re-encodes' seek really lands on this source's clock (see
+    // seek_on_source_clock). The head and the whole-clip re-encode count their
+    // frames from here, as the re-encode presets do: on a coarse clock (1/600
+    // s, phone recordings) the seek can take in a frame just before the
+    // millisecond start, and counted from the millisecond start the head
+    // stopped one frame short, losing the frame just before the copied
+    // keyframe (measured).
+    let first_frame_from = seek_on_source_clock(seek_start, source_clock_tick(&params));
     let stage = |fraction: f32| Some(percent_from + percent_span * fraction);
 
     // Every frame from the requested start to a little past the requested end,
@@ -4490,7 +4499,7 @@ fn run_smart_cut_clip(
         let mut pieces: Vec<PathBuf> = Vec::with_capacity(3);
         // Frames before the keyframe. None when the start is on the keyframe
         // (or less than a frame before it).
-        let head_frames = frames_between(&packets, seek_start, kf - tolerance);
+        let head_frames = frames_between(&packets, first_frame_from, kf - tolerance);
         if head_frames > 0 {
             let head = temp_dir.join("head.ts");
             emit_conversion_progress(
@@ -4659,7 +4668,7 @@ fn run_smart_cut_clip(
             None,
             None,
         );
-        let frames = listed_clip_frame_count(&packets, start, duration);
+        let frames = listed_frames_between(&packets, first_frame_from, end);
         run_clip_ffmpeg(
             window,
             ffmpeg,
