@@ -3126,6 +3126,13 @@ fn run_clip_export(
             continue;
         }
 
+        // ffmpeg writes under a temporary name and the clip only takes its
+        // numbered name once finished (see StagedOutput): a cancelled or
+        // failed export used to leave a partial "1.mp4" behind, and the next
+        // export skipped to "2.mp4".
+        let staged = StagedOutput::new(&output);
+        let staged_path = staged.path().to_string_lossy().to_string();
+
         let mut args = vec![
             "-y".to_string(),
             "-hide_banner".to_string(),
@@ -3323,7 +3330,7 @@ fn run_clip_export(
             "pipe:1".to_string(),
             "-stats_period".to_string(),
             "0.5".to_string(),
-            output.to_string_lossy().to_string(),
+            staged_path.clone(),
         ]);
 
         let duration = frames.as_ref().map_or(export_duration, ClipFrames::length);
@@ -3352,7 +3359,7 @@ fn run_clip_export(
                     fallback_message,
                     json!({ "clip": i + 1, "preset": &preset, "error": &primary_error }),
                 );
-                let _ = fs::remove_file(&output);
+                let _ = fs::remove_file(staged.path());
                 let mut fallback_args: Vec<String> = vec![
                     "-y".to_string(),
                     "-hide_banner".to_string(),
@@ -3382,7 +3389,7 @@ fn run_clip_export(
                     "pipe:1".to_string(),
                     "-stats_period".to_string(),
                     "0.5".to_string(),
-                    output.to_string_lossy().to_string(),
+                    staged_path.clone(),
                 ]);
                 run_clip_ffmpeg(
                     &window,
@@ -3395,6 +3402,7 @@ fn run_clip_export(
                 return Err(primary_error);
             }
         }
+        staged.commit()?;
         exported_paths.push(output.to_string_lossy().to_string());
     }
 
@@ -3695,12 +3703,15 @@ fn run_clip_export_merged(
     // muxer writes the labels into the container.
     args.extend(color_tag_args(&color));
 
+    // Written under a temporary name and renamed once finished, so a cancelled
+    // or failed merge leaves nothing under the numbered name (StagedOutput).
+    let staged = StagedOutput::new(&output);
     args.extend([
         "-progress".to_string(),
         "pipe:1".to_string(),
         "-stats_period".to_string(),
         "0.5".to_string(),
-        output.to_string_lossy().to_string(),
+        staged.path().to_string_lossy().to_string(),
     ]);
 
     let output_name = output
@@ -3738,7 +3749,7 @@ fn run_clip_export_merged(
                 fallback_message,
                 json!({ "preset": &preset, "error": &primary_error }),
             );
-            let _ = fs::remove_file(&output);
+            let _ = fs::remove_file(staged.path());
             let mut fallback_args = pre_encode_args;
             fallback_args.extend(gpu_cpu_fallback_video_args(
                 &preset,
@@ -3756,7 +3767,7 @@ fn run_clip_export_merged(
             fallback_args.extend([
                 "-progress".to_string(), "pipe:1".to_string(),
                 "-stats_period".to_string(), "0.5".to_string(),
-                output.to_string_lossy().to_string(),
+                staged.path().to_string_lossy().to_string(),
             ]);
             run_clip_merge_ffmpeg(
                 &window,
@@ -3769,6 +3780,7 @@ fn run_clip_export_merged(
             return Err(primary_error);
         }
     }
+    staged.commit()?;
 
     let done = ConversionDone {
         r#type: "done".to_string(),
@@ -5049,6 +5061,8 @@ fn run_lossless_cut_merge(
         .map(|segment| probe_segment_timing(ffprobe, segment))
         .collect();
     let (join_durations, outpoints) = lossless_segment_joins(timings, &requested);
+    // Joined under a temporary name, renamed once finished (StagedOutput).
+    let staged = StagedOutput::new(output);
     concat_copy_segments(
         window,
         ffmpeg,
@@ -5057,13 +5071,14 @@ fn run_lossless_cut_merge(
         &join_durations,
         &outpoints,
         total_duration,
-        output,
+        staged.path(),
         None,
         &[],
         92.0_f32,
         format!("Joining {} lossless segments...", clips.len()),
         "Joining lossless segments",
     )?;
+    staged.commit()?;
 
     let done = ConversionDone {
         r#type: "done".to_string(),
