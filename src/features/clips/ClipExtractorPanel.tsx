@@ -2322,29 +2322,6 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     [mergeOrder, displayedClips],
   );
 
-  const mergeFilenameStem = React.useMemo(
-    () => {
-      const parts: number[] = [];
-      mergeOrderedClips.forEach((clip) => {
-        if (clip.isUnified && clip.segments) {
-          clip.segments.forEach((s) => parts.push(s.index + 1));
-        } else {
-          parts.push(clip.index + 1);
-        }
-      });
-      if (parts.length === 0) return "";
-
-      const fullJoin = parts.join("+");
-      if (fullJoin.length <= 30) {
-        return fullJoin;
-      }
-
-      const min = Math.min(...parts);
-      const max = Math.max(...parts);
-      return `${min}-${max} (${parts.length} clips)`;
-    },
-    [mergeOrderedClips],
-  );
   // Container extension the backend will actually write for the current preset
   // and the selected clips' sources, so the merge UI labels match the real
   // output file. Smart cut reads the sources; every other preset ignores them.
@@ -3614,7 +3591,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                   ? "Click clips in the order they should play"
                   : mergeOrderedClips.length < 2
                     ? "Pick at least 2 clips"
-                    : `→ ${mergeFilenameStem}.${mergeExt}`}
+                    : `→ next free number in the folder (.${mergeExt})`}
               </span>
               {mergeOrderedClips.length > 0 && (
                 <button

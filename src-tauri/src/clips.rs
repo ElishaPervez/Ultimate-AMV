@@ -30,7 +30,6 @@ pub(crate) struct ExportClip {
     pub source: String,
     pub start: f64,
     pub end: f64,
-    pub index: usize,
     pub fps: Option<f64>,
 }
 
@@ -1134,6 +1133,92 @@ mod clip_output_mapping_tests {
 }
 
 #[cfg(test)]
+mod numbered_output_tests {
+    use super::next_free_numbered_path;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "amv_numbered_output_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn empty_folder_starts_at_one() {
+        let dir = temp_dir("empty");
+        let (path, number) = next_free_numbered_path(&dir, "mp4", 1);
+        assert_eq!(number, 1);
+        assert_eq!(path, dir.join("1.mp4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn continues_after_the_highest_consecutive_number() {
+        let dir = temp_dir("consecutive");
+        for n in 1..=3 {
+            fs::write(dir.join(format!("{n}.mp4")), b"").unwrap();
+        }
+        let (path, number) = next_free_numbered_path(&dir, "mp4", 1);
+        assert_eq!(number, 4);
+        assert_eq!(path, dir.join("4.mp4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fills_a_gap() {
+        let dir = temp_dir("gap");
+        for n in [1, 3] {
+            fs::write(dir.join(format!("{n}.mp4")), b"").unwrap();
+        }
+        let (path, number) = next_free_numbered_path(&dir, "mp4", 1);
+        assert_eq!(number, 2);
+        assert_eq!(path, dir.join("2.mp4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_same_extension_counts_as_taken() {
+        let dir = temp_dir("ext");
+        fs::write(dir.join("1.mkv"), b"").unwrap();
+        let (path, _) = next_free_numbered_path(&dir, "mp4", 1);
+        assert_eq!(path, dir.join("1.mp4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_and_single_exports_do_not_collide() {
+        let dir = temp_dir("mixed");
+        // Both export kinds ask the same helper, one after the other, with each
+        // finished file written before the next export is named.
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let (path, _) = next_free_numbered_path(&dir, "mp4", 1);
+            assert!(!seen.contains(&path), "name handed out twice: {path:?}");
+            fs::write(&path, b"").unwrap();
+            seen.push(path);
+        }
+        assert_eq!(seen[3], dir.join("4.mp4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_hint_skips_numbers_already_handed_out_in_a_batch() {
+        let dir = temp_dir("batch");
+        let (first, used) = next_free_numbered_path(&dir, "mp4", 1);
+        // The batch has not written the first file yet; the hint keeps the
+        // second name distinct from it.
+        let (second, _) = next_free_numbered_path(&dir, "mp4", used + 1);
+        assert_ne!(first, second);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod smart_cut_tests {
     use super::{
         count_packet_lines, first_keyframe_at_or_after, mp4_codec_tag_args, parse_fps_rational,
@@ -1726,7 +1811,7 @@ mod merge_graph_tests {
     use std::path::PathBuf;
 
     fn clip(source: &str, start: f64, end: f64) -> ExportClip {
-        ExportClip { source: source.to_string(), start, end, index: 0, fps: Some(24.0) }
+        ExportClip { source: source.to_string(), start, end, fps: Some(24.0) }
     }
 
     fn millis(text: &str) -> u64 {
@@ -1880,12 +1965,10 @@ mod merge_graph_tests {
         let raw: Vec<serde_json::Value> = serde_json::from_str(&spec).unwrap();
         let clips: Vec<ExportClip> = raw
             .iter()
-            .enumerate()
-            .map(|(index, c)| ExportClip {
+            .map(|c| ExportClip {
                 source: c["source"].as_str().unwrap().to_string(),
                 start: c["start"].as_f64().unwrap(),
                 end: c["end"].as_f64().unwrap(),
-                index,
                 fps: c["fps"].as_f64(),
             })
             .collect();
@@ -1980,6 +2063,21 @@ fn run_clip_merge_ffmpeg(
     result
 }
 
+// Next free numbered output name in `dir`: the first `N.{ext}` at or after
+// `start` that does not exist yet (so gaps left by deleted files get filled).
+// Returns the path and the number it used. Single and merged exports both name
+// their files through this so the two styles share one numbering sequence.
+fn next_free_numbered_path(dir: &Path, ext: &str, start: u32) -> (PathBuf, u32) {
+    let mut number = start.max(1);
+    loop {
+        let candidate = dir.join(format!("{number}.{ext}"));
+        if !candidate.exists() {
+            return (candidate, number);
+        }
+        number += 1;
+    }
+}
+
 fn run_clip_export(
     window: tauri::Window,
     clips: Vec<ExportClip>,
@@ -2012,14 +2110,8 @@ fn run_clip_export(
         let color = probe_color_metadata(&ffprobe, &input);
 
         let ext = preset_extension_for(&preset, std::slice::from_ref(&input));
-        let output = loop {
-            let candidate = out_dir.join(format!("{file_index}.{ext}"));
-            if !candidate.exists() {
-                break candidate;
-            }
-            file_index += 1;
-        };
-        file_index += 1;
+        let (output, used_index) = next_free_numbered_path(&out_dir, ext, file_index);
+        file_index = used_index + 1;
 
         // Smart cut cannot share the single-invocation shape below: one clip is
         // a head re-encode + a body copy + a concat. It is handled here and the
@@ -2378,17 +2470,6 @@ fn run_clip_export_merged(
     let out_dir = PathBuf::from(&output_dir);
     fs::create_dir_all(&out_dir).map_err(|e| format!("Could not create output directory: {e}"))?;
 
-    let parts: Vec<usize> = clips.iter().map(|c| c.index + 1).collect();
-    let base_name = {
-        let full_join = parts.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("+");
-        if full_join.len() <= 30 {
-            full_join
-        } else {
-            let min = parts.iter().min().copied().unwrap_or(1);
-            let max = parts.iter().max().copied().unwrap_or(1);
-            format!("{}-{} ({} clips)", min, max, parts.len())
-        }
-    };
     // Sources are resolved BEFORE the output is named: smart cut picks the
     // container from them, so the name cannot be decided without them.
     let mut input_paths: Vec<PathBuf> = Vec::new();
@@ -2406,12 +2487,8 @@ fn run_clip_export_merged(
     }
 
     let ext = preset_extension_for(&preset, &input_paths);
-    let mut output = out_dir.join(format!("{base_name}.{ext}"));
-    let mut suffix = 1;
-    while output.exists() {
-        output = out_dir.join(format!("{base_name} ({suffix}).{ext}"));
-        suffix += 1;
-    }
+    // Same numbering as single-clip exports: the next free whole number.
+    let (output, _) = next_free_numbered_path(&out_dir, ext, 1);
 
     // Probe which inputs actually have audio streams
     let mut input_has_audio: Vec<bool> = Vec::with_capacity(input_paths.len());
@@ -2619,7 +2696,7 @@ fn run_clip_export_merged(
     let output_name = output
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| base_name.clone());
+        .unwrap_or_default();
     emit_conversion_progress(
         &window,
         "starting",
