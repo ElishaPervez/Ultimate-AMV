@@ -975,6 +975,34 @@ fn probe_packet_listing(ffprobe: &Path, input: &Path, interval: Option<String>) 
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+// How far past a clip's end its frame listing reads, so smart cut's body plan
+// can see where the frame reordering around the end settles.
+const CLIP_LISTING_LOOKAHEAD: f64 = 2.0;
+
+// A source's frame listing around a clip (`start` to `end`, counted from the
+// first visible frame like every clip range), in stored order. Read on the
+// container's own timeline, so the source's start timestamp is added here; the
+// caller takes it back off with parse_packet_list. ffprobe starts the window at
+// the last keyframe at or before `start`, so it holds every frame the clip
+// needs. Smart cut and the re-encodes both count a clip's frames on this.
+fn probe_clip_listing(
+    ffprobe: &Path,
+    input: &Path,
+    start: f64,
+    end: f64,
+    start_offset: f64,
+) -> Option<String> {
+    probe_packet_listing(
+        ffprobe,
+        input,
+        Some(format!(
+            "{:.3}%{:.3}",
+            start + start_offset,
+            end + CLIP_LISTING_LOOKAHEAD + start_offset
+        )),
+    )
+}
+
 // Frames that start at or after `from` and before `to`.
 fn frames_between(packets: &[(f64, bool)], from: f64, to: f64) -> usize {
     packets.iter().filter(|(pts, _)| *pts >= from && *pts < to).count()
@@ -1931,12 +1959,86 @@ fn padded_clip_range(clip: &ExportClip) -> (f64, f64) {
     (start, duration)
 }
 
-// The frame rate a merged clip's picture really runs at, used to end its sound
-// exactly where its last frame ends. The source's own rate wins over the one the
-// UI sent, which can be rounded (24 for a 23.976 source). The nominal rate is
-// exact on a constant-rate source; when it and the average disagree by more than
-// 1% the source is variable-rate and the average is the better guess.
-fn merge_source_fps(params: &SourceVideoParams) -> Option<f64> {
+// Which source frames a clip export keeps. One rule for every mode (smart cut,
+// re-encoded single clips, re-encoded merges and the merged preview): every
+// frame that starts at or after the millisecond seek point and before
+// `start + duration`, with (start, duration) from padded_clip_range. Returned
+// as (from, to), counted from the source's first visible frame.
+//
+// Re-encodes used to end on a time limit instead, measured from wherever the
+// first kept frame landed: about half a frame after `start`, because of the
+// 1.5-frame start offset. That moved the end half a frame late, and the frame
+// that opens the next scene (only 15 ms past the end) came along in most
+// merged clips and in a third to half of single clips; ffmpeg's rounding of
+// the first frame onto the output frame grid also dropped a clip's own last
+// frame now and then. Every re-encode now stops on this frame count instead,
+// counted from where ffmpeg's seek really lands (seek_on_source_clock: the
+// same point except on a coarse source clock).
+fn clip_frame_bounds(start: f64, duration: f64) -> (f64, f64) {
+    (millisecond_seek(start), start + duration)
+}
+
+// How many frames of a frame listing (see parse_packet_list) a clip keeps.
+// The tests check every other count against this.
+#[cfg(test)]
+fn clip_frame_count(packets: &[(f64, bool)], start: f64, duration: f64) -> usize {
+    let (from, to) = clip_frame_bounds(start, duration);
+    frames_between(packets, from, to)
+}
+
+// The same count from a listing read around the clip, or None when it cannot
+// be trusted: it does not reach back to the clip's first frame (unreadable, or
+// an index that lies) or holds none of the clip.
+fn listed_clip_frame_count(packets: &[(f64, bool)], start: f64, duration: f64) -> Option<usize> {
+    let (from, to) = clip_frame_bounds(start, duration);
+    listed_frames_between(packets, from, to)
+}
+
+fn listed_frames_between(packets: &[(f64, bool)], from: f64, to: f64) -> Option<usize> {
+    let covers_start = packets.iter().any(|(pts, _)| *pts <= from);
+    Some(frames_between(packets, from, to)).filter(|count| covers_start && *count > 0)
+}
+
+// The length of one step of a source's clock (its video time base, "1/600"
+// -> 1/600 s), if it reads as one.
+fn source_clock_tick(params: &SourceVideoParams) -> Option<f64> {
+    let (num, den) = params.time_base.trim().split_once('/')?;
+    let (num, den): (f64, f64) = (num.trim().parse().ok()?, den.trim().parse().ok()?);
+    (num > 0.0 && den > 0.0).then(|| num / den)
+}
+
+// Where a re-encode's seek really starts: ffmpeg rounds the millisecond start
+// to the nearest step of the source's clock. On the usual clocks (MKV's
+// milliseconds, MP4's 1/24000 s or finer) that moves nothing. On a coarse
+// clock (1/600 s, common in phone recordings) it can take in a frame up to
+// 0.8 ms before the millisecond start, and the frame count has to start there
+// too or the clip ends one frame early (measured). The microsecond allowance
+// covers ffprobe printing times to the microsecond.
+fn seek_on_source_clock(from: f64, tick: Option<f64>) -> f64 {
+    match tick.filter(|tick| tick.is_finite() && *tick > 0.0) {
+        Some(tick) => (from / tick).round() * tick - 1e-6,
+        None => from,
+    }
+}
+
+// The same count worked out from the frame rate alone, for when the listing
+// cannot be read: frame k starts at k / fps. Exact on a constant-rate source.
+// The tiny allowance keeps a frame that sits exactly on a bound on the side the
+// rule puts it (kept at `from`, left out at `to`) despite floating-point error.
+// Never below one frame.
+fn clip_frame_count_at_rate(start: f64, duration: f64, fps: f64) -> usize {
+    let (from, to) = clip_frame_bounds(start, duration);
+    let first = (from.max(0.0) * fps - 1e-6).ceil();
+    let end = (to * fps - 1e-6).ceil();
+    (end - first).max(1.0) as usize
+}
+
+// The frame rate a source's picture really runs at. The source's own rate wins
+// over the one the UI sent, which can be rounded (24 for a 23.976 source). The
+// nominal rate is exact on a constant-rate source; when it and the average
+// disagree by more than 1% the source is variable-rate and the average is the
+// better guess.
+fn source_frame_rate(params: &SourceVideoParams) -> Option<f64> {
     let nominal = parse_fps_rational(&params.r_frame_rate);
     let average = parse_fps_rational(&params.avg_frame_rate);
     match (nominal, average) {
@@ -1946,30 +2048,141 @@ fn merge_source_fps(params: &SourceVideoParams) -> Option<f64> {
     }
 }
 
-// Each merge source's frame rate, in input order. One cheap stream probe per
-// distinct source; a source that cannot be read falls back to the UI's rate.
-fn probe_merge_input_fps(ffprobe: &Path, input_paths: &[PathBuf]) -> Vec<Option<f64>> {
-    input_paths
-        .iter()
-        .map(|path| {
-            probe_source_video_params(ffprobe, path)
-                .ok()
-                .and_then(|params| merge_source_fps(&params))
-        })
-        .collect()
+// The rate a clip's frames are timed at: the source's own, else the UI's, else
+// 24.
+fn clip_fps(params: Option<&SourceVideoParams>, ui_fps: Option<f64>) -> f64 {
+    params
+        .and_then(source_frame_rate)
+        .or(ui_fps)
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(24.0)
 }
 
-// How long a merged clip's picture runs, as (whole frames, seconds). The trim
-// filter keeps every frame that starts less than `duration` after the first one
-// it keeps, so the picture lasts a whole number of frames and usually runs past
-// `duration` by part of a frame. Its sound is trimmed to this same length:
-// trimmed to `duration` instead, the sound ran out early and the join to the
-// next clip played that shortfall as silence (13 to 40 ms per join). The tiny
-// allowance stops a duration that is already a whole number of frames (2.000 s
-// at 24 fps) from gaining a frame through floating-point error.
-fn merge_clip_frames(duration: f64, fps: f64) -> (u64, f64) {
-    let frames = (duration * fps - 1e-6).ceil().max(1.0) as u64;
-    (frames, frames as f64 / fps)
+// The frames a re-encoded clip keeps (clip_frame_bounds): how many, and how
+// long they play for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClipFrames {
+    count: usize,
+    length: f64,
+}
+
+impl ClipFrames {
+    // `count` frames on a constant-rate grid.
+    fn at_rate(count: usize, fps: f64) -> ClipFrames {
+        ClipFrames { count, length: count as f64 / fps }
+    }
+
+    // How long the clip's picture runs.
+    fn length(&self) -> f64 {
+        self.length
+    }
+
+    // The time limit that goes with the frame cap: it ends the sound, and
+    // stays clear of the picture. ffmpeg puts a re-encoded clip's first frame
+    // at 0 or one frame in (rounding the half-frame start offset onto the
+    // frame grid), so the last frame starts at most `count` frames in; half a
+    // frame more never cuts it. The sound ends within half a frame of the
+    // picture either way (plus up to one AAC packet).
+    fn time_limit(&self) -> f64 {
+        self.length * (self.count as f64 + 0.5) / self.count.max(1) as f64
+    }
+}
+
+// A clip's frames in a listing that can be trusted (listed_clip_frame_count),
+// timed the way ffmpeg's concat filter times a piece of picture: the span from
+// its first frame to its last, stretched by one average frame. On a
+// constant-rate source that is exactly count / fps. On a variable-rate source
+// it follows the stretch the clip sits in rather than the file's average rate;
+// timed at the average, a clip from a fast stretch got sound far longer than
+// its picture, and one from a slow stretch far shorter. A single frame is
+// timed at `fps`. `tick` is the source's clock step (seek_on_source_clock).
+fn listed_clip_frames(
+    packets: &[(f64, bool)],
+    start: f64,
+    duration: f64,
+    fps: f64,
+    tick: Option<f64>,
+) -> Option<ClipFrames> {
+    let (from, to) = clip_frame_bounds(start, duration);
+    let from = seek_on_source_clock(from, tick);
+    let count = listed_frames_between(packets, from, to)?;
+    let kept = packets.iter().map(|(pts, _)| *pts).filter(|pts| *pts >= from && *pts < to);
+    let (first, last) = kept.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), pts| {
+        (lo.min(pts), hi.max(pts))
+    });
+    if count < 2 || last <= first {
+        return Some(ClipFrames::at_rate(count, fps));
+    }
+    Some(ClipFrames { count, length: (last - first) * count as f64 / (count - 1) as f64 })
+}
+
+// The time limit of a re-encoded single clip (see ClipFrames::time_limit). An
+// output option, so it goes after `-i`.
+fn reencode_clip_time_args(frames: &ClipFrames) -> Vec<String> {
+    vec!["-t".to_string(), format!("{:.6}", frames.time_limit())]
+}
+
+// The video filter of a re-encoded single clip: the frame cap, then the color
+// tags (setparams_filter). The cap sits in the filter rather than in
+// `-frames:v` because ffmpeg ends the whole file when `-frames:v` is reached,
+// cutting the sound at the start of the last frame (up to 59 ms short of the
+// picture, measured); a filter ends only the picture, and the time limit ends
+// the sound. The filter sees the frames from the seek point on, so the cap
+// counts from the clip's first frame.
+fn reencode_clip_video_filter(frames: &ClipFrames, color: &ColorMetadata) -> String {
+    format!("trim=end_frame={},{}", frames.count, setparams_filter(color))
+}
+
+// The frames a re-encoded clip of `input` keeps, counted on the source's own
+// frame listing exactly as smart cut counts them, so every export mode ends on
+// the same frame, and every real frame is kept on a variable-rate source too.
+// `params` is the source's stream probe (None if it could not be read). Falls
+// back to counting at the frame rate when the listing cannot be used.
+fn probe_clip_frames(
+    ffprobe: &Path,
+    input: &Path,
+    params: Option<&SourceVideoParams>,
+    ui_fps: Option<f64>,
+    start: f64,
+    duration: f64,
+) -> ClipFrames {
+    let fps = clip_fps(params, ui_fps);
+    let start_offset = params.map_or(0.0, |params| params.start_offset);
+    let packets = probe_clip_listing(ffprobe, input, start, start + duration, start_offset)
+        .map(|csv| parse_packet_list(&csv, start_offset))
+        .unwrap_or_default();
+    let tick = params.and_then(source_clock_tick);
+    listed_clip_frames(&packets, start, duration, fps, tick)
+        .unwrap_or_else(|| ClipFrames::at_rate(clip_frame_count_at_rate(start, duration, fps), fps))
+}
+
+// Every merged clip's frames, in merge order. One stream probe per distinct
+// source, one frame listing per clip.
+fn probe_merge_clip_frames(
+    ffprobe: &Path,
+    clips: &[ExportClip],
+    input_paths: &[PathBuf],
+    input_index_for_clip: &[usize],
+) -> Vec<ClipFrames> {
+    let params: Vec<Option<SourceVideoParams>> = input_paths
+        .iter()
+        .map(|path| probe_source_video_params(ffprobe, path).ok())
+        .collect();
+    clips
+        .iter()
+        .zip(input_index_for_clip)
+        .map(|(clip, &source)| {
+            let (start, duration) = padded_clip_range(clip);
+            probe_clip_frames(
+                ffprobe,
+                &input_paths[source],
+                params[source].as_ref(),
+                clip.fps,
+                start,
+                duration,
+            )
+        })
+        .collect()
 }
 
 // How far before a merged clip its coarse keyframe seek lands (2 to 3 s, see
@@ -2104,18 +2317,21 @@ struct MergeGraph {
 // frame-accurate part, from the same raw source times (padded_clip_range), and
 // decoding stays in software.
 //
-// Each clip's picture is pinned to a whole number of frames and its sound (or
-// the silence standing in for a source without sound) to exactly that length
-// (merge_clip_frames), so every clip hands over to the next with no gap in the
-// sound. `input_fps` is each source's probed frame rate; None falls back to the
-// rate the UI sent. All of this happens in the filter graph, before any
-// encoder, so every preset and the GPU and CPU paths get the same timing.
+// Each clip's picture is cut to exactly its frames (clip_frame_bounds, the same
+// frames smart cut keeps): from the trim start, `clip_frames` of them. Its
+// sound (or the silence standing in for a source without sound) is cut to
+// exactly that many frames' length, so every clip hands over to the next with
+// no gap in the sound: cut shorter, the join played the shortfall as silence
+// (13 to 40 ms per join). `clip_frames` comes from probe_merge_clip_frames; a
+// clip without an entry is counted at the rate the UI sent. All of this happens
+// in the filter graph, before any encoder, so every preset and the GPU and CPU
+// paths get the same frames.
 fn build_merge_graph(
     clips: &[ExportClip],
     input_paths: &[PathBuf],
     input_index_for_clip: &[usize],
     input_has_audio: &[bool],
-    input_fps: &[Option<f64>],
+    clip_frames: &[ClipFrames],
 ) -> MergeGraph {
     let any_has_audio = input_has_audio.iter().any(|&h| h);
     let runs = merge_input_runs(clips, input_index_for_clip);
@@ -2142,22 +2358,19 @@ fn build_merge_graph(
     let mut total_duration = 0.0_f64;
     for (i, clip) in clips.iter().enumerate() {
         let source_idx = input_index_for_clip[i];
-        let (_, duration) = padded_clip_range(clip);
-        let fps = input_fps
-            .get(source_idx)
-            .copied()
-            .flatten()
-            .or(clip.fps)
-            .filter(|f| f.is_finite() && *f > 0.0)
-            .unwrap_or(24.0);
-        // The trim filter reads the duration at millisecond precision, so the
-        // frame count is worked out from that same rounded value.
-        let trim_duration = format!("{duration:.3}");
-        let (frames, length) = merge_clip_frames(trim_duration.parse().unwrap_or(duration), fps);
+        let frames = clip_frames.get(i).copied().unwrap_or_else(|| {
+            let (start, duration) = padded_clip_range(clip);
+            let fps = clip_fps(None, clip.fps);
+            ClipFrames::at_rate(clip_frame_count_at_rate(start, duration, fps), fps)
+        });
+        let (count, length) = (frames.count, frames.length());
         total_duration += length;
         let (input_no, fine) = &clip_input[i];
+        // No time limit on the picture: a trim duration counts from the first
+        // frame kept, which sits up to a frame after the start, so it ran half
+        // a frame long and let the next scene's first frame in.
         filter_parts.push(format!(
-            "[{input_no}:v]trim=start={fine}:duration={trim_duration},setpts=PTS-STARTPTS,trim=end_frame={frames}[v{i}]"
+            "[{input_no}:v]trim=start={fine},setpts=PTS-STARTPTS,trim=end_frame={count}[v{i}]"
         ));
         if any_has_audio {
             if input_has_audio[source_idx] {
@@ -2228,32 +2441,33 @@ mod merge_graph_tests {
     fn every_clip_gets_its_own_seeked_input() {
         let clips = vec![clip("a.mkv", 300.0, 303.0), clip("a.mkv", 1.0, 4.0), clip("b.mkv", 5400.0, 5403.0)];
         let paths = vec![PathBuf::from("a.mkv"), PathBuf::from("b.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0, 1], &[true, false], &[None, None]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0, 1], &[true, false], &[]);
 
         assert_eq!(
             graph.input_args,
             ["-ss", "298", "-i", "a.mkv", "-i", "a.mkv", "-ss", "5398", "-i", "b.mkv"]
         );
-        let (start0, duration0) = padded_clip_range(&clips[0]);
+        let (start0, _) = padded_clip_range(&clips[0]);
         let (_, fine0) = merge_clip_seek(start0);
-        // 2.922 s at the 24 fps the UI sent is 70.1 frames: the picture keeps 71.
-        assert_eq!(format!("{duration0:.3}"), "2.922");
+        // Scene 300-303 s at the 24 fps the UI sent: frames 7202 (300.083 s,
+        // after the 1.5-frame start offset) to 7271. Frame 7272 sits exactly
+        // on 303 s and opens the next scene, so it stays out: 70 frames.
         assert_eq!(
             graph.filter_parts[0],
-            format!("[0:v]trim=start={fine0}:duration=2.922,setpts=PTS-STARTPTS,trim=end_frame=71[v0]")
+            format!("[0:v]trim=start={fine0},setpts=PTS-STARTPTS,trim=end_frame=70[v0]")
         );
-        // ...and the sound runs exactly as long as those 71 frames.
+        // ...and the sound runs exactly as long as those 70 frames.
         assert_eq!(
             graph.filter_parts[1],
-            format!("[0:a]atrim=start={fine0}:duration=2.958333,asetpts=PTS-STARTPTS[a0]")
+            format!("[0:a]atrim=start={fine0}:duration=2.916667,asetpts=PTS-STARTPTS[a0]")
         );
         assert!(graph.filter_parts[1].starts_with(&format!("[0:a]atrim=start={fine0}:")));
         // The unseeked clip trims at exactly the old absolute start.
         let (start1, _) = padded_clip_range(&clips[1]);
-        assert!(graph.filter_parts[2].starts_with(&format!("[1:v]trim=start={start1:.3}:")));
+        assert!(graph.filter_parts[2].starts_with(&format!("[1:v]trim=start={start1:.3},")));
         // A source without audio is padded with silence, as long as its picture.
         assert!(graph.filter_parts[5].starts_with("anullsrc="));
-        assert!(graph.filter_parts[5].contains("atrim=duration=2.958333,"));
+        assert!(graph.filter_parts[5].contains("atrim=duration=2.916667,"));
         assert!(graph.filter_parts[5].ends_with("[a2]"));
         assert_eq!(graph.concat_inputs, "[v0][a0][v1][a1][v2][a2]");
         assert!(graph.any_has_audio);
@@ -2268,7 +2482,7 @@ mod merge_graph_tests {
         // Scenes 100-103 s and 104-107 s: about a second apart in the same file.
         let clips = vec![clip("a.mkv", 100.0, 103.0), clip("a.mkv", 104.0, 107.0)];
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[true], &[None]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[true], &[]);
 
         assert_eq!(graph.input_args, ["-ss", "98", "-i", "a.mkv"]);
         // Both trims sit on input 0, each at its exact offset from the 98 s
@@ -2280,9 +2494,9 @@ mod merge_graph_tests {
         };
         let (fine0, fine1) = (offset_from_seek(&clips[0]), offset_from_seek(&clips[1]));
         assert!(fine0.starts_with("2.06") && fine1.starts_with("6.06"), "{fine0} {fine1}");
-        assert!(graph.filter_parts[0].starts_with(&format!("[0:v]trim=start={fine0}:")));
+        assert!(graph.filter_parts[0].starts_with(&format!("[0:v]trim=start={fine0},")));
         assert!(graph.filter_parts[1].starts_with(&format!("[0:a]atrim=start={fine0}:")));
-        assert!(graph.filter_parts[2].starts_with(&format!("[0:v]trim=start={fine1}:")));
+        assert!(graph.filter_parts[2].starts_with(&format!("[0:v]trim=start={fine1},")));
         assert!(graph.filter_parts[3].starts_with(&format!("[0:a]atrim=start={fine1}:")));
         assert_eq!(graph.concat_inputs, "[v0][a0][v1][a1]");
     }
@@ -2295,7 +2509,7 @@ mod merge_graph_tests {
             clip("a.mkv", 300.0, 303.0),
         ];
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0, 0], &[false], &[None]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0, 0], &[false], &[]);
         assert_eq!(
             graph.input_args,
             ["-ss", "98", "-i", "a.mkv", "-ss", "598", "-i", "a.mkv", "-ss", "298", "-i", "a.mkv"]
@@ -2315,7 +2529,7 @@ mod merge_graph_tests {
         starts[21] = starts[20] + 12.0;
         let clips: Vec<ExportClip> = starts.iter().map(|&s| clip("a.mkv", s, s + 3.0)).collect();
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false], &[None]);
+        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false], &[]);
 
         assert_eq!(input_count(&graph), super::MERGE_MAX_INPUTS);
         // Every clip still has its own trim, in merge order.
@@ -2335,21 +2549,25 @@ mod merge_graph_tests {
             .map(|k| clip("a.mkv", 100.0 + 60.0 * k as f64, 103.0 + 60.0 * k as f64))
             .collect();
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false], &[None]);
+        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false], &[]);
         assert_eq!(input_count(&graph), count);
     }
 
     // DEVTOOL, skipped by default: prints the merge inputs and filter chains
     // the app builds for a clip list, so a scratch benchmark can run the exact
     // command against a real source. MERGE_GRAPH_CLIPS holds JSON
-    // [{"source","start","end","fps","hasAudio","sourceFps"}]; "hasAudio"
-    // (default true) and "sourceFps" (the probed rate, default none) stand in
-    // for what the app probes per source.
+    // [{"source","start","end","fps","hasAudio","sourceFps"}]. With
+    // MERGE_GRAPH_FFPROBE set to an ffprobe path, every source is probed exactly
+    // as the app probes it (sound, frame rate, each clip's frame listing).
+    // Without it, "hasAudio" (default true) and "sourceFps" (default: the UI
+    // rate) stand in, and each clip is counted at that rate.
     //   cargo test merge_graph_devtool -- --ignored --nocapture
     #[test]
     #[ignore]
     fn merge_graph_devtool() {
+        use super::{clip_frame_count_at_rate, probe_merge_clip_frames, ClipFrames};
         let Ok(spec) = std::env::var("MERGE_GRAPH_CLIPS") else { return };
+        let ffprobe = std::env::var("MERGE_GRAPH_FFPROBE").ok().map(PathBuf::from);
         let raw: Vec<serde_json::Value> = serde_json::from_str(&spec).unwrap();
         let clips: Vec<ExportClip> = raw
             .iter()
@@ -2362,19 +2580,32 @@ mod merge_graph_tests {
             .collect();
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut has_audio: Vec<bool> = Vec::new();
-        let mut fps: Vec<Option<f64>> = Vec::new();
         let mut index_for_clip: Vec<usize> = Vec::new();
         for c in &raw {
             let path = PathBuf::from(c["source"].as_str().unwrap());
             let index = paths.iter().position(|p| *p == path).unwrap_or_else(|| {
+                has_audio.push(match &ffprobe {
+                    Some(ffprobe) => crate::probe_has_audio_stream(ffprobe, &path).unwrap_or(false),
+                    None => c["hasAudio"].as_bool().unwrap_or(true),
+                });
                 paths.push(path);
-                has_audio.push(c["hasAudio"].as_bool().unwrap_or(true));
-                fps.push(c["sourceFps"].as_f64());
                 paths.len() - 1
             });
             index_for_clip.push(index);
         }
-        let graph = build_merge_graph(&clips, &paths, &index_for_clip, &has_audio, &fps);
+        let clip_frames: Vec<ClipFrames> = match &ffprobe {
+            Some(ffprobe) => probe_merge_clip_frames(ffprobe, &clips, &paths, &index_for_clip),
+            None => clips
+                .iter()
+                .zip(&raw)
+                .map(|(clip, c)| {
+                    let fps = c["sourceFps"].as_f64().or(clip.fps).unwrap_or(24.0);
+                    let (start, duration) = padded_clip_range(clip);
+                    ClipFrames::at_rate(clip_frame_count_at_rate(start, duration, fps), fps)
+                })
+                .collect(),
+        };
+        let graph = build_merge_graph(&clips, &paths, &index_for_clip, &has_audio, &clip_frames);
         println!(
             "MERGE_GRAPH {}",
             serde_json::json!({
@@ -2390,61 +2621,251 @@ mod merge_graph_tests {
     fn a_silent_merge_concats_video_only() {
         let clips = vec![clip("a.mkv", 10.0, 12.0), clip("a.mkv", 20.0, 22.0)];
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[false], &[None]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[false], &[]);
         assert_eq!(graph.filter_parts.len(), 2);
         assert_eq!(graph.concat_inputs, "[v0][v1]");
         assert!(!graph.any_has_audio);
     }
 
     #[test]
-    fn a_clips_picture_and_sound_both_last_whole_frames() {
-        use super::merge_clip_frames;
+    fn each_clip_keeps_its_counted_frames_and_sound_of_the_same_length() {
+        use super::ClipFrames;
+        let clips = vec![
+            ExportClip { source: "a.mkv".into(), start: 10.0, end: 12.5004, fps: Some(23.976) },
+            ExportClip { source: "a.mkv".into(), start: 40.0, end: 42.0, fps: Some(23.976) },
+        ];
+        let paths = vec![PathBuf::from("a.mkv")];
         let ntsc = 24000.0 / 1001.0;
-        // 2.27 s at 23.976 fps is 54.4 frames: the picture keeps 55 frames, and
-        // the sound is cut to the same 2.2939 s instead of stopping at 2.27 s.
-        let (frames, length) = merge_clip_frames(2.27, ntsc);
-        assert_eq!(frames, 55);
-        assert!((length - 55.0 * 1001.0 / 24000.0).abs() < 1e-9);
-        // A duration that is already whole frames does not gain one.
-        assert_eq!(merge_clip_frames(2.0, 24.0).0, 48);
-        assert_eq!(merge_clip_frames(2.002, ntsc).0, 48);
-        assert_eq!(merge_clip_frames(4.0, 25.0).0, 100);
-        // Anything past a frame boundary starts the next frame.
-        assert_eq!(merge_clip_frames(2.001, 24.0).0, 49);
+        // The counts the frame listing gave, at the source's real 23.976 fps.
+        let frames = [ClipFrames::at_rate(58, ntsc), ClipFrames::at_rate(46, ntsc)];
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[true], &frames);
+        // No time limit on the picture, just the frame cap.
+        assert!(graph.filter_parts[0].ends_with(",setpts=PTS-STARTPTS,trim=end_frame=58[v0]"), "{}", graph.filter_parts[0]);
+        assert!(!graph.filter_parts[0].contains("duration"), "{}", graph.filter_parts[0]);
+        // 58 frames at 23.976 fps last 2.419083 s; the sound is cut to that.
+        assert!(graph.filter_parts[1].contains(":duration=2.419083,"), "{}", graph.filter_parts[1]);
+        assert!(graph.filter_parts[2].ends_with(",trim=end_frame=46[v1]"), "{}", graph.filter_parts[2]);
+        assert!(graph.filter_parts[3].contains(":duration=1.918583,"), "{}", graph.filter_parts[3]);
+        assert!((graph.total_duration - 104.0 / ntsc).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod clip_frame_tests {
+    use super::{
+        clip_fps, clip_frame_bounds, clip_frame_count, clip_frame_count_at_rate,
+        listed_clip_frame_count, listed_clip_frames, padded_clip_range, reencode_clip_time_args,
+        reencode_clip_video_filter, seek_on_source_clock, source_clock_tick, source_frame_rate,
+        ClipFrames, ColorMetadata, ExportClip, SourceVideoParams,
+    };
+
+    const NTSC: f64 = 24000.0 / 1001.0;
+
+    // Display times of frames `from..to` on a constant-rate grid, as a listing.
+    fn grid(from: usize, to: usize, fps: f64) -> Vec<(f64, bool)> {
+        (from..to).map(|k| (k as f64 / fps, k % 96 == 0)).collect()
+    }
+
+    // A scene the way clip_cli.py reports it: boundary frames turned into
+    // seconds and rounded to the millisecond.
+    fn scene(first: usize, next: usize, fps: f64, ui_fps: f64) -> ExportClip {
+        let at = |frame: usize| (frame as f64 / fps * 1000.0).round() / 1000.0;
+        ExportClip { source: "a.mkv".into(), start: at(first), end: at(next), fps: Some(ui_fps) }
+    }
+
+    #[test]
+    fn a_detected_scene_ends_before_the_frame_that_opens_the_next_one() {
+        // Scene boundaries at frames 1000 and 1100 of a 23.976 fps source, with
+        // the UI's rounded 23.976. The 1.5-frame start offset puts the first
+        // frame kept at 1002; the last frame kept is 1099, never 1100.
+        let clip = scene(1000, 1100, NTSC, 23.976);
+        let (start, duration) = padded_clip_range(&clip);
+        let packets = grid(990, 1200, NTSC);
+        let kept: Vec<usize> = (990..1200)
+            .filter(|k| {
+                let (from, to) = clip_frame_bounds(start, duration);
+                let t = *k as f64 / NTSC;
+                t >= from && t < to
+            })
+            .collect();
+        assert_eq!(kept.first(), Some(&1002));
+        assert_eq!(kept.last(), Some(&1099));
+        assert_eq!(clip_frame_count(&packets, start, duration), 98);
+        // Counting at the frame rate alone agrees with the listing.
+        assert_eq!(clip_frame_count_at_rate(start, duration, NTSC), 98);
+    }
+
+    #[test]
+    fn the_count_at_the_frame_rate_matches_a_listing_at_every_rate() {
+        for fps in [NTSC, 24.0, 25.0, 30000.0 / 1001.0, 30.0, 60.0] {
+            let packets = grid(0, 4000, fps);
+            for step in 0..400 {
+                // Awkward starts and lengths, sub-millisecond digits included.
+                let start = 0.137 + step as f64 * 0.1173;
+                let duration = 0.3 + (step % 37) as f64 * 0.0917;
+                // A bound sitting exactly on a frame is decided by
+                // floating-point noise in the listing; frames_exactly_on_a_bound
+                // covers that case on exact values.
+                let (from, to) = clip_frame_bounds(start, duration);
+                let on_frame = |t: f64| ((t * fps) - (t * fps).round()).abs() < 1e-4;
+                if on_frame(from) || on_frame(to) {
+                    continue;
+                }
+                assert_eq!(
+                    clip_frame_count_at_rate(start, duration, fps),
+                    clip_frame_count(&packets, start, duration),
+                    "fps {fps} start {start} duration {duration}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frames_exactly_on_a_bound_follow_the_rule() {
+        // A frame starting exactly at the (millisecond) start is kept; one
+        // starting exactly at the end is not.
+        assert_eq!(clip_frame_count_at_rate(1.0, 1.0, 25.0), 25);
+        assert_eq!(clip_frame_count(&grid(0, 100, 25.0), 1.0, 1.0), 25);
         // A degenerate clip still keeps one frame.
-        assert_eq!(merge_clip_frames(0.0, 30.0).0, 1);
+        assert_eq!(clip_frame_count_at_rate(1.0, 0.0, 25.0), 1);
+    }
+
+    #[test]
+    fn a_listing_that_misses_the_start_is_not_trusted() {
+        let packets = grid(30, 200, 24.0);
+        // Starts at frame 31.5 or so: the listing reaches back to frame 30.
+        assert_eq!(listed_clip_frame_count(&packets, 1.3125, 2.0), Some(48));
+        // Starts before the listing's first frame: no count.
+        assert_eq!(listed_clip_frame_count(&packets, 1.0, 2.0), None);
+        // Nothing listed at all.
+        assert_eq!(listed_clip_frame_count(&[], 1.3125, 2.0), None);
+    }
+
+    #[test]
+    fn a_clip_is_timed_by_its_own_frames() {
+        // Constant rate: exactly count / fps.
+        let frames = listed_clip_frames(&grid(0, 400, NTSC), 4.0, 2.0, NTSC, None).unwrap();
+        assert_eq!(frames.count, 48);
+        assert!((frames.length - 48.0 / NTSC).abs() < 1e-9, "{}", frames.length);
+
+        // Variable rate: 20 s at 30 fps, then 60 fps. The file averages 45 fps,
+        // but a clip from the fast stretch keeps every one of its 180 frames
+        // and is timed at 60 fps (3 s), not at 45 (4 s).
+        let mut packets: Vec<(f64, bool)> = (0..600).map(|k| (k as f64 / 30.0, false)).collect();
+        packets.extend((0..1200).map(|k| (20.0 + k as f64 / 60.0, false)));
+        let frames = listed_clip_frames(&packets, 25.0, 3.0, 45.0, None).unwrap();
+        assert_eq!(frames.count, 180);
+        assert!((frames.length - 3.0).abs() < 1e-9, "{}", frames.length);
+        // ...and the slow stretch is timed at 30 fps.
+        let frames = listed_clip_frames(&packets, 5.0, 3.0, 45.0, None).unwrap();
+        assert_eq!(frames.count, 90);
+        assert!((frames.length - 3.0).abs() < 1e-9, "{}", frames.length);
+
+        // A single frame is timed at the rate given.
+        let frames = listed_clip_frames(&grid(0, 100, 25.0), 1.0, 0.03, 25.0, None).unwrap();
+        assert_eq!(frames, ClipFrames { count: 1, length: 0.04 });
+        // An untrusted listing gives nothing, so the caller counts at the rate.
+        assert_eq!(listed_clip_frames(&[], 1.0, 2.0, 25.0, None), None);
+    }
+
+    #[test]
+    fn the_count_starts_where_ffmpeg_seeks_on_a_coarse_clock() {
+        // A 60 fps stretch on a 1/600 s clock (as ffprobe prints it): frame
+        // 667 at 21.116667 s, 668 at 21.133333 s. A start of 21.117 s rounds
+        // to the clock step at 21.116667, so ffmpeg keeps 667: the count
+        // starts there too, and the clip still ends before 21.142 s.
+        let packets: Vec<(f64, bool)> = (660..700)
+            .map(|k| (((20.0 + (k - 600) as f64 / 60.0) * 1e6).round() / 1e6, false))
+            .collect();
+        let tick = Some(1.0 / 600.0);
+        assert_eq!(listed_clip_frames(&packets, 21.117, 0.025, 60.0, tick).unwrap().count, 2);
+        // Without the clock, the count would start at 668.
+        assert_eq!(listed_clip_frames(&packets, 21.117, 0.025, 60.0, None).unwrap().count, 1);
+        // On a millisecond clock nothing moves.
+        assert!((seek_on_source_clock(21.117, Some(0.001)) - 21.117).abs() < 2e-6);
+        let params = |time_base: &str| SourceVideoParams { time_base: time_base.to_string(), ..SourceVideoParams::default() };
+        assert_eq!(source_clock_tick(&params("1/600")), Some(1.0 / 600.0));
+        assert_eq!(source_clock_tick(&params("1001/24000")), Some(1001.0 / 24000.0));
+        assert_eq!(source_clock_tick(&params("")), None);
+        assert_eq!(source_clock_tick(&params("0/0")), None);
     }
 
     #[test]
     fn the_sources_own_frame_rate_wins_over_the_ui_value() {
-        let clips = vec![ExportClip { source: "a.mkv".into(), start: 10.0, end: 12.5004, fps: Some(24.0) }];
-        let paths = vec![PathBuf::from("a.mkv")];
-        let ntsc = 24000.0 / 1001.0;
-        let graph = build_merge_graph(&clips, &paths, &[0], &[true], &[Some(ntsc)]);
-        // 2.423 s at the source's real 23.976 fps is 58.09 frames -> 59, which is
-        // 2.460792 s of picture and sound. The UI's rounded 24 would say 59 too
-        // but 2.458333 s, ending the sound 2.5 ms before the picture.
-        assert!(graph.filter_parts[0].contains(":duration=2.423,"), "{}", graph.filter_parts[0]);
-        assert!(graph.filter_parts[0].ends_with(",trim=end_frame=59[v0]"), "{}", graph.filter_parts[0]);
-        assert!(graph.filter_parts[1].contains(":duration=2.460792,"), "{}", graph.filter_parts[1]);
-        assert!((graph.total_duration - 59.0 / ntsc).abs() < 1e-9);
-    }
-
-    #[test]
-    fn the_merge_frame_rate_prefers_the_exact_nominal_rate() {
-        use super::{merge_source_fps, SourceVideoParams};
         let params = |avg: &str, r: &str| SourceVideoParams {
             avg_frame_rate: avg.to_string(),
             r_frame_rate: r.to_string(),
             ..SourceVideoParams::default()
         };
-        let ntsc = 24000.0 / 1001.0;
-        assert_eq!(merge_source_fps(&params("23.976024", "24000/1001")), Some(ntsc));
+        assert_eq!(source_frame_rate(&params("23.976024", "24000/1001")), Some(NTSC));
         // Variable-rate: nominal and average disagree, the average is used.
-        assert_eq!(merge_source_fps(&params("30000/1001", "60/1")), Some(30000.0 / 1001.0));
-        assert_eq!(merge_source_fps(&params("0/0", "25/1")), Some(25.0));
-        assert_eq!(merge_source_fps(&params("25/1", "0/0")), Some(25.0));
-        assert_eq!(merge_source_fps(&params("0/0", "0/0")), None);
+        assert_eq!(source_frame_rate(&params("30000/1001", "60/1")), Some(30000.0 / 1001.0));
+        assert_eq!(source_frame_rate(&params("0/0", "25/1")), Some(25.0));
+        assert_eq!(source_frame_rate(&params("25/1", "0/0")), Some(25.0));
+        assert_eq!(source_frame_rate(&params("0/0", "0/0")), None);
+
+        let ntsc = params("24000/1001", "24000/1001");
+        assert_eq!(clip_fps(Some(&ntsc), Some(24.0)), NTSC);
+        assert_eq!(clip_fps(Some(&params("0/0", "0/0")), Some(23.976)), 23.976);
+        assert_eq!(clip_fps(None, None), 24.0);
+        assert_eq!(clip_fps(None, Some(f64::NAN)), 24.0);
+    }
+
+    #[test]
+    fn a_reencode_stops_on_the_frame_count_with_the_sound_half_a_frame_on() {
+        let frames = ClipFrames::at_rate(57, NTSC);
+        // The cap sits in the video filter, ahead of the color tags...
+        let filter = reencode_clip_video_filter(&frames, &ColorMetadata::default());
+        assert!(filter.starts_with("trim=end_frame=57,setparams="), "{filter}");
+        // ...and the time limit, 57.5 frames at 23.976 fps, ends the sound.
+        assert_eq!(reencode_clip_time_args(&frames), ["-t", "2.398229"]);
+        assert!((frames.length() - 57.0 / NTSC).abs() < 1e-12);
+        // The limit clears the last frame even when ffmpeg starts the picture
+        // one frame in: that frame then starts 57 frames in, the limit is 57.5.
+        assert!(frames.time_limit() > 57.0 / NTSC);
+    }
+
+    // DEVTOOL, skipped by default: prints, per clip, the time limit and video
+    // filter (frame cap + color tags) a re-encoded single export uses, probed
+    // exactly as the app probes, so a scratch benchmark can run the real
+    // command. CLIP_LIMIT_CLIPS holds JSON [{"key","source","start","end","fps"}];
+    // CLIP_LIMIT_FFPROBE is the ffprobe path. Color tags are the untagged
+    // default.
+    //   cargo test clip_limit_devtool -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn clip_limit_devtool() {
+        use super::{probe_clip_frames, probe_source_video_params};
+        use std::path::PathBuf;
+        let (Ok(spec), Ok(ffprobe)) = (std::env::var("CLIP_LIMIT_CLIPS"), std::env::var("CLIP_LIMIT_FFPROBE")) else {
+            return;
+        };
+        let ffprobe = PathBuf::from(ffprobe);
+        let raw: Vec<serde_json::Value> = serde_json::from_str(&spec).unwrap();
+        let mut out = serde_json::Map::new();
+        for c in &raw {
+            let clip = ExportClip {
+                source: c["source"].as_str().unwrap().to_string(),
+                start: c["start"].as_f64().unwrap(),
+                end: c["end"].as_f64().unwrap(),
+                fps: c["fps"].as_f64(),
+            };
+            let input = PathBuf::from(&clip.source);
+            let (start, duration) = padded_clip_range(&clip);
+            let params = probe_source_video_params(&ffprobe, &input).ok();
+            let frames = probe_clip_frames(&ffprobe, &input, params.as_ref(), clip.fps, start, duration);
+            out.insert(
+                c["key"].as_str().unwrap().to_string(),
+                serde_json::json!({
+                    "output": reencode_clip_time_args(&frames),
+                    // ProRes: the same time limit, before -i.
+                    "input": ["-t", format!("{:.6}", frames.time_limit())],
+                    "videoFilter": reencode_clip_video_filter(&frames, &ColorMetadata::default()),
+                    "frames": frames.count,
+                }),
+            );
+        }
+        println!("CLIP_LIMITS {}", serde_json::Value::Object(out));
     }
 }
 
@@ -2598,14 +3019,28 @@ fn run_clip_export(
 
         let (export_start, export_duration) = padded_clip_range(clip);
 
-        let input_args = vec![
+        // Re-encodes stop on the clip's frame count (clip_frame_bounds), so they
+        // end on the same last frame as smart cut. Lossless cut snaps to
+        // keyframes anyway and keeps its time limit.
+        let frames = (preset != "lossless-cut").then(|| {
+            let params = probe_source_video_params(&ffprobe, &input).ok();
+            probe_clip_frames(&ffprobe, &input, params.as_ref(), clip.fps, export_start, export_duration)
+        });
+
+        let mut input_args = vec![
             "-ss".to_string(),
             format!("{export_start:.3}"),
             "-i".to_string(),
             input.to_string_lossy().to_string(),
-            "-t".to_string(),
-            format!("{export_duration:.3}"),
         ];
+        match &frames {
+            Some(frames) => input_args.extend(reencode_clip_time_args(frames)),
+            None => input_args.extend(["-t".to_string(), format!("{export_duration:.3}")]),
+        }
+        // The frame cap rides in the video filter (reencode_clip_video_filter).
+        let video_filter = frames
+            .as_ref()
+            .map_or_else(|| setparams_filter(&color), |frames| reencode_clip_video_filter(frames, &color));
 
         let message = match preset.as_str() {
             "gpu-intra" => {
@@ -2623,11 +3058,15 @@ fn run_clip_export(
             }
             "prores-lt" | "prores-hq" => {
                 let profile = if preset == "prores-lt" { "1" } else { "3" };
+                // The time limit stays on the input side, as before.
+                let limit = frames
+                    .as_ref()
+                    .map_or(export_duration, |frames| frames.time_limit());
                 args.extend([
                     "-ss".to_string(),
                     format!("{export_start:.3}"),
                     "-t".to_string(),
-                    format!("{export_duration:.3}"),
+                    format!("{limit:.6}"),
                     "-i".to_string(),
                     input.to_string_lossy().to_string(),
                     "-c:v".to_string(),
@@ -2752,10 +3191,10 @@ fn run_clip_export(
         // alone leave those "unknown"); color_tag_args stamps the muxer.
         // Skipped for lossless-cut, where -c copy preserves the original tags
         // verbatim. None of the re-encode single presets use -vf elsewhere, so
-        // a single -vf setparams is safe to append here.
+        // a single -vf (frame cap + setparams) is safe to append here.
         if preset != "lossless-cut" {
             args.push("-vf".to_string());
-            args.push(setparams_filter(&color));
+            args.push(video_filter.clone());
             args.extend(color_tag_args(&color));
         }
 
@@ -2772,7 +3211,7 @@ fn run_clip_export(
             output.to_string_lossy().to_string(),
         ]);
 
-        let duration = export_duration;
+        let duration = frames.as_ref().map_or(export_duration, ClipFrames::length);
         emit_conversion_progress(&window, "starting", Some(0.0), message, None, None);
         let primary_result = run_clip_ffmpeg(
             &window,
@@ -2807,7 +3246,7 @@ fn run_clip_export(
                 fallback_args.extend(input_args.iter().cloned());
                 fallback_args.extend([
                     "-vf".to_string(),
-                    setparams_filter(&color),
+                    video_filter.clone(),
                 ]);
                 fallback_args.extend(gpu_cpu_fallback_video_args(
                     &preset,
@@ -2995,14 +3434,14 @@ fn run_clip_export_merged(
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
     ];
-    let input_fps = probe_merge_input_fps(&ffprobe, &input_paths);
+    let clip_frames = probe_merge_clip_frames(&ffprobe, &clips, &input_paths, &input_index_for_clip);
     let MergeGraph {
         input_args,
         mut filter_parts,
         concat_inputs,
         total_duration,
         ..
-    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio, &input_fps);
+    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio, &clip_frames);
     args.extend(input_args);
     let n = clips.len();
     // filter_complex (trim/concat) strips stream-level color metadata, so we
@@ -3768,10 +4207,6 @@ mod copy_cut_audio_tests {
 // bigger window just means a few more packets are read and thrown away.
 const SMART_CUT_AUDIO_BACKOFF: f64 = 15.0;
 
-// How far past the requested end the frame listing reads, so the body plan can
-// see where the frame reordering around the end settles.
-const SMART_CUT_LISTING_LOOKAHEAD: f64 = 2.0;
-
 // One smart cut. The video is built from up to three pieces joined with the
 // concat demuxer under -c copy:
 // - the head (requested start -> first keyframe at or after it), re-encoded so
@@ -3854,15 +4289,7 @@ fn run_smart_cut_clip(
     // at the last keyframe at or before the start, so it holds every frame the
     // clip needs; if it does not reach back to the first one (an index that
     // lies), nothing is spliced.
-    let listing = probe_packet_listing(
-        ffprobe,
-        input,
-        Some(format!(
-            "{:.3}%{:.3}",
-            start + params.start_offset,
-            end + SMART_CUT_LISTING_LOOKAHEAD + params.start_offset
-        )),
-    );
+    let listing = probe_clip_listing(ffprobe, input, start, end, params.start_offset);
     let packets = listing
         .as_deref()
         .map(|csv| parse_packet_list(csv, params.start_offset))
@@ -4086,8 +4513,7 @@ fn run_smart_cut_clip(
             None,
             None,
         );
-        let frames = Some(frames_between(&packets, seek_start, end))
-            .filter(|count| listing_covers_start && *count > 0);
+        let frames = listed_clip_frame_count(&packets, start, duration);
         run_clip_ffmpeg(
             window,
             ffmpeg,
@@ -6163,8 +6589,10 @@ fn run_clip_preview_merge(
         hash_input.push_str(&format!(":{:.3}:{:.3}", clip.start, clip.end));
     }
     // v2: previews cached before the sound was pinned to each clip's picture
-    // have a short silence at every join, so they are not reused.
-    let range_key = short_stable_id(&[&hash_input, "preview-merge-v2"]);
+    // have a short silence at every join, so they are not reused. v3: previews
+    // cached before each clip stopped on its counted last frame often show the
+    // next scene's first frame at every join.
+    let range_key = short_stable_id(&[&hash_input, "preview-merge-v3"]);
     
     // Save under scene_clips so it uses same permissions/location as other preview clips
     let cache_dir = app_data_dir.join("scene_clips").join("merged");
@@ -6214,14 +6642,14 @@ fn run_clip_preview_merge(
     ];
     // Same per-clip dual-seek inputs as the merged export, so this background
     // render no longer decodes the source from the start either.
-    let input_fps = probe_merge_input_fps(&ffprobe, &input_paths);
+    let clip_frames = probe_merge_clip_frames(&ffprobe, &clips, &input_paths, &input_index_for_clip);
     let MergeGraph {
         input_args,
         mut filter_parts,
         concat_inputs,
         total_duration,
         any_has_audio,
-    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio, &input_fps);
+    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio, &clip_frames);
     args.extend(input_args);
     let n = clips.len();
     if any_has_audio {
