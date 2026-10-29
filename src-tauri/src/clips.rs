@@ -1613,6 +1613,47 @@ fn padded_clip_range(clip: &ExportClip) -> (f64, f64) {
     (start, duration)
 }
 
+// The frame rate a merged clip's picture really runs at, used to end its sound
+// exactly where its last frame ends. The source's own rate wins over the one the
+// UI sent, which can be rounded (24 for a 23.976 source). The nominal rate is
+// exact on a constant-rate source; when it and the average disagree by more than
+// 1% the source is variable-rate and the average is the better guess.
+fn merge_source_fps(params: &SourceVideoParams) -> Option<f64> {
+    let nominal = parse_fps_rational(&params.r_frame_rate);
+    let average = parse_fps_rational(&params.avg_frame_rate);
+    match (nominal, average) {
+        (Some(n), Some(a)) if (n - a).abs() / n.max(a) > 0.01 => Some(a),
+        (Some(n), _) => Some(n),
+        (None, a) => a,
+    }
+}
+
+// Each merge source's frame rate, in input order. One cheap stream probe per
+// distinct source; a source that cannot be read falls back to the UI's rate.
+fn probe_merge_input_fps(ffprobe: &Path, input_paths: &[PathBuf]) -> Vec<Option<f64>> {
+    input_paths
+        .iter()
+        .map(|path| {
+            probe_source_video_params(ffprobe, path)
+                .ok()
+                .and_then(|params| merge_source_fps(&params))
+        })
+        .collect()
+}
+
+// How long a merged clip's picture runs, as (whole frames, seconds). The trim
+// filter keeps every frame that starts less than `duration` after the first one
+// it keeps, so the picture lasts a whole number of frames and usually runs past
+// `duration` by part of a frame. Its sound is trimmed to this same length:
+// trimmed to `duration` instead, the sound ran out early and the join to the
+// next clip played that shortfall as silence (13 to 40 ms per join). The tiny
+// allowance stops a duration that is already a whole number of frames (2.000 s
+// at 24 fps) from gaining a frame through floating-point error.
+fn merge_clip_frames(duration: f64, fps: f64) -> (u64, f64) {
+    let frames = (duration * fps - 1e-6).ceil().max(1.0) as u64;
+    (frames, frames as f64 / fps)
+}
+
 // How far before a merged clip its coarse keyframe seek lands (2 to 3 s, see
 // merge_clip_seek). Long enough that the decoder has settled (open-GOP leading
 // frames, AAC overlap after a seek) well before the first kept frame.
@@ -1744,11 +1785,19 @@ struct MergeGraph {
 // frozen the whole time. The trim filter still does the precise,
 // frame-accurate part, from the same raw source times (padded_clip_range), and
 // decoding stays in software.
+//
+// Each clip's picture is pinned to a whole number of frames and its sound (or
+// the silence standing in for a source without sound) to exactly that length
+// (merge_clip_frames), so every clip hands over to the next with no gap in the
+// sound. `input_fps` is each source's probed frame rate; None falls back to the
+// rate the UI sent. All of this happens in the filter graph, before any
+// encoder, so every preset and the GPU and CPU paths get the same timing.
 fn build_merge_graph(
     clips: &[ExportClip],
     input_paths: &[PathBuf],
     input_index_for_clip: &[usize],
     input_has_audio: &[bool],
+    input_fps: &[Option<f64>],
 ) -> MergeGraph {
     let any_has_audio = input_has_audio.iter().any(|&h| h);
     let runs = merge_input_runs(clips, input_index_for_clip);
@@ -1776,19 +1825,30 @@ fn build_merge_graph(
     for (i, clip) in clips.iter().enumerate() {
         let source_idx = input_index_for_clip[i];
         let (_, duration) = padded_clip_range(clip);
-        total_duration += duration;
+        let fps = input_fps
+            .get(source_idx)
+            .copied()
+            .flatten()
+            .or(clip.fps)
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .unwrap_or(24.0);
+        // The trim filter reads the duration at millisecond precision, so the
+        // frame count is worked out from that same rounded value.
+        let trim_duration = format!("{duration:.3}");
+        let (frames, length) = merge_clip_frames(trim_duration.parse().unwrap_or(duration), fps);
+        total_duration += length;
         let (input_no, fine) = &clip_input[i];
         filter_parts.push(format!(
-            "[{input_no}:v]trim=start={fine}:duration={duration:.3},setpts=PTS-STARTPTS[v{i}]"
+            "[{input_no}:v]trim=start={fine}:duration={trim_duration},setpts=PTS-STARTPTS,trim=end_frame={frames}[v{i}]"
         ));
         if any_has_audio {
             if input_has_audio[source_idx] {
                 filter_parts.push(format!(
-                    "[{input_no}:a]atrim=start={fine}:duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
+                    "[{input_no}:a]atrim=start={fine}:duration={length:.6},asetpts=PTS-STARTPTS[a{i}]"
                 ));
             } else {
                 filter_parts.push(format!(
-                    "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={duration:.3},asetpts=PTS-STARTPTS[a{i}]"
+                    "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={length:.6},asetpts=PTS-STARTPTS[a{i}]"
                 ));
             }
             concat_inputs.push_str(&format!("[v{i}][a{i}]"));
@@ -1850,7 +1910,7 @@ mod merge_graph_tests {
     fn every_clip_gets_its_own_seeked_input() {
         let clips = vec![clip("a.mkv", 300.0, 303.0), clip("a.mkv", 1.0, 4.0), clip("b.mkv", 5400.0, 5403.0)];
         let paths = vec![PathBuf::from("a.mkv"), PathBuf::from("b.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0, 1], &[true, false]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0, 1], &[true, false], &[None, None]);
 
         assert_eq!(
             graph.input_args,
@@ -1858,16 +1918,24 @@ mod merge_graph_tests {
         );
         let (start0, duration0) = padded_clip_range(&clips[0]);
         let (_, fine0) = merge_clip_seek(start0);
+        // 2.922 s at the 24 fps the UI sent is 70.1 frames: the picture keeps 71.
+        assert_eq!(format!("{duration0:.3}"), "2.922");
         assert_eq!(
             graph.filter_parts[0],
-            format!("[0:v]trim=start={fine0}:duration={duration0:.3},setpts=PTS-STARTPTS[v0]")
+            format!("[0:v]trim=start={fine0}:duration=2.922,setpts=PTS-STARTPTS,trim=end_frame=71[v0]")
+        );
+        // ...and the sound runs exactly as long as those 71 frames.
+        assert_eq!(
+            graph.filter_parts[1],
+            format!("[0:a]atrim=start={fine0}:duration=2.958333,asetpts=PTS-STARTPTS[a0]")
         );
         assert!(graph.filter_parts[1].starts_with(&format!("[0:a]atrim=start={fine0}:")));
         // The unseeked clip trims at exactly the old absolute start.
         let (start1, _) = padded_clip_range(&clips[1]);
         assert!(graph.filter_parts[2].starts_with(&format!("[1:v]trim=start={start1:.3}:")));
-        // A source without audio is padded with silence, as before.
+        // A source without audio is padded with silence, as long as its picture.
         assert!(graph.filter_parts[5].starts_with("anullsrc="));
+        assert!(graph.filter_parts[5].contains("atrim=duration=2.958333,"));
         assert!(graph.filter_parts[5].ends_with("[a2]"));
         assert_eq!(graph.concat_inputs, "[v0][a0][v1][a1][v2][a2]");
         assert!(graph.any_has_audio);
@@ -1882,7 +1950,7 @@ mod merge_graph_tests {
         // Scenes 100-103 s and 104-107 s: about a second apart in the same file.
         let clips = vec![clip("a.mkv", 100.0, 103.0), clip("a.mkv", 104.0, 107.0)];
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[true]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[true], &[None]);
 
         assert_eq!(graph.input_args, ["-ss", "98", "-i", "a.mkv"]);
         // Both trims sit on input 0, each at its exact offset from the 98 s
@@ -1909,7 +1977,7 @@ mod merge_graph_tests {
             clip("a.mkv", 300.0, 303.0),
         ];
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0, 0], &[false]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0, 0], &[false], &[None]);
         assert_eq!(
             graph.input_args,
             ["-ss", "98", "-i", "a.mkv", "-ss", "598", "-i", "a.mkv", "-ss", "298", "-i", "a.mkv"]
@@ -1929,7 +1997,7 @@ mod merge_graph_tests {
         starts[21] = starts[20] + 12.0;
         let clips: Vec<ExportClip> = starts.iter().map(|&s| clip("a.mkv", s, s + 3.0)).collect();
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false]);
+        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false], &[None]);
 
         assert_eq!(input_count(&graph), super::MERGE_MAX_INPUTS);
         // Every clip still has its own trim, in merge order.
@@ -1949,14 +2017,16 @@ mod merge_graph_tests {
             .map(|k| clip("a.mkv", 100.0 + 60.0 * k as f64, 103.0 + 60.0 * k as f64))
             .collect();
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false]);
+        let graph = build_merge_graph(&clips, &paths, &vec![0; count], &[false], &[None]);
         assert_eq!(input_count(&graph), count);
     }
 
     // DEVTOOL, skipped by default: prints the merge inputs and filter chains
     // the app builds for a clip list, so a scratch benchmark can run the exact
     // command against a real source. MERGE_GRAPH_CLIPS holds JSON
-    // [{"source","start","end","fps"}] (one source path for all clips).
+    // [{"source","start","end","fps","hasAudio","sourceFps"}]; "hasAudio"
+    // (default true) and "sourceFps" (the probed rate, default none) stand in
+    // for what the app probes per source.
     //   cargo test merge_graph_devtool -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -1972,8 +2042,21 @@ mod merge_graph_tests {
                 fps: c["fps"].as_f64(),
             })
             .collect();
-        let paths = vec![PathBuf::from(&clips[0].source)];
-        let graph = build_merge_graph(&clips, &paths, &vec![0; clips.len()], &[true]);
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut has_audio: Vec<bool> = Vec::new();
+        let mut fps: Vec<Option<f64>> = Vec::new();
+        let mut index_for_clip: Vec<usize> = Vec::new();
+        for c in &raw {
+            let path = PathBuf::from(c["source"].as_str().unwrap());
+            let index = paths.iter().position(|p| *p == path).unwrap_or_else(|| {
+                paths.push(path);
+                has_audio.push(c["hasAudio"].as_bool().unwrap_or(true));
+                fps.push(c["sourceFps"].as_f64());
+                paths.len() - 1
+            });
+            index_for_clip.push(index);
+        }
+        let graph = build_merge_graph(&clips, &paths, &index_for_clip, &has_audio, &fps);
         println!(
             "MERGE_GRAPH {}",
             serde_json::json!({
@@ -1989,10 +2072,61 @@ mod merge_graph_tests {
     fn a_silent_merge_concats_video_only() {
         let clips = vec![clip("a.mkv", 10.0, 12.0), clip("a.mkv", 20.0, 22.0)];
         let paths = vec![PathBuf::from("a.mkv")];
-        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[false]);
+        let graph = build_merge_graph(&clips, &paths, &[0, 0], &[false], &[None]);
         assert_eq!(graph.filter_parts.len(), 2);
         assert_eq!(graph.concat_inputs, "[v0][v1]");
         assert!(!graph.any_has_audio);
+    }
+
+    #[test]
+    fn a_clips_picture_and_sound_both_last_whole_frames() {
+        use super::merge_clip_frames;
+        let ntsc = 24000.0 / 1001.0;
+        // 2.27 s at 23.976 fps is 54.4 frames: the picture keeps 55 frames, and
+        // the sound is cut to the same 2.2939 s instead of stopping at 2.27 s.
+        let (frames, length) = merge_clip_frames(2.27, ntsc);
+        assert_eq!(frames, 55);
+        assert!((length - 55.0 * 1001.0 / 24000.0).abs() < 1e-9);
+        // A duration that is already whole frames does not gain one.
+        assert_eq!(merge_clip_frames(2.0, 24.0).0, 48);
+        assert_eq!(merge_clip_frames(2.002, ntsc).0, 48);
+        assert_eq!(merge_clip_frames(4.0, 25.0).0, 100);
+        // Anything past a frame boundary starts the next frame.
+        assert_eq!(merge_clip_frames(2.001, 24.0).0, 49);
+        // A degenerate clip still keeps one frame.
+        assert_eq!(merge_clip_frames(0.0, 30.0).0, 1);
+    }
+
+    #[test]
+    fn the_sources_own_frame_rate_wins_over_the_ui_value() {
+        let clips = vec![ExportClip { source: "a.mkv".into(), start: 10.0, end: 12.5004, fps: Some(24.0) }];
+        let paths = vec![PathBuf::from("a.mkv")];
+        let ntsc = 24000.0 / 1001.0;
+        let graph = build_merge_graph(&clips, &paths, &[0], &[true], &[Some(ntsc)]);
+        // 2.423 s at the source's real 23.976 fps is 58.09 frames -> 59, which is
+        // 2.460792 s of picture and sound. The UI's rounded 24 would say 59 too
+        // but 2.458333 s, ending the sound 2.5 ms before the picture.
+        assert!(graph.filter_parts[0].contains(":duration=2.423,"), "{}", graph.filter_parts[0]);
+        assert!(graph.filter_parts[0].ends_with(",trim=end_frame=59[v0]"), "{}", graph.filter_parts[0]);
+        assert!(graph.filter_parts[1].contains(":duration=2.460792,"), "{}", graph.filter_parts[1]);
+        assert!((graph.total_duration - 59.0 / ntsc).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_merge_frame_rate_prefers_the_exact_nominal_rate() {
+        use super::{merge_source_fps, SourceVideoParams};
+        let params = |avg: &str, r: &str| SourceVideoParams {
+            avg_frame_rate: avg.to_string(),
+            r_frame_rate: r.to_string(),
+            ..SourceVideoParams::default()
+        };
+        let ntsc = 24000.0 / 1001.0;
+        assert_eq!(merge_source_fps(&params("23.976024", "24000/1001")), Some(ntsc));
+        // Variable-rate: nominal and average disagree, the average is used.
+        assert_eq!(merge_source_fps(&params("30000/1001", "60/1")), Some(30000.0 / 1001.0));
+        assert_eq!(merge_source_fps(&params("0/0", "25/1")), Some(25.0));
+        assert_eq!(merge_source_fps(&params("25/1", "0/0")), Some(25.0));
+        assert_eq!(merge_source_fps(&params("0/0", "0/0")), None);
     }
 }
 
@@ -2540,13 +2674,14 @@ fn run_clip_export_merged(
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
     ];
+    let input_fps = probe_merge_input_fps(&ffprobe, &input_paths);
     let MergeGraph {
         input_args,
         mut filter_parts,
         concat_inputs,
         total_duration,
         ..
-    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio);
+    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio, &input_fps);
     args.extend(input_args);
     let n = clips.len();
     // filter_complex (trim/concat) strips stream-level color metadata, so we
@@ -5203,7 +5338,9 @@ fn run_clip_preview_merge(
         hash_input.push_str(&clip.source);
         hash_input.push_str(&format!(":{:.3}:{:.3}", clip.start, clip.end));
     }
-    let range_key = short_stable_id(&[&hash_input, "preview-merge-v1"]);
+    // v2: previews cached before the sound was pinned to each clip's picture
+    // have a short silence at every join, so they are not reused.
+    let range_key = short_stable_id(&[&hash_input, "preview-merge-v2"]);
     
     // Save under scene_clips so it uses same permissions/location as other preview clips
     let cache_dir = app_data_dir.join("scene_clips").join("merged");
@@ -5253,13 +5390,14 @@ fn run_clip_preview_merge(
     ];
     // Same per-clip dual-seek inputs as the merged export, so this background
     // render no longer decodes the source from the start either.
+    let input_fps = probe_merge_input_fps(&ffprobe, &input_paths);
     let MergeGraph {
         input_args,
         mut filter_parts,
         concat_inputs,
         total_duration,
         any_has_audio,
-    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio);
+    } = build_merge_graph(&clips, &input_paths, &input_index_for_clip, &input_has_audio, &input_fps);
     args.extend(input_args);
     let n = clips.len();
     if any_has_audio {
