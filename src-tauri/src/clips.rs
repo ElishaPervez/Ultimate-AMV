@@ -937,74 +937,181 @@ fn probe_source_audio_params(ffprobe: &Path, input: &Path) -> Option<SourceAudio
     parse_source_audio_params(&String::from_utf8_lossy(&output.stdout))
 }
 
-// Packets in an ffprobe `packet=pts_time` CSV dump.
+// Video frames in an ffprobe `packet=pts_time,flags` CSV dump, in the order the
+// file stores them (decode order): (display time, is a keyframe). `offset` is
+// taken off every time, so a source's frames come back counted from its first
+// visible frame like every clip range.
 //
-// Only the FIRST field is parsed. ffprobe prints a trailing comma on every line
-// for some containers (transport streams among them) and none for others, so a
-// whole-line parse silently counts zero packets in a perfectly good segment —
-// which is exactly what smart cut's body check reads as "this copy landed on
-// the wrong footage", throwing away every splice and re-encoding every clip.
-fn count_packet_lines(csv: &str) -> usize {
+// Only the first field is read as the time. ffprobe prints a trailing comma on
+// every line for some containers (transport streams among them) and none for
+// others; a whole-line parse silently drops every frame of a good segment.
+fn parse_packet_list(csv: &str, offset: f64) -> Vec<(f64, bool)> {
     csv.lines()
-        .filter(|line| {
-            line.split(',')
-                .next()
-                .is_some_and(|field| field.trim().parse::<f64>().is_ok())
+        .filter_map(|line| {
+            let mut fields = line.split(',');
+            let pts = fields.next()?.trim().parse::<f64>().ok()?;
+            let key = fields.next().is_some_and(|flags| flags.contains('K'));
+            Some((pts - offset, key))
         })
-        .count()
+        .collect()
 }
 
-// Video packet count of a finished segment. Only ever called on the short temp
-// segments smart cut writes, so listing every packet is cheap.
-fn probe_video_packet_count(ffprobe: &Path, input: &Path) -> Option<usize> {
-    let output = cmd(ffprobe)
+// The `packet=pts_time,flags` dump of a file's first video stream, either whole
+// (`interval` None, for the short temp pieces smart cut writes) or over an
+// ffprobe -read_intervals window on the container's own timeline.
+fn probe_packet_listing(ffprobe: &Path, input: &Path, interval: Option<String>) -> Option<String> {
+    let mut command = cmd(ffprobe);
+    command
         .arg("-v").arg("error")
         .arg("-select_streams").arg("v:0")
-        .arg("-show_entries").arg("packet=pts_time")
-        .arg("-of").arg("csv=p=0")
-        .arg(input)
-        .output()
-        .ok()?;
+        .arg("-show_entries").arg("packet=pts_time,flags");
+    if let Some(interval) = interval {
+        command.arg("-read_intervals").arg(interval);
+    }
+    let output = command.arg("-of").arg("csv=p=0").arg(input).output().ok()?;
     if !output.status.success() {
         return None;
     }
-    Some(count_packet_lines(&String::from_utf8_lossy(&output.stdout)))
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-// Keyframe lookup over a bounded 40 s window, not the whole file — a full
-// packet dump of a 24-minute episode costs seconds per clip. A start near EOF
-// or an absurd GOP length returns None, which the caller answers by re-encoding
-// the whole clip.
+// Frames that start at or after `from` and before `to`.
+fn frames_between(packets: &[(f64, bool)], from: f64, to: f64) -> usize {
+    packets.iter().filter(|(pts, _)| *pts >= from && *pts < to).count()
+}
+
+// What ffmpeg actually seeks to for a `-ss` written to the millisecond: a
+// re-encode keeps frames from the first one at or after this.
+fn millisecond_seek(seconds: f64) -> f64 {
+    format!("{seconds:.3}").parse().unwrap_or(seconds)
+}
+
+// How the copied middle of a smart cut (the "body") is cut. Frames in a file
+// are stored in decode order, which with B-frames is not display order: a
+// frame shown later is often stored before frames shown earlier. A stream copy
+// can only keep a run of frames from the start of the body in stored order, so
+// it ends cleanly only where every frame stored so far is also every frame
+// shown so far. Stopping anywhere else either drags in frames from past the
+// requested end or leaves holes that freeze the picture (measured: a 2 s copy
+// showed frame 240 for four frame-times, then frame 244 from past the end).
 //
-// `start` is counted from the first visible frame; the read window has to be
-// asked for on the container's own timeline, so the source's start timestamp is
-// added here and taken back off every result.
-fn probe_first_keyframe(
-    ffprobe: &Path,
-    input: &Path,
-    start: f64,
-    tolerance: f64,
-    start_offset: f64,
-) -> Option<f64> {
-    let window_start = start + start_offset;
-    let output = cmd(ffprobe)
-        .arg("-v").arg("error")
-        .arg("-select_streams").arg("v:0")
-        .arg("-show_entries").arg("packet=pts_time,flags")
-        .arg("-read_intervals").arg(format!("{window_start:.3}%+40"))
-        .arg("-of").arg("csv=p=0")
-        .arg(input)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+// The plan takes the longest such clean run that ends before `end`; the frames
+// from there to the end are re-encoded as a short tail, like the head. Frames
+// stored after the keyframe that display before it (an "open GOP") depend on
+// footage before the keyframe, which in the finished clip is the re-encoded
+// head, so they are left out of the copy (the head already shows them).
+#[derive(Debug, PartialEq)]
+struct SmartCutBodyPlan {
+    // Frames the copy keeps, counted in stored order.
+    frames: usize,
+    // Display times of those frames in stored order, to check the copy against.
+    expected: Vec<f64>,
+    // First frame after the copy that is still before the end, if any: the
+    // tail re-encode starts there.
+    tail_from: Option<f64>,
+    // The next keyframe after the body's, if the listing reached one.
+    next_keyframe: Option<f64>,
+}
+
+// `packets` is the source's listing in stored order, counted from the first
+// visible frame; it has to reach past `end` by more than the frame reordering
+// (any GOP structure in practice reorders well under the lookahead read).
+// None when the keyframe is not in the listing.
+fn plan_smart_cut_body(
+    packets: &[(f64, bool)],
+    keyframe: f64,
+    end: f64,
+    half_frame: f64,
+) -> Option<SmartCutBodyPlan> {
+    let first = packets
+        .iter()
+        .position(|(pts, key)| *key && (pts - keyframe).abs() < half_frame)?;
+    let key_pts = packets[first].0;
+    let stored: Vec<f64> = std::iter::once(key_pts)
+        .chain(packets[first + 1..].iter().map(|(pts, _)| *pts).filter(|pts| *pts >= key_pts))
+        .collect();
+
+    // Earliest display time among the frames stored at or after each position.
+    let mut later_min = vec![f64::INFINITY; stored.len() + 1];
+    for i in (0..stored.len()).rev() {
+        later_min[i] = stored[i].min(later_min[i + 1]);
+    }
+    let mut shown_max = f64::NEG_INFINITY;
+    let mut frames = 0;
+    for (i, pts) in stored.iter().enumerate() {
+        shown_max = shown_max.max(*pts);
+        if shown_max >= end {
+            break;
+        }
+        if shown_max < later_min[i + 1] {
+            frames = i + 1;
+        }
+    }
+    if frames == 0 {
         return None;
     }
-    first_keyframe_at_or_after(
-        &String::from_utf8_lossy(&output.stdout),
-        start,
-        tolerance,
-        start_offset,
-    )
+    let next_keyframe = packets[first + 1..]
+        .iter()
+        .find(|(pts, key)| *key && *pts > key_pts + half_frame)
+        .map(|(pts, _)| *pts);
+    Some(SmartCutBodyPlan {
+        frames,
+        expected: stored[..frames].to_vec(),
+        tail_from: Some(later_min[frames]).filter(|next| *next < end),
+        next_keyframe,
+    })
+}
+
+// How far past the body's keyframe the copy seeks. The copy keeps footage from
+// the last keyframe at or before the seek point, so seeking exactly onto the
+// keyframe should land on it, but for MKV (and other containers ffmpeg does not
+// seek by display time) ffmpeg pulls the seek point back by 3/23 s when the
+// video has B-frames, and the copy landed one whole keyframe interval early:
+// 4 s of wrong footage on the old keyframe shortcut, a full re-encode
+// everywhere else. Seeking a little past the keyframe fixes that, but never as
+// far as halfway to the next keyframe, which would land on that one instead.
+// The copy is checked frame by frame afterwards either way.
+const SMART_CUT_BODY_SEEK_NUDGE: f64 = 0.2;
+
+fn smart_cut_body_seek(keyframe: f64, next_keyframe: Option<f64>) -> f64 {
+    let room = next_keyframe.map_or(f64::INFINITY, |next| (next - keyframe) / 2.0);
+    keyframe + SMART_CUT_BODY_SEEK_NUDGE.min(room)
+}
+
+// Bitstream filters for the body copy. Nothing here re-encodes.
+// - Converts to the start-code layout transport streams use (ffmpeg would add
+//   this one on its own; it is named so the next filters run after it).
+// - H.264 only: repeats the stream's parameter sets (picture size, profile and
+//   so on) before every keyframe. The conversion above only writes them before
+//   fresh-start (IDR) keyframes; an open-GOP keyframe is not one, so the copy
+//   carried none and decoded with the head's, as garbage. HEVC's conversion
+//   already writes them before every keyframe kind.
+// - Drops frames that display before the body's first frame (see
+//   SmartCutBodyPlan); the frame cap on the copy counts what is left.
+fn smart_cut_body_filters(codec: &str) -> String {
+    let drop_leading = "noise=drop=lt(pts\\,startpts)";
+    match codec.trim() {
+        "hevc" => format!("hevc_mp4toannexb,{drop_leading}"),
+        _ => format!("h264_mp4toannexb,dump_extra=freq=keyframe,{drop_leading}"),
+    }
+}
+
+// The body copy keeps the source's own timestamps, shifted by this much so none
+// goes negative (a transport stream cannot hold negative times, and ffmpeg
+// would otherwise shift the copy by an amount it picks itself). That is what
+// lets every copied frame be checked against the source's listing.
+const SMART_CUT_BODY_TS_OFFSET: f64 = 100.0;
+
+// Whether the copy holds exactly the planned frames: same count, same display
+// times in the same stored order (within a millisecond: MKV stores whole
+// milliseconds, transport streams 1/90000 s). A copy that landed on another
+// keyframe, or anywhere else, fails.
+fn smart_cut_body_matches(expected: &[f64], copied: &[(f64, bool)]) -> bool {
+    expected.len() == copied.len()
+        && expected
+            .iter()
+            .zip(copied)
+            .all(|(want, (got, _))| (want - got).abs() < 0.001)
 }
 
 #[cfg(test)]
@@ -1260,8 +1367,9 @@ mod numbered_output_tests {
 #[cfg(test)]
 mod smart_cut_tests {
     use super::{
-        count_packet_lines, first_keyframe_at_or_after, mp4_codec_tag_args, mp4_timescale_args,
-        mp4_video_timescale, parse_fps_rational,
+        first_keyframe_at_or_after, frames_between, millisecond_seek, mp4_codec_tag_args,
+        mp4_timescale_args, mp4_video_timescale, parse_fps_rational, parse_packet_list,
+        plan_smart_cut_body, smart_cut_body_filters, smart_cut_body_matches, smart_cut_body_seek,
         parse_source_audio_params, parse_source_video_params, pix_fmt_bit_depth, preset_extension,
         preset_extension_for, smart_cut_extension, smart_cut_fps, smart_cut_head_encoder_args,
         smart_cut_merge_mismatch, SourceAudioParams, SourceMergeProfile, SourceVideoParams,
@@ -1546,13 +1654,159 @@ mod smart_cut_tests {
     }
 
     #[test]
-    fn packets_are_counted_with_or_without_ffprobes_trailing_comma() {
+    fn packet_lists_read_with_or_without_ffprobes_trailing_comma() {
         // Transport streams (what the body copy is written as) come back with a
-        // trailing comma on every line; MKV does not. Both are real packets.
-        assert_eq!(count_packet_lines("1.483333,\n1.650000,\n1.566667,\n"), 3);
-        assert_eq!(count_packet_lines("0.000000\n0.167000\n0.083000\n"), 3);
-        assert_eq!(count_packet_lines("N/A\n\nnot-a-time\n"), 0);
-        assert_eq!(count_packet_lines(""), 0);
+        // trailing comma on every line; MKV does not. Both are real frames.
+        // The offset (the body copy's, or a source's start time) comes off.
+        assert_eq!(
+            parse_packet_list("101.500000,K__,\n101.750000,___,\n", 100.0),
+            vec![(1.5, true), (1.75, false)]
+        );
+        assert_eq!(parse_packet_list("0.000000,K__\n0.167000\n", 0.0), vec![(0.0, true), (0.167, false)]);
+        assert!(parse_packet_list("N/A,K__\n\nnot-a-time\n", 0.0).is_empty());
+    }
+
+    // Stored-order frame numbers of a closed-GOP x264 stream with 3 B-frames
+    // and B-pyramid, a keyframe every `gop` frames: I0 P4 B2 b1 b3 P8 B6 b5 b7
+    // ... and a short run before the next keyframe.
+    fn pyramid_order(frames: usize, gop: usize) -> Vec<usize> {
+        let mut order = Vec::with_capacity(frames);
+        let mut key = 0;
+        while key < frames {
+            let gop_end = (key + gop).min(frames);
+            order.push(key);
+            let mut anchor = key;
+            while anchor + 4 < gop_end {
+                order.extend([anchor + 4, anchor + 2, anchor + 1, anchor + 3]);
+                anchor += 4;
+            }
+            if anchor + 1 < gop_end {
+                order.push(gop_end - 1);
+                order.extend(anchor + 1..gop_end - 1);
+            }
+            key = gop_end;
+        }
+        order
+    }
+
+    fn listing(order: &[usize], fps: f64, keyframe_every: usize) -> Vec<(f64, bool)> {
+        order
+            .iter()
+            .map(|n| (*n as f64 / fps, n % keyframe_every == 0))
+            .collect()
+    }
+
+    #[test]
+    fn the_body_stops_where_stored_and_shown_frames_agree() {
+        let fps = 24.0;
+        let packets = listing(&pyramid_order(200, 96), fps, 96);
+        let half = 0.5 / fps;
+        // Keyframe at 96; the clip ends just before frame 155 (154 is the last
+        // frame wanted). The last clean stop at or before 154 is right after
+        // anchor 152, so frames 96..=152 are copied (57) and 153..=154 re-encoded.
+        let plan = plan_smart_cut_body(&packets, 96.0 / fps, 154.6 / fps, half).unwrap();
+        assert_eq!(plan.frames, 57);
+        assert_eq!(plan.expected.len(), 57);
+        assert_eq!(plan.expected[0], 96.0 / fps);
+        let mut shown: Vec<f64> = plan.expected.clone();
+        shown.sort_by(f64::total_cmp);
+        assert_eq!(shown.last().copied(), Some(152.0 / fps));
+        assert_eq!(plan.tail_from, Some(153.0 / fps));
+        assert_eq!(plan.next_keyframe, Some(192.0 / fps));
+        assert_eq!(frames_between(&packets, 153.0 / fps, 154.6 / fps), 2);
+    }
+
+    #[test]
+    fn a_body_ending_on_a_clean_stop_needs_no_tail() {
+        let fps = 24.0;
+        let packets = listing(&pyramid_order(200, 96), fps, 96);
+        // Frames up to 152 wanted: the copy covers them all.
+        let plan = plan_smart_cut_body(&packets, 96.0 / fps, 152.6 / fps, 0.5 / fps).unwrap();
+        assert_eq!(plan.frames, 57);
+        assert_eq!(plan.tail_from, None);
+    }
+
+    #[test]
+    fn the_copy_never_reaches_past_the_end_even_by_stored_order() {
+        let fps = 24.0;
+        let packets = listing(&pyramid_order(200, 96), fps, 96);
+        // Ending inside a B-frame run: every planned frame is before the end.
+        for last in 97..150 {
+            let end = (last as f64 + 0.6) / fps;
+            let plan = plan_smart_cut_body(&packets, 96.0 / fps, end, 0.5 / fps).unwrap();
+            assert!(plan.expected.iter().all(|pts| *pts < end), "{last}");
+            // Copy plus tail hold exactly the frames from the keyframe to the end.
+            let tail = plan.tail_from.map_or(0, |from| frames_between(&packets, from, end));
+            assert_eq!(plan.frames + tail, last - 96 + 1, "{last}");
+        }
+    }
+
+    #[test]
+    fn open_gop_frames_before_the_keyframe_are_left_out_of_the_copy() {
+        // x264 open GOP: the keyframe at 96 is stored before 93, 94, 95.
+        let fps = 24.0;
+        let order = [88, 92, 90, 89, 91, 96, 94, 93, 95, 100, 98, 97, 99, 104, 102, 101, 103];
+        let packets = listing(&order, fps, 96);
+        let plan = plan_smart_cut_body(&packets, 96.0 / fps, 101.6 / fps, 0.5 / fps).unwrap();
+        // 96, 100, 98, 97, 99 copied; 101 re-encoded.
+        assert_eq!(plan.frames, 5);
+        assert!(plan.expected.iter().all(|pts| *pts >= 96.0 / fps));
+        assert_eq!(plan.tail_from, Some(101.0 / fps));
+    }
+
+    #[test]
+    fn a_listing_that_runs_out_copies_to_its_last_frame() {
+        let fps = 24.0;
+        let packets = listing(&pyramid_order(105, 96), fps, 96);
+        // The source ends (after frame 104) before the requested end.
+        let plan = plan_smart_cut_body(&packets, 96.0 / fps, 200.0 / fps, 0.5 / fps).unwrap();
+        assert_eq!(plan.frames, 9);
+        assert_eq!(plan.tail_from, None);
+        assert_eq!(plan.next_keyframe, None);
+    }
+
+    #[test]
+    fn no_plan_without_the_keyframe_in_the_listing() {
+        let packets = listing(&pyramid_order(90, 96), 24.0, 96);
+        assert_eq!(plan_smart_cut_body(&packets, 4.0, 5.0, 0.02), None);
+        assert_eq!(plan_smart_cut_body(&[], 4.0, 5.0, 0.02), None);
+    }
+
+    #[test]
+    fn the_body_seek_lands_past_the_keyframe_but_short_of_the_next() {
+        assert!((smart_cut_body_seek(12.0, Some(16.0)) - 12.2).abs() < 1e-9);
+        assert!((smart_cut_body_seek(12.0, None) - 12.2).abs() < 1e-9);
+        // Keyframes 0.25 s apart: never past halfway.
+        assert!((smart_cut_body_seek(12.0, Some(12.25)) - 12.125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_copy_check_needs_every_frame_in_place() {
+        let expected = vec![4.004, 4.171, 4.087];
+        let copy = |times: &[f64]| times.iter().map(|t| (*t, false)).collect::<Vec<_>>();
+        assert!(smart_cut_body_matches(&expected, &copy(&[4.0040002, 4.171, 4.0869998])));
+        // One keyframe interval early, one frame missing, one extra, reordered.
+        assert!(!smart_cut_body_matches(&expected, &copy(&[0.0, 0.167, 0.083])));
+        assert!(!smart_cut_body_matches(&expected, &copy(&[4.004, 4.171])));
+        assert!(!smart_cut_body_matches(&expected, &copy(&[4.004, 4.171, 4.087, 4.046])));
+        assert!(!smart_cut_body_matches(&expected, &copy(&[4.004, 4.087, 4.171])));
+    }
+
+    #[test]
+    fn body_filters_match_the_codec() {
+        let h264 = smart_cut_body_filters("h264");
+        assert!(h264.starts_with("h264_mp4toannexb,dump_extra=freq=keyframe,"));
+        assert!(h264.ends_with("noise=drop=lt(pts\\,startpts)"));
+        assert_eq!(smart_cut_body_filters("hevc"), "hevc_mp4toannexb,noise=drop=lt(pts\\,startpts)");
+    }
+
+    #[test]
+    fn re_encodes_start_from_the_millisecond_seek() {
+        assert_eq!(millisecond_seek(4.441875), 4.442);
+        assert_eq!(millisecond_seek(4.35), 4.35);
+        let packets = vec![(4.333, false), (4.35, false), (4.367, false)];
+        // A frame exactly on the seek point is kept, as ffmpeg keeps it.
+        assert_eq!(frames_between(&packets, millisecond_seek(4.35), 4.36), 1);
     }
 
     #[test]
@@ -3514,36 +3768,44 @@ mod copy_cut_audio_tests {
 // bigger window just means a few more packets are read and thrown away.
 const SMART_CUT_AUDIO_BACKOFF: f64 = 15.0;
 
-// How many frames the copied body may differ from the requested length before
-// the whole clip is re-encoded instead. Packet-boundary and open-GOP effects
-// account for one or two; a seek that landed in the wrong place is off by a
-// whole group of pictures, which is dozens.
-const SMART_CUT_BODY_FRAME_SLACK: usize = 4;
+// How far past the requested end the frame listing reads, so the body plan can
+// see where the frame reordering around the end settles.
+const SMART_CUT_LISTING_LOOKAHEAD: f64 = 2.0;
 
-// One smart cut. The video is built in two pieces — the head (requested start
-// -> first keyframe at or after it) re-encoded so the clip opens on the exact
-// requested frame, the body (that keyframe -> requested end) copied byte for
-// byte — joined with the concat demuxer under -c copy. The audio is cut once,
-// for the whole clip, and copied.
+// One smart cut. The video is built from up to three pieces joined with the
+// concat demuxer under -c copy:
+// - the head (requested start -> first keyframe at or after it), re-encoded so
+//   the clip opens on the exact requested frame; skipped when the start is
+//   already on a keyframe;
+// - the body (that keyframe -> the last point before the requested end where a
+//   copy can stop cleanly), copied byte for byte (see SmartCutBodyPlan);
+// - the tail (the few frames from there to the requested end), re-encoded.
+// The clip holds exactly the source frames that start at or after the
+// requested start and before the requested end. The audio is cut once, for the
+// whole clip, and copied.
 //
 // The pieces are VIDEO-ONLY on purpose. ffmpeg leaves a re-encoded video stream
 // on the source timeline whenever a stream-copied audio stream shares the same
 // output, which makes the concat demuxer read the head as (head + start) long
-// and pushes the body that far out — a 5.5s clip lands at 8.3s. Keeping video
+// and pushes the body that far out (a 5.5s clip landed at 8.3s). Keeping video
 // and audio in separate files and muxing them at the end sidesteps that
 // entirely.
 //
-// Two shortcuts: a cut that already lands on a keyframe is a plain copy with no
-// temp files at all, and a keyframe past the requested end (or no keyframe in
-// the probe window) makes the whole clip a single re-encode. Refuses (Err) on
-// codecs and frame rates that cannot be spliced. Every ffmpeg run goes through
-// CLIP_CHILD_PID so cancel kills whichever child is live.
+// The re-encoded pieces stop on a frame count, not a time limit: ffmpeg snaps
+// re-encoded frame times to the output frame grid before applying a time limit,
+// and with the half-frame start offset every frame sits exactly between two
+// grid points, so a time limit kept or dropped the last frame by rounding (the
+// head kept the body's first frame, shown twice).
+//
+// A keyframe past the requested end, a frame listing that cannot be read, or a
+// copy that does not match its plan makes the whole clip a single re-encode.
+// Refuses (Err) on codecs and frame rates that cannot be spliced. Every ffmpeg
+// run goes through CLIP_CHILD_PID so cancel kills whichever child is live.
 //
 // `audio_follows_video` is set for merge segments: the sound is then cut to
-// the length of the picture actually built (which can run a few frames past
-// the requested end) instead of to the requested length, ending with the last
-// frame or at most one sound packet after it. A single-clip export keeps the
-// requested length.
+// the length of the picture actually built instead of to the requested length,
+// ending with the last frame or at most one sound packet after it. A
+// single-clip export keeps the requested length.
 //
 // `video_timescale` is the MP4 timescale every piece is written with (see
 // mp4_timescale_args). A merge passes one value for all its segments; None uses
@@ -3578,103 +3840,50 @@ fn run_smart_cut_clip(
     tag_args.extend(mp4_timescale_args(output, timescale));
 
     // Half a frame: closer than this and the cut IS the keyframe, so there is
-    // nothing to re-encode.
+    // nothing to re-encode before it.
     let tolerance = 0.5 / fps;
     let end = start + duration;
-    // Counted from the first visible frame, like `start` and every -ss below —
-    // probe_first_keyframe has already taken the container's start timestamp
-    // off. Without that, a source whose timestamps begin at 1.000 would make a
-    // cut at 3.000 look like it landed on a keyframe that is really at 2.000,
-    // and the clip would open on the wrong image and run a second long.
-    let keyframe = probe_first_keyframe(ffprobe, input, start, tolerance, params.start_offset);
+    let seek_start = millisecond_seek(start);
     let stage = |fraction: f32| Some(percent_from + percent_span * fraction);
 
-    // The cut already sits on a keyframe: one copy from the keyframe's exact
-    // timestamp is frame-accurate on its own, video and audio together.
-    if let Some(kf) = keyframe {
-        if (kf - start).abs() < tolerance {
-            let length = (end - kf).max(0.0);
-            emit_conversion_progress(
-                window,
-                "encode",
-                stage(0.0),
-                format!("{label} (already on a keyframe)..."),
-                None,
-                None,
-            );
-            let staged = StagedOutput::new(output);
-            let copy_args = |length: f64| {
-                let mut copy_args = vec![
-                    "-y".to_string(),
-                    "-hide_banner".to_string(),
-                    "-nostdin".to_string(),
-                    "-loglevel".to_string(),
-                    "error".to_string(),
-                    "-ss".to_string(),
-                    format!("{kf:.6}"),
-                    "-i".to_string(),
-                    input.to_string_lossy().to_string(),
-                    "-t".to_string(),
-                    format!("{length:.3}"),
-                ];
-                append_clip_stream_maps(&mut copy_args, &["0:v:0", "0:a:0?"]);
-                copy_args.extend([
-                    "-c".to_string(),
-                    "copy".to_string(),
-                    "-avoid_negative_ts".to_string(),
-                    "make_zero".to_string(),
-                ]);
-                copy_args.extend(tag_args.iter().cloned());
-                copy_args
-            };
-            run_clip_ffmpeg(
-                window,
-                ffmpeg,
-                copy_args(length)
-                    .into_iter()
-                    .chain([
-                    "-progress".to_string(),
-                    "pipe:1".to_string(),
-                    "-stats_period".to_string(),
-                    "0.5".to_string(),
-                    staged.path().to_string_lossy().to_string(),
-                ])
-                .collect(),
-                length,
-                "Smart cut (stream copy)",
-            )?;
-            // In a merge, the copied picture runs past the requested end while
-            // the sound stops on it: give the sound the picture's length so the
-            // join to the next clip has no gap.
-            if audio_follows_video {
-                match_copy_cut_audio(
-                    window,
-                    ffmpeg,
-                    ffprobe,
-                    staged.path(),
-                    &|extra, target| {
-                        let mut args = copy_args(length + extra);
-                        args.push(target.to_string_lossy().to_string());
-                        args
-                    },
-                    &tag_args,
-                    length,
-                    "Smart cut (matching the sound)",
-                )?;
-            }
-            return staged.commit();
-        }
-    }
+    // Every frame from the requested start to a little past the requested end,
+    // in stored order. Read on the container's own timeline and counted from
+    // the first visible frame, like `start` and every -ss below: without that,
+    // a source whose timestamps begin at 1.000 would make a cut at 3.000 look
+    // like it landed on a keyframe that is really at 2.000. The listing starts
+    // at the last keyframe at or before the start, so it holds every frame the
+    // clip needs; if it does not reach back to the first one (an index that
+    // lies), nothing is spliced.
+    let listing = probe_packet_listing(
+        ffprobe,
+        input,
+        Some(format!(
+            "{:.3}%{:.3}",
+            start + params.start_offset,
+            end + SMART_CUT_LISTING_LOOKAHEAD + params.start_offset
+        )),
+    );
+    let packets = listing
+        .as_deref()
+        .map(|csv| parse_packet_list(csv, params.start_offset))
+        .unwrap_or_default();
+    let listing_covers_start = packets.iter().any(|(pts, _)| *pts <= seek_start);
+    let keyframe = listing
+        .as_deref()
+        .filter(|_| listing_covers_start)
+        .and_then(|csv| first_keyframe_at_or_after(csv, start, tolerance, params.start_offset));
 
     let temp_parent = output.parent().unwrap_or_else(|| Path::new("."));
     let temp_dir = create_segment_temp_dir(temp_parent, "smartcut")?;
     let _guard = TempDirGuard(temp_dir.clone());
     let video = temp_dir.join(if target_is_mp4 { "video.mp4" } else { "video.mkv" });
 
-    // Head re-encode. -ss before -i is frame-accurate here BECAUSE the video is
-    // re-encoded: ffmpeg decodes from the preceding keyframe and throws away
-    // the frames before the seek point. Only -c copy snaps to a keyframe.
-    let head_args = |length: f64, target: &Path, as_ts: bool| {
+    // Head, tail and full re-encodes. -ss before -i is frame-accurate here
+    // BECAUSE the video is re-encoded: ffmpeg decodes from the preceding
+    // keyframe and throws away the frames before the seek point. Only -c copy
+    // snaps to a keyframe. `frames` caps the output at that many frames; None
+    // (no usable frame listing) falls back to a `seconds` time limit.
+    let encode_args = |seek: &str, frames: Option<usize>, seconds: f64, target: &Path, as_ts: bool| {
         let mut args: Vec<String> = vec![
             "-y".to_string(),
             "-hide_banner".to_string(),
@@ -3682,12 +3891,14 @@ fn run_smart_cut_clip(
             "-loglevel".to_string(),
             "error".to_string(),
             "-ss".to_string(),
-            format!("{start:.3}"),
+            seek.to_string(),
             "-i".to_string(),
             input.to_string_lossy().to_string(),
-            "-t".to_string(),
-            format!("{length:.3}"),
         ];
+        match frames {
+            Some(count) => args.extend(["-frames:v".to_string(), count.to_string()]),
+            None => args.extend(["-t".to_string(), format!("{seconds:.3}")]),
+        }
         append_clip_stream_maps(&mut args, &["0:v:0"]);
         args.extend(head_encoder.iter().cloned());
         args.push("-vf".to_string());
@@ -3704,34 +3915,44 @@ fn run_smart_cut_clip(
         args
     };
 
-    // The two pieces are joined as MPEG-TS, not MKV. A re-encoded head and an
+    // The pieces are joined as MPEG-TS, not MKV. A re-encoded head and an
     // untouched body carry different parameter sets, and MKV stores those once
-    // in the header — the muxer takes the head's and then rejects the body's
+    // in the header: the muxer takes the head's and then rejects the body's
     // packets outright ("Error muxing a packet" on HEVC). Transport streams
-    // carry the parameter sets in-band with every keyframe, so the two splice.
+    // carry the parameter sets in-band with every keyframe, so the pieces splice.
     //
-    // Neither piece gets -avoid_negative_ts make_zero: on a stream copy it
-    // shifts every packet forward by the first frame's DTS/PTS gap (two frames
-    // on a B-frame source), which both offsets the body inside the join and
-    // drags two frames from before the keyframe in with it.
+    // No piece gets -avoid_negative_ts make_zero: on a stream copy it shifts
+    // every packet forward by the first frame's DTS/PTS gap (two frames on a
+    // B-frame source), which both offsets the body inside the join and drags
+    // two frames from before the keyframe in with it.
+    let plan = keyframe
+        .filter(|kf| *kf < end - tolerance)
+        .and_then(|kf| plan_smart_cut_body(&packets, kf, end, tolerance).map(|plan| (kf, plan)));
     let mut joined = false;
-    if let Some(kf) = keyframe.filter(|kf| *kf < end - tolerance) {
-        let head = temp_dir.join("head.ts");
-        emit_conversion_progress(
-            window,
-            "encode",
-            stage(0.0),
-            format!("{label}: re-encoding the opening frames..."),
-            None,
-            None,
-        );
-        run_clip_ffmpeg(
-            window,
-            ffmpeg,
-            head_args(kf - start, &head, true),
-            kf - start,
-            "Smart cut head",
-        )?;
+    if let Some((kf, plan)) = plan {
+        let mut pieces: Vec<PathBuf> = Vec::with_capacity(3);
+        // Frames before the keyframe. None when the start is on the keyframe
+        // (or less than a frame before it).
+        let head_frames = frames_between(&packets, seek_start, kf - tolerance);
+        if head_frames > 0 {
+            let head = temp_dir.join("head.ts");
+            emit_conversion_progress(
+                window,
+                "encode",
+                stage(0.0),
+                format!("{label}: re-encoding the opening frames..."),
+                None,
+                None,
+            );
+            run_clip_ffmpeg(
+                window,
+                ffmpeg,
+                encode_args(&format!("{start:.3}"), Some(head_frames), 0.0, &head, true),
+                kf - start,
+                "Smart cut head",
+            )?;
+            pieces.push(head);
+        }
 
         let body = temp_dir.join("body.ts");
         emit_conversion_progress(
@@ -3742,23 +3963,35 @@ fn run_smart_cut_clip(
             None,
             None,
         );
+        // -copyts keeps the source's timestamps (plus the fixed offset) so the
+        // check below can compare every frame with the listing. The transport
+        // stream's own start delay is turned off for the same reason.
         let mut body_args = vec![
             "-y".to_string(),
             "-hide_banner".to_string(),
             "-nostdin".to_string(),
             "-loglevel".to_string(),
             "error".to_string(),
+            "-copyts".to_string(),
             "-ss".to_string(),
-            format!("{kf:.6}"),
+            format!("{:.6}", smart_cut_body_seek(kf, plan.next_keyframe)),
             "-i".to_string(),
             input.to_string_lossy().to_string(),
-            "-t".to_string(),
-            format!("{:.3}", end - kf),
         ];
         append_clip_stream_maps(&mut body_args, &["0:v:0"]);
         body_args.extend([
+            "-frames:v".to_string(),
+            plan.frames.to_string(),
             "-c".to_string(),
             "copy".to_string(),
+            "-bsf:v".to_string(),
+            smart_cut_body_filters(&params.codec),
+            "-output_ts_offset".to_string(),
+            format!("{SMART_CUT_BODY_TS_OFFSET:.3}"),
+            "-muxdelay".to_string(),
+            "0".to_string(),
+            "-muxpreload".to_string(),
+            "0".to_string(),
             "-f".to_string(),
             "mpegts".to_string(),
             body.to_string_lossy().to_string(),
@@ -3767,33 +4000,54 @@ fn run_smart_cut_clip(
             window,
             ffmpeg,
             body_args,
-            end - kf,
+            plan.frames as f64 / fps,
             "Smart cut body",
         )?;
 
         // A source whose keyframe index lies (ffmpeg says "File is broken,
         // keyframes not correctly marked") seeks to the wrong place on a stream
         // copy, and the body would silently hold footage from elsewhere in the
-        // episode. Counting what the copy actually produced catches it.
-        //
-        // The allowance is a fixed handful of frames, not a share of the clip:
-        // a stream copy can only end on a packet boundary and an open-GOP source
-        // hands over a couple of leading pictures with the keyframe, but nothing
-        // legitimate scales with length. A tenth of a 20-second body would have
-        // waved through two full seconds of wrong footage. Erring towards an
-        // unnecessary re-encode is the deliberate trade — it is slower, never
-        // wrong. A count that cannot be read at all is treated the same way,
-        // rather than assumed correct.
-        let wanted_frames = ((end - kf) * fps).round().max(1.0) as usize;
-        let copied_frames = probe_video_packet_count(ffprobe, &body);
-        let body_matches = copied_frames
-            .is_some_and(|copied| copied.abs_diff(wanted_frames) <= SMART_CUT_BODY_FRAME_SLACK);
+        // episode. Every copied frame's time is checked against the plan, so a
+        // copy that is off by even one frame is caught; a copy that cannot be
+        // read is treated the same way rather than assumed correct. Either way
+        // the clip is re-encoded instead: slower, never wrong.
+        let copied = probe_packet_listing(ffprobe, &body, None).map(|csv| {
+            parse_packet_list(&csv, SMART_CUT_BODY_TS_OFFSET + params.start_offset)
+        });
+        let body_matches = copied
+            .as_ref()
+            .is_some_and(|copied| smart_cut_body_matches(&plan.expected, copied));
         if body_matches {
+            pieces.push(body);
+            // The last few frames before the end that the copy could not stop
+            // on, re-encoded from half a frame before the first of them.
+            let tail_frames = plan
+                .tail_from
+                .map_or(0, |from| frames_between(&packets, from, end));
+            if let (Some(from), true) = (plan.tail_from, tail_frames > 0) {
+                let tail = temp_dir.join("tail.ts");
+                emit_conversion_progress(
+                    window,
+                    "encode",
+                    stage(0.5),
+                    format!("{label}: re-encoding the closing frames..."),
+                    None,
+                    None,
+                );
+                run_clip_ffmpeg(
+                    window,
+                    ffmpeg,
+                    encode_args(&format!("{:.6}", from - tolerance), Some(tail_frames), 0.0, &tail, true),
+                    tail_frames as f64 / fps,
+                    "Smart cut tail",
+                )?;
+                pieces.push(tail);
+            }
             concat_copy_segments(
                 window,
                 ffmpeg,
                 &temp_dir,
-                &[head, body],
+                &pieces,
                 &[],
                 duration,
                 &video,
@@ -3807,35 +4061,37 @@ fn run_smart_cut_clip(
         } else {
             log_warn(
                 "clip.smart_cut.body_mismatch",
-                "Smart cut body copy landed on the wrong footage; re-encoding the whole clip",
+                "Smart cut body copy did not match the source frames; re-encoding the whole clip",
                 json!({
                     "input": input.to_string_lossy(),
                     "keyframe": kf,
-                    "wantedFrames": wanted_frames,
-                    "copiedFrames": copied_frames,
-                    "reason": if copied_frames.is_some() { "frame count" } else { "unreadable" },
+                    "wantedFrames": plan.frames,
+                    "copiedFrames": copied.as_ref().map(Vec::len),
+                    "reason": if copied.is_some() { "frame times" } else { "unreadable" },
                 }),
             );
         }
     }
 
-    // No keyframe before the clip ends (start near EOF, a GOP longer than the
-    // probe window, or a source whose index cannot be trusted): re-encode the
-    // whole clip. Slower, but it only happens on degenerate sources and
-    // correctness wins.
+    // No keyframe before the clip ends (a short clip inside one GOP, start near
+    // EOF, or a source whose index cannot be trusted): re-encode the whole clip.
+    // Slower, but correctness wins. It stops on the same frame count a splice
+    // would have produced whenever the listing could be read.
     if !joined {
         emit_conversion_progress(
             window,
             "encode",
             stage(0.0),
-            format!("{label} (no keyframe to splice — re-encoding)..."),
+            format!("{label} (no keyframe to splice, re-encoding)..."),
             None,
             None,
         );
+        let frames = Some(frames_between(&packets, seek_start, end))
+            .filter(|count| listing_covers_start && *count > 0);
         run_clip_ffmpeg(
             window,
             ffmpeg,
-            head_args(duration, &video, false),
+            encode_args(&format!("{start:.3}"), frames, duration, &video, false),
             duration,
             "Smart cut (full re-encode)",
         )?;
