@@ -96,6 +96,40 @@ fn mp4_codec_tag_args(target: &Path, codec: &str) -> Vec<String> {
     }
 }
 
+// Timescale used when the source's own cannot be read.
+const SMART_CUT_FALLBACK_TIMESCALE: u32 = 90_000;
+
+// The MP4 video timescale (ticks per second) a source's video uses, from its
+// ffprobe time_base ("1/24000" -> 24000). Raised the way the MP4 muxer raises
+// a coarse one (doubled until at least 10000), so a plain copy would have
+// picked the same value. None when the time base is not 1/N.
+fn mp4_video_timescale(time_base: &str) -> Option<u32> {
+    let (num, den) = time_base.trim().split_once('/')?;
+    let (num, mut den): (u64, u64) = (num.trim().parse().ok()?, den.trim().parse().ok()?);
+    if num != 1 || den == 0 {
+        return None;
+    }
+    while den < 10_000 {
+        den *= 2;
+    }
+    u32::try_from(den).ok()
+}
+
+// Every MP4 smart cut writes (each piece, each merge segment, the joined file)
+// is given the same video timescale. The join step reads every piece's
+// timestamps as if they were counted in the FIRST piece's units, so a piece
+// copied from the source (counted in, say, 1/24000 s) followed by one built
+// from re-encoded parts (1/90000 s) played 3.75 times too slowly: a 12 s merge
+// came out at 40 s and more. MKV always counts in milliseconds, so it needs
+// nothing.
+fn mp4_timescale_args(target: &Path, timescale: u32) -> Vec<String> {
+    if is_mp4_family(target) {
+        vec!["-video_track_timescale".to_string(), timescale.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 const VIDEO_PRESETS: &[&str] = &[
     "gpu-intra",
     "prores-lt",
@@ -564,6 +598,9 @@ fn preset_supports_rate_control(preset: &str) -> bool {
 // ffprobe then reports packet timestamps on THAT timeline while every clip
 // range (and every ffmpeg -ss) is counted from the first visible frame. The
 // offset is what converts between the two.
+//
+// `time_base` is the unit the video timestamps are counted in ("1/24000"); in
+// an MP4 it is the track's timescale. See mp4_video_timescale().
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SourceVideoParams {
     codec: String,
@@ -573,6 +610,7 @@ struct SourceVideoParams {
     avg_frame_rate: String,
     r_frame_rate: String,
     start_offset: f64,
+    time_base: String,
 }
 
 // Audio stream properties that have to line up before two cuts can be joined
@@ -844,6 +882,7 @@ fn parse_source_video_params(json_text: &str) -> Result<SourceVideoParams, Strin
         avg_frame_rate: field("avg_frame_rate"),
         r_frame_rate: field("r_frame_rate"),
         start_offset,
+        time_base: field("time_base"),
     })
 }
 
@@ -852,7 +891,7 @@ fn probe_source_video_params(ffprobe: &Path, input: &Path) -> Result<SourceVideo
         .arg("-v").arg("error")
         .arg("-select_streams").arg("v:0")
         .arg("-show_entries")
-        .arg("stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate:format=start_time")
+        .arg("stream=codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate,time_base:format=start_time")
         .arg("-of").arg("json")
         .arg(input)
         .output()
@@ -1221,7 +1260,8 @@ mod numbered_output_tests {
 #[cfg(test)]
 mod smart_cut_tests {
     use super::{
-        count_packet_lines, first_keyframe_at_or_after, mp4_codec_tag_args, parse_fps_rational,
+        count_packet_lines, first_keyframe_at_or_after, mp4_codec_tag_args, mp4_timescale_args,
+        mp4_video_timescale, parse_fps_rational,
         parse_source_audio_params, parse_source_video_params, pix_fmt_bit_depth, preset_extension,
         preset_extension_for, smart_cut_extension, smart_cut_fps, smart_cut_head_encoder_args,
         smart_cut_merge_mismatch, SourceAudioParams, SourceMergeProfile, SourceVideoParams,
@@ -1238,6 +1278,7 @@ mod smart_cut_tests {
             avg_frame_rate: avg.to_string(),
             r_frame_rate: r.to_string(),
             start_offset: 0.0,
+            time_base: "1/24000".to_string(),
         }
     }
 
@@ -1319,6 +1360,28 @@ mod smart_cut_tests {
         // H.264 already lands as avc1, and MKV has no such tag at all.
         assert!(mp4_codec_tag_args(&mp4, "h264").is_empty());
         assert!(mp4_codec_tag_args(&mkv, "hevc").is_empty());
+    }
+
+    #[test]
+    fn the_mp4_timescale_is_the_sources_own() {
+        assert_eq!(mp4_video_timescale("1/24000"), Some(24_000));
+        assert_eq!(mp4_video_timescale("1/15360"), Some(15_360));
+        assert_eq!(mp4_video_timescale(" 1/90000 "), Some(90_000));
+        // A coarse one is raised the way the MP4 muxer raises it.
+        assert_eq!(mp4_video_timescale("1/1000"), Some(16_000));
+        assert_eq!(mp4_video_timescale("1/30"), Some(15_360));
+        for unreadable in ["", "N/A", "0/0", "1/0", "1001/24000", "x/24000"] {
+            assert_eq!(mp4_video_timescale(unreadable), None, "{unreadable}");
+        }
+    }
+
+    #[test]
+    fn only_mp4_pieces_get_the_shared_timescale() {
+        assert_eq!(
+            mp4_timescale_args(&PathBuf::from("seg.mp4"), 24_000),
+            vec!["-video_track_timescale".to_string(), "24000".to_string()]
+        );
+        assert!(mp4_timescale_args(&PathBuf::from("seg.mkv"), 24_000).is_empty());
     }
 
     #[test]
@@ -1585,7 +1648,8 @@ mod smart_cut_tests {
     #[test]
     fn the_stream_probe_reads_the_first_video_stream() {
         let json = r#"{"streams":[{"codec_name":"hevc","width":1920,"height":1080,
-            "pix_fmt":"yuv420p10le","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}],
+            "pix_fmt":"yuv420p10le","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001",
+            "time_base":"1/24000"}],
             "format":{"start_time":"0.000000"}}"#;
         assert_eq!(
             parse_source_video_params(json).unwrap(),
@@ -2266,6 +2330,7 @@ fn run_clip_export(
                 i as f32 * span,
                 span,
                 false,
+                None,
             )?;
             exported_paths.push(output.to_string_lossy().to_string());
             continue;
@@ -3479,6 +3544,10 @@ const SMART_CUT_BODY_FRAME_SLACK: usize = 4;
 // the requested end) instead of to the requested length, ending with the last
 // frame or at most one sound packet after it. A single-clip export keeps the
 // requested length.
+//
+// `video_timescale` is the MP4 timescale every piece is written with (see
+// mp4_timescale_args). A merge passes one value for all its segments; None uses
+// this source's own.
 #[allow(clippy::too_many_arguments)]
 fn run_smart_cut_clip(
     window: &tauri::Window,
@@ -3493,6 +3562,7 @@ fn run_smart_cut_clip(
     percent_from: f32,
     percent_span: f32,
     audio_follows_video: bool,
+    video_timescale: Option<u32>,
 ) -> Result<(), String> {
     let params = probe_source_video_params(ffprobe, input)?;
     let fps = smart_cut_fps(&params)?;
@@ -3501,7 +3571,11 @@ fn run_smart_cut_clip(
     // become the finished clip follows it, so the silent-source path can rename
     // rather than remux, and so HEVC gets the MP4 tag QuickTime needs.
     let target_is_mp4 = is_mp4_family(output);
-    let tag_args = mp4_codec_tag_args(output, &params.codec);
+    let timescale = video_timescale
+        .or_else(|| mp4_video_timescale(&params.time_base))
+        .unwrap_or(SMART_CUT_FALLBACK_TIMESCALE);
+    let mut tag_args = mp4_codec_tag_args(output, &params.codec);
+    tag_args.extend(mp4_timescale_args(output, timescale));
 
     // Half a frame: closer than this and the cut IS the keyframe, so there is
     // nothing to re-encode.
@@ -3943,6 +4017,12 @@ fn run_smart_cut_merge(
     // Segments carry the finished file's container, so each one is written
     // exactly as a single-clip export would be and the join is same-into-same.
     let segment_ext = if is_mp4_family(output) { "mp4" } else { "mkv" };
+    // One MP4 timescale for every segment and the joined file, so the join
+    // reads every segment's timestamps in the same units.
+    let timescale = profiles
+        .first()
+        .and_then(|profile| mp4_video_timescale(&profile.video.time_base))
+        .unwrap_or(SMART_CUT_FALLBACK_TIMESCALE);
 
     for (i, clip) in clips.iter().enumerate() {
         let input = &input_paths[input_index_for_clip[i]];
@@ -3963,14 +4043,16 @@ fn run_smart_cut_merge(
             i as f32 * span,
             span,
             true,
+            Some(timescale),
         )?;
         segment_paths.push(segment);
     }
 
-    let merge_tag_args = profiles
+    let mut merge_tag_args = profiles
         .first()
         .map(|profile| mp4_codec_tag_args(output, &profile.video.codec))
         .unwrap_or_default();
+    merge_tag_args.extend(mp4_timescale_args(output, timescale));
     let join_durations = probe_segment_join_durations(ffprobe, &segment_paths);
     let staged = StagedOutput::new(output);
     concat_copy_segments(
