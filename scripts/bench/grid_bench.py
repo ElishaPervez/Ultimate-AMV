@@ -71,7 +71,7 @@ def main():
         browser = pw.chromium.launch(channel="msedge", headless=args.headless,
                                      args=["--autoplay-policy=no-user-gesture-required", "--window-position=0,0"])
         for repeat in range(args.repeats):
-            for mode, speed in (("wheel", 0), ("fling", 3000)):
+            for mode, speed in (("wheel", 800), ("fling", 3000)):
                 page = browser.new_page(viewport={"width": 1366, "height": 860})
                 page.goto((Path(__file__).resolve().parent / "grid_harness.html").as_uri())
                 result = page.evaluate("cfg => window.runGrid(cfg)", {

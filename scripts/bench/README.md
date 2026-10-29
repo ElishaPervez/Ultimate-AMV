@@ -86,6 +86,13 @@ events:
 Boundaries: every detection run writes `cuts` to
 `docs\optimize-2026-10-30\boundaries\<tag>\<run>\<media>.<mode>.<label>.json`.
 `diff_boundaries.py` exits 1 and lists moved cuts if anything differs.
+Baseline caveat (measured 2026-10-30): GPU-mode detection on the H.264 test
+files is NOT repeatable today. Two runs of unchanged code on the same file move
+~20 of ~500 cuts by one frame (720p: ~40 cuts) and add or drop a few. CPU mode
+and GPU mode on the HEVC file were identical run to run. So for an H.264 GPU
+change, "identical" can only be judged against the run-to-run spread, or after
+the cause (most likely the hardware decode path, since inference on the HEVC
+file is repeatable) is fixed.
 
 Previews (`preview.*`):
 - `proxy_build.nvenc|x264` : the whole-episode 240p proxy the default grid
@@ -97,8 +104,10 @@ Previews (`preview.*`):
   grid (used when "featherweight previews" is switched off).
 
 Grid scroll (`grid.*`, from grid_bench.py in real Edge):
-- `wheel.*` : a wheel notch (100 px) every 120 ms through the grid.
-- `fling.*` : a steady 3000 px/s scroll (new mounts held back, like the app).
+- `wheel.*` : a steady 800 px/s scroll (WebView2 animates each 100 px wheel
+  notch over several frames, so wheeling through the grid looks like this).
+- `fling.*` : a steady 3000 px/s scroll (about 33 px per frame at 92 Hz, just
+  under the app's 50 px/frame "hold new mounts" threshold).
 - `frame_p90/p99/max`, `frames_over_50ms` : animation-frame intervals while
   scrolling; the run target is no frame over 50 ms.
 - `tile_first_frame` / `initial_screen_first_frame` : mount to first painted

@@ -126,13 +126,10 @@ window.runGrid = async function runGrid(config) {
       intervals.push(now - last);
       last = now;
       const elapsed = now - startedAt;
-      if (mode === "wheel") {
-        // A wheel notch (100 px) every 120 ms, like a user scrolling through.
-        const notches = Math.floor(elapsed / 120);
-        scroller.scrollTop = Math.min(maxTop, notches * 100);
-      } else {
-        scroller.scrollTop = Math.min(maxTop, (elapsed / 1000) * scrollPxPerSecond);
-      }
+      // Continuous scroll. WebView2 animates each wheel notch over several
+      // frames, so a user wheeling through the grid (a 100 px notch every
+      // ~120 ms) looks like a steady ~800 px/s scroll, not 100 px jumps.
+      scroller.scrollTop = Math.min(maxTop, (elapsed / 1000) * scrollPxPerSecond);
       const delta = Math.abs(scroller.scrollTop - lastTop);
       lastTop = scroller.scrollTop;
       if (delta > FAST_PX_PER_FRAME) fastUntil = now + 150;
