@@ -1142,6 +1142,92 @@ fn smart_cut_body_matches(expected: &[f64], copied: &[(f64, bool)]) -> bool {
             .all(|(want, (got, _))| (want - got).abs() < 0.001)
 }
 
+// Whether a run of H.264 in start-code layout holds a fresh-start (IDR)
+// picture: NAL unit type 5. The byte after every 00 00 01 start code is a NAL
+// header, and the payloads never contain 00 00 01 (the format escapes it).
+fn h264_has_idr_picture(annexb: &[u8]) -> bool {
+    annexb
+        .windows(4)
+        .any(|bytes| bytes[..3] == [0, 0, 1] && bytes[3] & 0x1F == 5)
+}
+
+// Whether the copied body of a smart cut can follow other footage in one
+// stream: the re-encoded head of the same clip, or the end of the clip before
+// it in a merge.
+//
+// An H.264 keyframe is only a clean place to start if it is a fresh start
+// (IDR). Sources encoded with open GOPs mark ordinary I-frames as keyframes,
+// and a decoder that reaches one of those in the middle of a stream keeps
+// counting frame order and reference frames on from the footage before it, so
+// at the join it drops frames, shows them out of order or paints corrupted
+// pictures (measured: half of the clips cut from an open-GOP H.264 source lost
+// 1 to 12 frames, some with damaged pictures). The copy itself checks out
+// frame by frame, so nothing else catches it. HEVC keyframes splice cleanly
+// either way (every measured clip was exact).
+//
+// Copies the keyframe's first packet only, from the same seek as the body.
+// Anything that cannot be read counts as not clean.
+fn smart_cut_keyframe_is_clean_start(ffmpeg: &Path, input: &Path, codec: &str, seek: f64) -> bool {
+    if codec.trim() != "h264" {
+        return true;
+    }
+    let output = cmd(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-ss"])
+        .arg(format!("{seek:.6}"))
+        .arg("-i")
+        .arg(input)
+        .args([
+            "-map", "0:v:0", "-frames:v", "1", "-c", "copy",
+            "-bsf:v", "h264_mp4toannexb", "-f", "h264", "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .output();
+    match output {
+        Ok(out) if out.status.success() => h264_has_idr_picture(&out.stdout),
+        _ => false,
+    }
+}
+
+// How far into the copied body the join check decodes. A decoder that loses
+// its place at a join does so within the first GOP's reordering (measured: the
+// frames lost were the 2 to 12 right after it), so a second of footage is
+// plenty.
+const SMART_CUT_JOIN_CHECK_BODY_FRAMES: usize = 48;
+
+// Whether the first `frames` stored frames of a joined smart cut decode into
+// exactly that many pictures with steadily rising times. The frame-by-frame
+// check of the body copy only reads timestamps; this one runs the decoder over
+// the join itself, so a join the decoder cannot follow (frames dropped or
+// shown out of order) is caught. Decodes the head plus about a second of the
+// body, never the whole clip. ffprobe decodes on one thread unless told
+// otherwise (6.5 s against 0.9 s for 119 frames of 1080p).
+fn smart_cut_join_decodes(ffprobe: &Path, video: &Path, frames: usize) -> bool {
+    let output = cmd(ffprobe)
+        .args(["-v", "error", "-threads", "0", "-select_streams", "v:0", "-show_entries", "frame=pts_time"])
+        .arg("-read_intervals")
+        .arg(format!("%+#{frames}"))
+        .args(["-of", "csv=p=0"])
+        .arg(video)
+        .output();
+    let Ok(out) = output else { return false };
+    if !out.status.success() {
+        return false;
+    }
+    let times: Vec<Option<f64>> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split(',').next().and_then(|field| field.trim().parse::<f64>().ok()))
+        .collect();
+    decoded_times_follow_on(&times, frames)
+}
+
+// `frames` pictures, every one timed, each later than the last.
+fn decoded_times_follow_on(times: &[Option<f64>], frames: usize) -> bool {
+    times.len() == frames
+        && times.iter().all(Option::is_some)
+        && times.windows(2).all(|pair| pair[1] > pair[0])
+}
+
 #[cfg(test)]
 mod rate_control_tests {
     use super::{
@@ -1428,6 +1514,34 @@ mod smart_cut_tests {
 
     fn profile(name: &str, video: SourceVideoParams, audio: Option<SourceAudioParams>) -> SourceMergeProfile {
         SourceMergeProfile { name: name.to_string(), video, audio }
+    }
+
+    #[test]
+    fn only_an_idr_picture_counts_as_a_fresh_h264_start() {
+        use super::h264_has_idr_picture;
+        // What x264 writes for a closed-GOP keyframe: parameter sets, then an
+        // IDR slice (NAL header 0x65), behind 4- and 3-byte start codes.
+        let idr = [0, 0, 0, 1, 0x67, 0x64, 0, 0x1F, 0, 0, 1, 0x68, 0xEE, 0, 0, 1, 0x65, 0x88, 0x84];
+        assert!(h264_has_idr_picture(&idr));
+        // An open-GOP keyframe: a recovery-point SEI, then an ordinary I slice
+        // (NAL header 0x41). A 0x65 byte inside a payload is not a header.
+        let open = [0, 0, 0, 1, 0x06, 0x06, 0x01, 0x65, 0, 0, 1, 0x41, 0x9A, 0x65, 0x65];
+        assert!(!h264_has_idr_picture(&open));
+        assert!(!h264_has_idr_picture(&[]));
+    }
+
+    #[test]
+    fn a_join_decodes_cleanly_only_with_every_frame_in_rising_order() {
+        use super::decoded_times_follow_on;
+        let times = |list: &[f64]| list.iter().map(|t| Some(*t)).collect::<Vec<_>>();
+        assert!(decoded_times_follow_on(&times(&[0.0, 0.042, 0.083, 0.125]), 4));
+        // A frame lost at the join.
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.125]), 4));
+        // Two frames shown out of order, or one shown twice.
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.083, 0.042, 0.125]), 4));
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.042, 0.125]), 4));
+        // A picture the decoder could not time.
+        assert!(!decoded_times_follow_on(&[Some(0.0), None, Some(0.083), Some(0.125)], 4));
     }
 
     #[test]
@@ -4354,7 +4468,23 @@ fn run_smart_cut_clip(
     // two frames from before the keyframe in with it.
     let plan = keyframe
         .filter(|kf| *kf < end - tolerance)
-        .and_then(|kf| plan_smart_cut_body(&packets, kf, end, tolerance).map(|plan| (kf, plan)));
+        .and_then(|kf| plan_smart_cut_body(&packets, kf, end, tolerance).map(|plan| (kf, plan)))
+        .filter(|(kf, plan)| {
+            let clean = smart_cut_keyframe_is_clean_start(
+                ffmpeg,
+                input,
+                &params.codec,
+                smart_cut_body_seek(*kf, plan.next_keyframe),
+            );
+            if !clean {
+                log_info(
+                    "clip.smart_cut.open_gop",
+                    "Smart cut keyframe is not a fresh start (open GOP); re-encoding the whole clip",
+                    json!({ "input": input.to_string_lossy(), "keyframe": kf }),
+                );
+            }
+            clean
+        });
     let mut joined = false;
     if let Some((kf, plan)) = plan {
         let mut pieces: Vec<PathBuf> = Vec::with_capacity(3);
@@ -4484,7 +4614,22 @@ fn run_smart_cut_clip(
                 format!("{label}: joining..."),
                 "Joining smart cut",
             )?;
-            joined = true;
+            // Decode across the head-to-body join (see smart_cut_join_decodes).
+            // A join the decoder cannot follow gets the whole clip re-encoded.
+            let check_frames = head_frames + plan.frames.min(SMART_CUT_JOIN_CHECK_BODY_FRAMES);
+            if head_frames == 0 || smart_cut_join_decodes(ffprobe, &video, check_frames) {
+                joined = true;
+            } else {
+                log_warn(
+                    "clip.smart_cut.join_check_failed",
+                    "Smart cut join did not decode cleanly; re-encoding the whole clip",
+                    json!({
+                        "input": input.to_string_lossy(),
+                        "keyframe": kf,
+                        "checkedFrames": check_frames,
+                    }),
+                );
+            }
         } else {
             log_warn(
                 "clip.smart_cut.body_mismatch",
@@ -4501,7 +4646,8 @@ fn run_smart_cut_clip(
     }
 
     // No keyframe before the clip ends (a short clip inside one GOP, start near
-    // EOF, or a source whose index cannot be trusted): re-encode the whole clip.
+    // EOF, or a source whose index cannot be trusted), or none that can follow
+    // other footage cleanly (an open-GOP H.264 source): re-encode the whole clip.
     // Slower, but correctness wins. It stops on the same frame count a splice
     // would have produced whenever the listing could be read.
     if !joined {
@@ -4509,7 +4655,7 @@ fn run_smart_cut_clip(
             window,
             "encode",
             stage(0.0),
-            format!("{label} (no keyframe to splice, re-encoding)..."),
+            format!("{label} (no clean keyframe to splice, re-encoding)..."),
             None,
             None,
         );
