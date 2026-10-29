@@ -21,7 +21,7 @@ Screens are grouped by the four stages of an edit, plus the system screens.
 | Get footage | Downloader | Built-in browser with automatic episode and series detection on anime streaming sites and YouTube; live queue, per-download save folder, cancel support. |
 | Get footage | Tsukyio Vault | Browse, preview, and pull editing assets into the project; account sign-in or a manual API key. |
 | Find your cuts | Scene Splitter | Automatic scene detection, frame-accurate trimming, clip merging, and export via ffmpeg with GPU-accelerated decoding; Quality, VBR, and CBR rate control on every encode preset that supports it. |
-| Find your cuts | Smart cut (export preset) | Exports without re-encoding, so cuts are near-instant and bit-for-bit identical to the source while still landing on the exact frame you chose; MP4 sources stay MP4 for drag-and-drop import into Premiere, After Effects, and DaVinci. |
+| Find your cuts | Smart cut (export preset) | Copies the source untouched and re-encodes only the first and last few frames, so cuts are near-instant and still land on the exact frames you chose; MP4 sources stay MP4 for drag-and-drop import into Premiere, After Effects, and DaVinci. |
 | Find your cuts | Dead Frame Remover | Detects and drops the duplicate frames anime is full of; sensitivity dial, filmstrip preview of what is about to be cut, and optional re-timing of the survivors to a frame rate you pick. |
 | Clean up the footage | BG Remover | Cuts the subject out of video or images with ML matting and a clean transparent edge. |
 | Clean up the footage | Frame Interpolation | Generates in-between frames to raise a clip's frame rate (2x, 3x, 4x, or a target fps), or slow motion up to 64x; batch queueing and one-click hand-off from the clip grid. |
