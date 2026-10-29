@@ -4515,6 +4515,14 @@ fn run_smart_cut_clip(
     let mut joined = false;
     if let Some((kf, plan)) = plan {
         let mut pieces: Vec<PathBuf> = Vec::with_capacity(3);
+        // How far apart the pieces start in the source: the join places each
+        // piece exactly that far after the one before it. Left to read the
+        // lengths off the transport-stream pieces, the join put the copy one
+        // frame too early on large (1080p) pieces, so two frames shared a
+        // time and the clip came out a frame or two short, its sound drifting
+        // by as much (measured on 3 of 4 clips).
+        let mut piece_lengths: Vec<f64> = Vec::with_capacity(2);
+        let body_start = plan.expected.first().copied().unwrap_or(kf);
         // Frames before the keyframe. None when the start is on the keyframe
         // (or less than a frame before it).
         let head_frames = frames_between(&packets, first_frame_from, kf - tolerance);
@@ -4536,6 +4544,12 @@ fn run_smart_cut_clip(
                 "Smart cut head",
             )?;
             pieces.push(head);
+            let head_first = packets
+                .iter()
+                .map(|(pts, _)| *pts)
+                .filter(|pts| *pts >= first_frame_from)
+                .fold(f64::INFINITY, f64::min);
+            piece_lengths.push(body_start - head_first);
         }
 
         let body = temp_dir.join("body.ts");
@@ -4626,13 +4640,14 @@ fn run_smart_cut_clip(
                     "Smart cut tail",
                 )?;
                 pieces.push(tail);
+                piece_lengths.push(from - body_start);
             }
             concat_copy_segments(
                 window,
                 ffmpeg,
                 &temp_dir,
                 &pieces,
-                &[],
+                &piece_lengths,
                 &[],
                 duration,
                 &video,
