@@ -3950,7 +3950,7 @@ export function clipExportOptions(mode: "cpu" | "gpu", gpuStatus: VideoGpuStatus
       value: "smart-cut",
       label: "Smart cut (frame-accurate, no quality loss)",
       disabled: false,
-      description: "Copies the original like Lossless cut, but re-encodes only the first fraction of a second so the clip starts on the exact frame. H.264/HEVC sources only. Keeps the source's format: MP4 in, MP4 out; everything else saves as MKV.",
+      description: "Re-encodes only the first and last few frames so the clip starts and ends on the exact frames, and copies the rest untouched like Lossless cut. H.264/HEVC sources only. Keeps the source's format: MP4 in, MP4 out; everything else saves as MKV.",
     },
     {
       value: "prores-lt",
