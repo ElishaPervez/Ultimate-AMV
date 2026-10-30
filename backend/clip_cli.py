@@ -70,11 +70,25 @@ def _force_cuvid_detection(flag=False):
     return os.environ.get(_FORCE_CUVID_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# Dev-only A/B switch for the GPU decode route. Unset (the default) = the
+# ffmpeg NVDEC route (decode_frames_nvdec), which gives the same frames every
+# run. "nelux" = the old nelux VideoReader route, which on H.264 returns a
+# repeated or garbled frame for ~2% of frames, differently on every run, so
+# cuts moved by a frame between runs. Not wired into app config/Settings.
+_GPU_DECODE_ENV = "AMV_DEV_GPU_DECODE"
+
+
+def _use_nelux_decode():
+    return os.environ.get(_GPU_DECODE_ENV, "").strip().lower() == "nelux"
+
+
 @dataclass
 class VideoInfo:
     codec: str
     fps: float
     duration: float
+    width: int = 0
+    height: int = 0
 
 
 def emit(payload):
@@ -126,7 +140,7 @@ def probe_video(ffprobe, input_path):
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=codec_name,avg_frame_rate,r_frame_rate:format=duration",
+            "stream=codec_name,avg_frame_rate,r_frame_rate,width,height:format=duration",
             "-of",
             "json",
             str(input_path),
@@ -148,7 +162,12 @@ def probe_video(ffprobe, input_path):
         raise RuntimeError("Could not read video FPS.")
     if duration <= 0:
         raise RuntimeError("Could not read video duration.")
-    return VideoInfo(codec=codec, fps=fps, duration=duration)
+    try:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    return VideoInfo(codec=codec, fps=fps, duration=duration, width=width, height=height)
 
 
 def cuvid_decoder(codec):
@@ -161,11 +180,31 @@ def cuvid_decoder(codec):
     raise RuntimeError(f"No cuvid decoder mapping for codec: {codec}")
 
 
+def nvdec_halfway_size(info):
+    """Size the GPU shrinks each frame to before the final CPU shrink to 48x27.
+
+    A whole-number fraction of the source (half for 1080p and 720p, a quarter
+    for 4K) so the GPU's bilinear step averages neighbouring pixels evenly.
+    The final 48x27 step is the same software `scale` the CPU decode path
+    uses, so the model sees frames within ~0.2 levels of software-decoded ones
+    (one GPU step straight to 48x27 skips most pixels and was ~13 levels off,
+    enough to lose borderline cuts).
+    """
+    width, height = info.width, info.height
+    if width <= 0 or height <= 0:
+        return 960, 540
+    factor = max(2, -(-width // 960))
+    half_w = max(FRAME_W * 2, (width // factor) // 2 * 2)
+    half_h = max(FRAME_H * 2, (height // factor) // 2 * 2)
+    return half_w, half_h
+
+
 def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     import numpy as np
 
     decoder = cuvid_decoder(info.codec)
     estimated_frames = max(1, int(round(info.duration * info.fps)))
+    half_w, half_h = nvdec_halfway_size(info)
     command = [
         ffmpeg,
         "-hide_banner",
@@ -183,14 +222,15 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
         # scale_cuda must convert to nv12 on-GPU (`:format=nv12`): 10-bit HEVC
         # decodes to p010 CUDA frames, and hwdownload cannot emit nv12 from a
         # p010 surface ("Invalid output format nv12 for hwframe download").
+        # Two-step shrink: GPU to a whole-number fraction of the source, then
+        # the CPU path's own `scale` to 48x27 (see nvdec_halfway_size).
         "-vf",
-        f"scale_cuda={FRAME_W}:{FRAME_H}:format=nv12,hwdownload,format=nv12,format=rgb24",
+        f"scale_cuda={half_w}:{half_h}:interp_algo=bilinear:format=nv12,hwdownload,format=nv12,"
+        f"scale={FRAME_W}:{FRAME_H},format=rgb24",
         "-f",
-        "image2pipe",
+        "rawvideo",
         "-pix_fmt",
         "rgb24",
-        "-vcodec",
-        "rawvideo",
         "pipe:1",
     ]
 
@@ -595,7 +635,7 @@ def extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, b
     return scenes, cuts
 
 
-def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at):
+def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=None):
     if info.codec not in GPU_DECODABLE_CODECS:
         raise RuntimeError(f"Unsupported codec for RTX clip extraction: {info.codec!r}. Expected h264, hevc, or av1.")
     ffmpeg = require_tool("ffmpeg")
@@ -603,22 +643,33 @@ def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, ove
 
     # Preload TransNetV2 on a background thread while NVDEC decodes : they use different GPU resources
     _preload: dict = {}
-    def _load_model():
-        try:
-            import torch
-            from transnetv2_pytorch import TransNetV2
-            device = torch.device("cuda")
-            m = TransNetV2(device=device)
-            m.eval()
-            _preload["model"] = m
-        except Exception as exc:
-            _preload["error"] = exc
-    model_thread = threading.Thread(target=_load_model, daemon=True)
-    model_thread.start()
+    model_thread = None
+    if model is not None:
+        _preload["model"] = model
+    else:
+        def _load_model():
+            try:
+                import torch
+                from transnetv2_pytorch import TransNetV2
+                device = torch.device("cuda")
+                m = TransNetV2(device=device)
+                m.eval()
+                _preload["model"] = m
+            except Exception as exc:
+                _preload["error"] = exc
+        model_thread = threading.Thread(target=_load_model, daemon=True)
+        model_thread.start()
 
-    frames = decode_frames_nvdec(ffmpeg, input_path, info, started_at)
+    try:
+        frames = decode_frames_nvdec(ffmpeg, input_path, info, started_at)
+    except RuntimeError as error:
+        # Software fallback: the same final `scale` step, so the model sees
+        # near-identical frames (cuts matched exactly on the test episodes).
+        emit({"type": "log", "message": f"NVDEC decode failed, using software decode -> TransNetV2 (GPU): {error}"})
+        frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
 
-    model_thread.join()
+    if model_thread is not None:
+        model_thread.join()
     if "error" in _preload:
         raise _preload["error"]
 
@@ -693,21 +744,18 @@ def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_
                 emit({"type": "log", "message": f"Codec {info.codec!r} is not NVDEC-decodable; using software decode -> TransNetV2 (GPU)."})
                 return extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
 
-            # Phase 1 parity switch: force the splittable ffmpeg-cuvid path
-            # (extract_gpu -> decode_frames_nvdec) even when nelux is importable.
-            # OFF by default -> nelux stays the GPU default and behavior is
-            # unchanged for real users. extract_gpu loads its own TransNetV2, so
-            # active_model is intentionally not threaded in here.
-            if _force_cuvid_detection(force_cuvid):
-                emit({"type": "log", "message": "Forcing cuvid detection path (decode_frames_nvdec); nelux bypassed."})
-                return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at)
+            # Default GPU route: ffmpeg NVDEC decode (decode_frames_nvdec), which
+            # returns the same frames every run. The old nelux route is kept
+            # only behind the dev switch AMV_DEV_GPU_DECODE=nelux for A/B runs
+            # (it repeated or garbled ~2% of H.264 frames, differently each run).
+            if _use_nelux_decode() and not _force_cuvid_detection(force_cuvid):
+                try:
+                    import nelux  # noqa: F401  (import-presence check before the native call)
+                    return extract_gpu_nelux_with_model(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, active_model)
+                except Exception as e:
+                    emit({"type": "log", "message": f"Nelux failed, falling back to ffmpeg NVDEC: {e}"})
 
-            try:
-                import nelux  # noqa: F401  (import-presence check before the native call)
-                return extract_gpu_nelux_with_model(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, active_model)
-            except Exception as e:
-                emit({"type": "log", "message": f"Nelux failed, falling back to legacy NVDEC: {e}"})
-                return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at)
+            return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
         if mode == "cpu":
             return extract_cpu(input_path, info, cpu_threshold, min_clip_seconds, started_at)
         raise RuntimeError("Clip extraction mode must be cpu or gpu.")
