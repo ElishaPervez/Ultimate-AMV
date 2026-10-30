@@ -10,12 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.17.0] : 2026-10-30
 
 ### Changed
+- Scene Splitter grid previews for a newly scanned episode start playing much sooner: about 17 seconds instead of 46 with an NVIDIA GPU, and about 39 seconds instead of 52 on CPU. The preview files keep their sound.
+- GPU scene detection now finds the same scenes every time you scan the same episode. Some cuts may land one frame differently than in 0.16.0, toward the correct frame, and 10-bit HEVC episodes can show a few extra cuts that 0.16.0 missed.
+- GPU scene detection of 10-bit HEVC episodes (most BD rips) is much faster: about 30 seconds per episode instead of about 45. 720p H.264 episodes take a few seconds longer on GPU than before.
+- CPU scene detection is slightly faster and uses far less memory.
+- Scrolling the Scene Splitter grid is smoother on slower PCs.
 - Merged exports are now named with the next free number, like single exports (for example 5.mp4), instead of joining the source clip numbers into names like "905+906+907+908".
 - Lossless merges are about twice as fast, because each clip is now cut from the source once instead of twice.
 - Smart cut is much faster on clips where it used to quietly re-encode the whole clip. It now re-encodes only the first and last few frames and copies the rest untouched.
 - The export menu and README now describe smart cut as re-encoding only the first and last few frames and copying the rest untouched.
 
 ### Fixed
+- Fixed scene detection hanging forever on damaged episode files.
+- Fixed GPU scene detection hanging forever when the GPU video decoder froze. The frozen decoder is now stopped after 60 seconds and the episode is finished in software. Pressing Cancel also stops it, where before it kept running in the background until the app was closed.
+- Fixed every remaining episode in a GPU scan failing after one GPU error. The episode that hit the error still fails, but the next ones (and a retry) now scan normally.
 - Fixed short silent gaps and sound slowly drifting out of sync at the joins of merged exports, in re-encode, lossless and smart cut modes.
 - Fixed smart cut exports not ending on the last frame you picked. They now end on exactly that frame.
 - Fixed smart cut of MKV sources exporting the wrong footage or running very slowly.
