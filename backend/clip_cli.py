@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -199,6 +200,95 @@ def nvdec_halfway_size(info):
     return half_w, half_h
 
 
+_decoder_job_state = {"job": None, "tried": False}
+_decoder_job_lock = threading.Lock()
+
+
+def _decoder_kill_job():
+    """Windows: a job object that kills every ffmpeg assigned to it as soon as
+    this Python process ends, however it ends. The app's Cancel stops the
+    detection server with a plain process kill, which does not take its
+    children along; a frozen ffmpeg (it writes nothing, so it never notices
+    the closed pipe) would otherwise keep running until the app closes.
+    Best effort: returns None if the job cannot be made."""
+    if os.name != "nt":
+        return None
+    with _decoder_job_lock:
+        if _decoder_job_state["tried"]:
+            return _decoder_job_state["job"]
+        _decoder_job_state["tried"] = True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+            kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+            kernel32.SetInformationJobObject.restype = wintypes.BOOL
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            class _IoCounters(ctypes.Structure):
+                _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+            class _BasicLimits(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class _ExtendedLimits(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", _BasicLimits),
+                    ("IoInfo", _IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            job = kernel32.CreateJobObjectW(None, None)  # handle is not inheritable
+            if not job:
+                return None
+            limits = _ExtendedLimits()
+            limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):  # 9 = extended limits
+                kernel32.CloseHandle(job)
+                return None
+            _decoder_job_state["job"] = (kernel32, job)
+        except Exception:
+            _decoder_job_state["job"] = None
+        return _decoder_job_state["job"]
+
+
+def _tie_to_this_process(process):
+    """Make `process` die with this Python process (Windows, best effort)."""
+    job = _decoder_kill_job()
+    if job is None:
+        return
+    kernel32, handle = job
+    try:
+        target = kernel32.OpenProcess(0x0100 | 0x0001, False, process.pid)  # SET_QUOTA | TERMINATE
+        if target:
+            kernel32.AssignProcessToJobObject(handle, target)
+            kernel32.CloseHandle(target)
+    except Exception:
+        pass
+
+
 def start_frame_decoder(command):
     """Start an ffmpeg frame decode and drain its stderr on a side thread.
 
@@ -212,6 +302,7 @@ def start_frame_decoder(command):
     process = subprocess.Popen(
         command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    _tie_to_this_process(process)
     tail = bytearray()
 
     def drain():
@@ -231,6 +322,118 @@ def start_frame_decoder(command):
         return bytes(tail).decode("utf-8", errors="replace")
 
     return process, stderr_tail
+
+
+# Decoder stall watchdog. If ffmpeg delivers no bytes at all for this long,
+# it is stopped: the GPU route then falls back to software decode, the CPU
+# route reports an error instead of hanging. Measured on the benchmark PC
+# (i5-12400F, RTX 5060 Ti): the first frame arrives within ~1 s on every test
+# file (NVDEC and software decode), and once frames flow the longest gap
+# between reads is well under a second, so these limits only trip on a real
+# freeze, even on a much slower machine or a sleeping hard disk. Software
+# decode gets more time because it has no fallback after it.
+GPU_DECODE_STALL_SECONDS = 60.0
+CPU_DECODE_STALL_SECONDS = 180.0
+# Dev-only: "off" disables the watchdog (reads wait forever, as before).
+_DECODE_WATCHDOG_ENV = "AMV_DEV_DECODE_WATCHDOG"
+_DECODER_READ_BYTES = FRAME_BYTES * 512
+
+
+class DecoderStalled(RuntimeError):
+    """ffmpeg stopped delivering frames and was stopped by the watchdog."""
+
+
+def _decode_watchdog_enabled():
+    return os.environ.get(_DECODE_WATCHDOG_ENV, "").strip().lower() not in ("0", "off", "false", "no")
+
+
+def decoder_chunks(process, stall_seconds, label, queue_size=64, poll_seconds=1.0, clock=time.monotonic):
+    """Yield ffmpeg's stdout in chunks of up to ~2 MB until it ends.
+
+    A side thread reads the pipe, so the caller never blocks on ffmpeg
+    directly. Only time the side thread spends WAITING ON FFMPEG counts
+    towards the stall limit (not time the caller spends using a chunk, which
+    can hold the reader up through the bounded queue). If ffmpeg sends nothing
+    for `stall_seconds`, it is killed and DecoderStalled is raised. A clock
+    jump bigger than a few poll intervals (the PC slept) restarts the timer.
+    If the caller stops early or raises, ffmpeg is killed and the side thread
+    is released, so no ffmpeg is left running.
+    """
+    import queue
+
+    chunks = queue.Queue(maxsize=queue_size)
+    state = {"waiting_since": None, "error": None}
+    # read1 returns as soon as ffmpeg has written anything (one pipe read),
+    # so the stall timer sees every byte, not just every 2 MB.
+    read_some = getattr(process.stdout, "read1", None) or process.stdout.read
+
+    def pump():
+        pending = bytearray()
+        try:
+            while True:
+                state["waiting_since"] = clock()
+                piece = read_some(_DECODER_READ_BYTES)
+                state["waiting_since"] = None
+                if not piece:
+                    break
+                pending += piece
+                if len(pending) >= _DECODER_READ_BYTES:
+                    chunks.put(bytes(pending))
+                    pending.clear()
+        except Exception as error:  # surfaced to the caller
+            state["error"] = error
+        finally:
+            state["waiting_since"] = None
+            if pending:
+                chunks.put(bytes(pending))
+            chunks.put(None)
+
+    reader = threading.Thread(target=pump, name=f"{label}-reader", daemon=True)
+    reader.start()
+    watch = stall_seconds is not None and stall_seconds > 0 and _decode_watchdog_enabled()
+    finished = False
+    last_tick = clock()
+    try:
+        while True:
+            try:
+                chunk = chunks.get(timeout=poll_seconds)
+            except queue.Empty:
+                now = clock()
+                if now - last_tick > poll_seconds * 5:
+                    # The machine slept (or this thread was starved): do not
+                    # count that gap as ffmpeg's.
+                    if state["waiting_since"] is not None:
+                        state["waiting_since"] = now
+                last_tick = now
+                waiting_since = state["waiting_since"]
+                if watch and waiting_since is not None and now - waiting_since > stall_seconds:
+                    emit({"type": "log", "message": f"{label}: no frames from ffmpeg for {stall_seconds:.0f} s; stopping it."})
+                    process.kill()
+                    reader.join(timeout=5)
+                    raise DecoderStalled(f"{label} stalled: ffmpeg produced no frames for {stall_seconds:.0f} s and was stopped.")
+                continue
+            last_tick = clock()
+            if chunk is None:
+                finished = True
+                break
+            yield chunk
+    finally:
+        if not finished:
+            # Caller stopped early, raised, or the watchdog fired: make sure
+            # ffmpeg is gone and the side thread is not stuck on a full queue.
+            try:
+                process.kill()
+            except OSError:
+                pass
+            deadline = time.monotonic() + 5
+            while reader.is_alive() and time.monotonic() < deadline:
+                try:
+                    chunks.get(timeout=0.2)
+                except queue.Empty:
+                    pass
+            reader.join(timeout=1)
+    if state["error"] is not None:
+        raise RuntimeError(f"Could not read ffmpeg output: {state['error']}")
 
 
 def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
@@ -276,18 +479,16 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     chunks = []
     total = 0
     last_emit = 0.0
-    while True:
-        chunk = process.stdout.read(FRAME_BYTES * 512)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        frames = total // FRAME_BYTES
-        now = time.perf_counter()
-        if now - last_emit >= 0.25:
-            last_emit = now
-            stage_percent = min(frames / estimated_frames, 1.0)
-            progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
+    with contextlib.closing(decoder_chunks(process, GPU_DECODE_STALL_SECONDS, "NVDEC decode")) as stream:
+        for chunk in stream:
+            chunks.append(chunk)
+            total += len(chunk)
+            frames = total // FRAME_BYTES
+            now = time.perf_counter()
+            if now - last_emit >= 0.25:
+                last_emit = now
+                stage_percent = min(frames / estimated_frames, 1.0)
+                progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
 
     stderr = stderr_tail()
     status = process.wait()
@@ -340,18 +541,16 @@ def decode_frames_cpu(ffmpeg, input_path, info, started_at):
     chunks = []
     total = 0
     last_emit = 0.0
-    while True:
-        chunk = process.stdout.read(FRAME_BYTES * 512)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        frames = total // FRAME_BYTES
-        now = time.perf_counter()
-        if now - last_emit >= 0.25:
-            last_emit = now
-            stage_percent = min(frames / estimated_frames, 1.0)
-            progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
+    with contextlib.closing(decoder_chunks(process, CPU_DECODE_STALL_SECONDS, "CPU decode")) as stream:
+        for chunk in stream:
+            chunks.append(chunk)
+            total += len(chunk)
+            frames = total // FRAME_BYTES
+            now = time.perf_counter()
+            if now - last_emit >= 0.25:
+                last_emit = now
+                stage_percent = min(frames / estimated_frames, 1.0)
+                progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
 
     stderr = stderr_tail()
     status = process.wait()
@@ -447,8 +646,6 @@ def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, mi
     of after it. A reader thread drains ffmpeg's pipe so ffmpeg never waits
     on the scoring. Returns sorted unique cut frame indices.
     """
-    import queue
-
     import numpy as np
     from scenedetect import ContentDetector, FrameTimecode
 
@@ -462,35 +659,18 @@ def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, mi
     if process.stdout is None:
         raise RuntimeError("Could not read ffmpeg output.")
 
-    # Bounded so a stalled scorer cannot buffer a whole episode twice
-    # (each item is up to 512 frames, ~2 MB).
-    chunks = queue.Queue(maxsize=64)
-    reader_errors = []
-
-    def pump():
-        try:
-            while True:
-                chunk = process.stdout.read(FRAME_BYTES * 512)
-                if not chunk:
-                    break
-                chunks.put(chunk)
-        except Exception as error:  # surfaced after the loop
-            reader_errors.append(error)
-        finally:
-            chunks.put(None)
-
-    reader = threading.Thread(target=pump, name="cpu-decode-reader", daemon=True)
-    reader.start()
-
+    # decoder_chunks drains ffmpeg's pipe on a side thread into a bounded
+    # queue (64 items of ~2 MB, so a slow scorer cannot buffer a whole
+    # episode twice), stops ffmpeg if the caller raises, and stops it if it
+    # freezes.
     cut_frames = []
     index = 0
     pending = b""
     last_emit = 0.0
-    try:
-        while True:
-            chunk = chunks.get()
-            if chunk is None:
-                break
+    # closing(): if scoring raises, ffmpeg is stopped right away instead of
+    # whenever the generator gets garbage-collected.
+    with contextlib.closing(decoder_chunks(process, CPU_DECODE_STALL_SECONDS, "CPU decode")) as stream:
+        for chunk in stream:
             data = pending + chunk if pending else chunk
             whole = len(data) // FRAME_BYTES
             if whole:
@@ -510,20 +690,9 @@ def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, mi
                 last_emit = now
                 stage_percent = min(index / estimated_frames, 1.0)
                 progress("decode", 2 + stage_percent * 46, f"Decoded and analyzed {index:,}/{estimated_frames:,} frames", started_at)
-    except BaseException:
-        # Scoring raised: stop ffmpeg, then drain the queue so the reader
-        # thread is not left blocked on a full queue.
-        process.kill()
-        while chunks.get() is not None:
-            pass
-        reader.join()
-        raise
-    reader.join()
 
     stderr = stderr_tail()
     status = process.wait()
-    if reader_errors:
-        raise RuntimeError(f"Could not read ffmpeg output: {reader_errors[0]}")
     if status != 0:
         raise RuntimeError(f"ffmpeg CPU decode failed:\n{stderr.strip()}")
     if index <= 0:
@@ -1087,7 +1256,7 @@ def server():
                 emit({"type": "error", "message": f"Unknown server command: {command}"})
         except Exception as e:
             emit({"type": "error", "message": f"Server command error: {e}"})
-            
+
     return 0
 
 
