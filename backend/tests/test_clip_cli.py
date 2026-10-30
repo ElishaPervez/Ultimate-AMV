@@ -548,7 +548,7 @@ class TestExtractCpu:
 
 
 # ---------------------------------------------------------------------------
-# scenedetect_cut_frames_streaming — CPU mode scoring while ffmpeg decodes
+# scenedetect_cut_frames_streaming: CPU mode scoring while ffmpeg decodes
 # ---------------------------------------------------------------------------
 
 
