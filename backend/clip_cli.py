@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -70,11 +71,25 @@ def _force_cuvid_detection(flag=False):
     return os.environ.get(_FORCE_CUVID_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# Dev-only A/B switch for the GPU decode route. Unset (the default) = the
+# ffmpeg NVDEC route (decode_frames_nvdec), which gives the same frames every
+# run. "nelux" = the old nelux VideoReader route, which on H.264 returns a
+# repeated or garbled frame for ~2% of frames, differently on every run, so
+# cuts moved by a frame between runs. Not wired into app config/Settings.
+_GPU_DECODE_ENV = "AMV_DEV_GPU_DECODE"
+
+
+def _use_nelux_decode():
+    return os.environ.get(_GPU_DECODE_ENV, "").strip().lower() == "nelux"
+
+
 @dataclass
 class VideoInfo:
     codec: str
     fps: float
     duration: float
+    width: int = 0
+    height: int = 0
 
 
 def emit(payload):
@@ -126,7 +141,7 @@ def probe_video(ffprobe, input_path):
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=codec_name,avg_frame_rate,r_frame_rate:format=duration",
+            "stream=codec_name,avg_frame_rate,r_frame_rate,width,height:format=duration",
             "-of",
             "json",
             str(input_path),
@@ -148,7 +163,12 @@ def probe_video(ffprobe, input_path):
         raise RuntimeError("Could not read video FPS.")
     if duration <= 0:
         raise RuntimeError("Could not read video duration.")
-    return VideoInfo(codec=codec, fps=fps, duration=duration)
+    try:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    return VideoInfo(codec=codec, fps=fps, duration=duration, width=width, height=height)
 
 
 def cuvid_decoder(codec):
@@ -161,11 +181,272 @@ def cuvid_decoder(codec):
     raise RuntimeError(f"No cuvid decoder mapping for codec: {codec}")
 
 
+def nvdec_halfway_size(info):
+    """Size the GPU shrinks each frame to before the final CPU shrink to 48x27.
+
+    A whole-number fraction of the source (half for 1080p and 720p, a quarter
+    for 4K) so the GPU's bilinear step averages neighbouring pixels evenly.
+    The final 48x27 step is the same software `scale` the CPU decode path
+    uses, so the model sees frames within ~0.2 levels of software-decoded ones
+    (one GPU step straight to 48x27 skips most pixels and was ~13 levels off,
+    enough to lose borderline cuts).
+    """
+    width, height = info.width, info.height
+    if width <= 0 or height <= 0:
+        return 960, 540
+    factor = max(2, -(-width // 960))
+    half_w = max(FRAME_W * 2, (width // factor) // 2 * 2)
+    half_h = max(FRAME_H * 2, (height // factor) // 2 * 2)
+    return half_w, half_h
+
+
+_decoder_job_state = {"job": None, "tried": False}
+_decoder_job_lock = threading.Lock()
+
+
+def _decoder_kill_job():
+    """Windows: a job object that kills every ffmpeg assigned to it as soon as
+    this Python process ends, however it ends. The app's Cancel stops the
+    detection server with a plain process kill, which does not take its
+    children along; a frozen ffmpeg (it writes nothing, so it never notices
+    the closed pipe) would otherwise keep running until the app closes.
+    Best effort: returns None if the job cannot be made."""
+    if os.name != "nt":
+        return None
+    with _decoder_job_lock:
+        if _decoder_job_state["tried"]:
+            return _decoder_job_state["job"]
+        _decoder_job_state["tried"] = True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+            kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+            kernel32.SetInformationJobObject.restype = wintypes.BOOL
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            class _IoCounters(ctypes.Structure):
+                _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+            class _BasicLimits(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class _ExtendedLimits(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", _BasicLimits),
+                    ("IoInfo", _IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            job = kernel32.CreateJobObjectW(None, None)  # handle is not inheritable
+            if not job:
+                return None
+            limits = _ExtendedLimits()
+            limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):  # 9 = extended limits
+                kernel32.CloseHandle(job)
+                return None
+            _decoder_job_state["job"] = (kernel32, job)
+        except Exception:
+            _decoder_job_state["job"] = None
+        return _decoder_job_state["job"]
+
+
+def _tie_to_this_process(process):
+    """Make `process` die with this Python process (Windows, best effort)."""
+    job = _decoder_kill_job()
+    if job is None:
+        return
+    kernel32, handle = job
+    try:
+        target = kernel32.OpenProcess(0x0100 | 0x0001, False, process.pid)  # SET_QUOTA | TERMINATE
+        if target:
+            kernel32.AssignProcessToJobObject(handle, target)
+            kernel32.CloseHandle(target)
+    except Exception:
+        pass
+
+
+def start_frame_decoder(command):
+    """Start an ffmpeg frame decode and drain its stderr on a side thread.
+
+    Returns (process, stderr_tail) where stderr_tail() joins the drain and
+    returns the last 16 KB of ffmpeg's messages. Draining matters: a damaged
+    episode makes ffmpeg print thousands of decode-error lines, and if nobody
+    reads them the stderr pipe fills, ffmpeg stops, and the frame read waits
+    forever (measured: hung until killed). stdin is closed so ffmpeg never
+    reads the caller's stdin (the server's command pipe).
+    """
+    process = subprocess.Popen(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    _tie_to_this_process(process)
+    tail = bytearray()
+
+    def drain():
+        stream = process.stderr
+        if stream is None:
+            return
+        for line in iter(lambda: stream.readline(), b""):
+            tail.extend(line)
+            if len(tail) > 16 * 1024:
+                del tail[: len(tail) - 16 * 1024]
+
+    drainer = threading.Thread(target=drain, name="ffmpeg-stderr", daemon=True)
+    drainer.start()
+
+    def stderr_tail():
+        drainer.join()
+        return bytes(tail).decode("utf-8", errors="replace")
+
+    return process, stderr_tail
+
+
+# Decoder stall watchdog. If ffmpeg delivers no bytes at all for this long,
+# it is stopped: the GPU route then falls back to software decode, the CPU
+# route reports an error instead of hanging. Measured on the benchmark PC
+# (i5-12400F, RTX 5060 Ti): the first frame arrives within ~1 s on every test
+# file (NVDEC and software decode), and once frames flow the longest gap
+# between reads is well under a second, so these limits only trip on a real
+# freeze, even on a much slower machine or a sleeping hard disk. Software
+# decode gets more time because it has no fallback after it.
+GPU_DECODE_STALL_SECONDS = 60.0
+CPU_DECODE_STALL_SECONDS = 180.0
+# Dev-only: "off" disables the watchdog (reads wait forever, as before).
+_DECODE_WATCHDOG_ENV = "AMV_DEV_DECODE_WATCHDOG"
+_DECODER_READ_BYTES = FRAME_BYTES * 512
+_DECODER_WAKE_BYTES = FRAME_BYTES * 32
+
+
+class DecoderStalled(RuntimeError):
+    """ffmpeg stopped delivering frames and was stopped by the watchdog."""
+
+
+def _decode_watchdog_enabled():
+    return os.environ.get(_DECODE_WATCHDOG_ENV, "").strip().lower() not in ("0", "off", "false", "no")
+
+
+def decoder_chunks(process, stall_seconds, label, queue_size=64, poll_seconds=1.0, clock=time.monotonic):
+    """Yield ffmpeg's stdout in chunks of up to ~2 MB until it ends.
+
+    A side thread reads the pipe, so the caller never blocks on ffmpeg
+    directly. Only time the side thread spends WAITING ON FFMPEG counts
+    towards the stall limit (not time the caller spends using a chunk, which
+    can hold the reader up through the bounded queue). If ffmpeg sends nothing
+    for `stall_seconds`, it is killed and DecoderStalled is raised. A clock
+    jump bigger than a few poll intervals (the PC slept) restarts the timer.
+    If the caller stops early or raises, ffmpeg is killed and the side thread
+    is released, so no ffmpeg is left running.
+    """
+    import queue
+
+    chunks = queue.Queue(maxsize=queue_size)
+    state = {"waiting_since": None, "error": None}
+    # Read 32 frames at a time: small enough that the stall timer restarts
+    # at least every 32 frames (a decoder slower than 0.5 frames/s would be
+    # needed to trip the 60 s limit), large enough that the read loop stays
+    # in C. Reading every pipe write separately (read1) made CPU mode ~1.6 s
+    # slower per 1080p episode: this thread then competed with the scene
+    # scorer for Python's interpreter lock ~34,000 times per episode.
+    read_some = process.stdout.read
+
+    def pump():
+        pending = bytearray()
+        try:
+            while True:
+                state["waiting_since"] = clock()
+                piece = read_some(_DECODER_WAKE_BYTES)
+                state["waiting_since"] = None
+                if not piece:
+                    break
+                pending += piece
+                if len(pending) >= _DECODER_READ_BYTES:
+                    chunks.put(bytes(pending))
+                    pending.clear()
+        except Exception as error:  # surfaced to the caller
+            state["error"] = error
+        finally:
+            state["waiting_since"] = None
+            if pending:
+                chunks.put(bytes(pending))
+            chunks.put(None)
+
+    reader = threading.Thread(target=pump, name=f"{label}-reader", daemon=True)
+    reader.start()
+    watch = stall_seconds is not None and stall_seconds > 0 and _decode_watchdog_enabled()
+    finished = False
+    last_tick = clock()
+    try:
+        while True:
+            try:
+                chunk = chunks.get(timeout=poll_seconds)
+            except queue.Empty:
+                now = clock()
+                if now - last_tick > poll_seconds * 5:
+                    # The machine slept (or this thread was starved): do not
+                    # count that gap as ffmpeg's.
+                    if state["waiting_since"] is not None:
+                        state["waiting_since"] = now
+                last_tick = now
+                waiting_since = state["waiting_since"]
+                if watch and waiting_since is not None and now - waiting_since > stall_seconds:
+                    emit({"type": "log", "message": f"{label}: no frames from ffmpeg for {stall_seconds:.0f} s; stopping it."})
+                    process.kill()
+                    reader.join(timeout=5)
+                    raise DecoderStalled(f"{label} stalled: ffmpeg produced no frames for {stall_seconds:.0f} s and was stopped.")
+                continue
+            last_tick = clock()
+            if chunk is None:
+                finished = True
+                break
+            yield chunk
+    finally:
+        if not finished:
+            # Caller stopped early, raised, or the watchdog fired: make sure
+            # ffmpeg is gone and the side thread is not stuck on a full queue.
+            try:
+                process.kill()
+            except OSError:
+                pass
+            deadline = time.monotonic() + 5
+            while reader.is_alive() and time.monotonic() < deadline:
+                try:
+                    chunks.get(timeout=0.2)
+                except queue.Empty:
+                    pass
+            reader.join(timeout=1)
+    if state["error"] is not None:
+        raise RuntimeError(f"Could not read ffmpeg output: {state['error']}")
+
+
 def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     import numpy as np
 
     decoder = cuvid_decoder(info.codec)
     estimated_frames = max(1, int(round(info.duration * info.fps)))
+    half_w, half_h = nvdec_halfway_size(info)
     command = [
         ffmpeg,
         "-hide_banner",
@@ -183,39 +464,38 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
         # scale_cuda must convert to nv12 on-GPU (`:format=nv12`): 10-bit HEVC
         # decodes to p010 CUDA frames, and hwdownload cannot emit nv12 from a
         # p010 surface ("Invalid output format nv12 for hwframe download").
+        # Two-step shrink: GPU to a whole-number fraction of the source, then
+        # the CPU path's own `scale` to 48x27 (see nvdec_halfway_size).
         "-vf",
-        f"scale_cuda={FRAME_W}:{FRAME_H}:format=nv12,hwdownload,format=nv12,format=rgb24",
+        f"scale_cuda={half_w}:{half_h}:interp_algo=bilinear:format=nv12,hwdownload,format=nv12,"
+        f"scale={FRAME_W}:{FRAME_H},format=rgb24",
         "-f",
-        "image2pipe",
+        "rawvideo",
         "-pix_fmt",
         "rgb24",
-        "-vcodec",
-        "rawvideo",
         "pipe:1",
     ]
 
     progress("decode", 2, f"Decoding analysis frames with {decoder}...", started_at)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process, stderr_tail = start_frame_decoder(command)
     if process.stdout is None:
         raise RuntimeError("Could not read ffmpeg output.")
 
     chunks = []
     total = 0
     last_emit = 0.0
-    while True:
-        chunk = process.stdout.read(FRAME_BYTES * 512)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        frames = total // FRAME_BYTES
-        now = time.perf_counter()
-        if now - last_emit >= 0.25:
-            last_emit = now
-            stage_percent = min(frames / estimated_frames, 1.0)
-            progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
+    with contextlib.closing(decoder_chunks(process, GPU_DECODE_STALL_SECONDS, "NVDEC decode")) as stream:
+        for chunk in stream:
+            chunks.append(chunk)
+            total += len(chunk)
+            frames = total // FRAME_BYTES
+            now = time.perf_counter()
+            if now - last_emit >= 0.25:
+                last_emit = now
+                stage_percent = min(frames / estimated_frames, 1.0)
+                progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
 
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    stderr = stderr_tail()
     status = process.wait()
     if status != 0:
         raise RuntimeError(f"ffmpeg NVDEC decode failed:\n{stderr.strip()}")
@@ -230,11 +510,11 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     return np.frombuffer(payload[:usable], dtype=np.uint8).reshape(frame_count, FRAME_H, FRAME_W, 3).copy()
 
 
-def decode_frames_cpu(ffmpeg, input_path, info, started_at):
-    import numpy as np
-
-    estimated_frames = max(1, int(round(info.duration * info.fps)))
-    command = [
+def cpu_decode_command(ffmpeg, input_path):
+    """Software decode + shrink to 48x27 RGB frames on stdout (CPU mode, and
+    the GPU modes' software fallback). Both CPU readers below use this exact
+    command, so they produce the same frames."""
+    return [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -251,28 +531,33 @@ def decode_frames_cpu(ffmpeg, input_path, info, started_at):
         "pipe:1",
     ]
 
+
+def decode_frames_cpu(ffmpeg, input_path, info, started_at):
+    import numpy as np
+
+    estimated_frames = max(1, int(round(info.duration * info.fps)))
+    command = cpu_decode_command(ffmpeg, input_path)
+
     progress("decode", 2, "Decoding analysis frames with CPU...", started_at)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process, stderr_tail = start_frame_decoder(command)
     if process.stdout is None:
         raise RuntimeError("Could not read ffmpeg output.")
 
     chunks = []
     total = 0
     last_emit = 0.0
-    while True:
-        chunk = process.stdout.read(FRAME_BYTES * 512)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        frames = total // FRAME_BYTES
-        now = time.perf_counter()
-        if now - last_emit >= 0.25:
-            last_emit = now
-            stage_percent = min(frames / estimated_frames, 1.0)
-            progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
+    with contextlib.closing(decoder_chunks(process, CPU_DECODE_STALL_SECONDS, "CPU decode")) as stream:
+        for chunk in stream:
+            chunks.append(chunk)
+            total += len(chunk)
+            frames = total // FRAME_BYTES
+            now = time.perf_counter()
+            if now - last_emit >= 0.25:
+                last_emit = now
+                stage_percent = min(frames / estimated_frames, 1.0)
+                progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
 
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    stderr = stderr_tail()
     status = process.wait()
     if status != 0:
         raise RuntimeError(f"ffmpeg CPU decode failed:\n{stderr.strip()}")
@@ -341,6 +626,86 @@ def scenedetect_cut_frames(frames, fps, cpu_threshold, min_clip_seconds, started
     progress("analyze", 94, "Finished PySceneDetect CPU scene analysis", started_at)
     # Detector may report cuts out of order across versions; keep them sorted
     # and unique so the downstream cut→scene boundary math behaves.
+    return sorted(set(cut_frames))
+
+
+# Dev-only A/B switch for CPU mode. Unset (the default) = score each frame
+# with PySceneDetect while ffmpeg is still decoding the rest of the episode
+# (scenedetect_cut_frames_streaming). "off" = the old order: decode the whole
+# episode first, then score (decode_frames_cpu + scenedetect_cut_frames).
+# Both feed the detector the same frames in the same order, so the cuts are
+# identical. Not wired into app config/Settings.
+_CPU_OVERLAP_ENV = "AMV_DEV_CPU_OVERLAP"
+
+
+def _cpu_overlap_enabled():
+    return os.environ.get(_CPU_OVERLAP_ENV, "").strip().lower() not in ("0", "off", "false", "no")
+
+
+def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, min_clip_seconds, started_at):
+    """CPU mode: run PySceneDetect on frames as ffmpeg delivers them.
+
+    Same ffmpeg command, same detector settings and the same frame order as
+    decode_frames_cpu + scenedetect_cut_frames, so the cuts are identical;
+    the ~1.6 s of scoring just happens while ffmpeg is still decoding instead
+    of after it. A reader thread drains ffmpeg's pipe so ffmpeg never waits
+    on the scoring. Returns sorted unique cut frame indices.
+    """
+    import numpy as np
+    from scenedetect import ContentDetector, FrameTimecode
+
+    fps = info.fps
+    min_scene_len = max(1, int(round(min_clip_seconds * fps)))
+    detector = ContentDetector(threshold=cpu_threshold, min_scene_len=min_scene_len)
+    estimated_frames = max(1, int(round(info.duration * fps)))
+
+    progress("decode", 2, "Decoding and analyzing frames with CPU...", started_at)
+    process, stderr_tail = start_frame_decoder(cpu_decode_command(ffmpeg, input_path))
+    if process.stdout is None:
+        raise RuntimeError("Could not read ffmpeg output.")
+
+    # decoder_chunks drains ffmpeg's pipe on a side thread into a bounded
+    # queue (64 items of ~2 MB, so a slow scorer cannot buffer a whole
+    # episode twice), stops ffmpeg if the caller raises, and stops it if it
+    # freezes.
+    cut_frames = []
+    index = 0
+    pending = b""
+    last_emit = 0.0
+    # closing(): if scoring raises, ffmpeg is stopped right away instead of
+    # whenever the generator gets garbage-collected.
+    with contextlib.closing(decoder_chunks(process, CPU_DECODE_STALL_SECONDS, "CPU decode")) as stream:
+        for chunk in stream:
+            data = pending + chunk if pending else chunk
+            whole = len(data) // FRAME_BYTES
+            if whole:
+                block = np.frombuffer(data, dtype=np.uint8, count=whole * FRAME_BYTES).reshape(
+                    whole, FRAME_H, FRAME_W, 3
+                ).copy()
+                for frame in block:
+                    # ContentDetector converts to HSV via cv2, which expects BGR.
+                    bgr = frame[:, :, ::-1]
+                    for cut in detector.process_frame(FrameTimecode(index, fps), bgr):
+                        cut_frames.append(int(cut))
+                    index += 1
+            pending = data[whole * FRAME_BYTES:]
+
+            now = time.perf_counter()
+            if now - last_emit >= 0.25:
+                last_emit = now
+                stage_percent = min(index / estimated_frames, 1.0)
+                progress("decode", 2 + stage_percent * 46, f"Decoded and analyzed {index:,}/{estimated_frames:,} frames", started_at)
+
+    stderr = stderr_tail()
+    status = process.wait()
+    if status != 0:
+        raise RuntimeError(f"ffmpeg CPU decode failed:\n{stderr.strip()}")
+    if index <= 0:
+        raise RuntimeError("No frames decoded.")
+
+    progress("decode", 48, f"Decoded {index:,} analysis frames", started_at)
+    progress("analyze", 50, "Running PySceneDetect ContentDetector (CPU)...", started_at)
+    progress("analyze", 94, "Finished PySceneDetect CPU scene analysis", started_at)
     return sorted(set(cut_frames))
 
 
@@ -595,7 +960,7 @@ def extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, b
     return scenes, cuts
 
 
-def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at):
+def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=None):
     if info.codec not in GPU_DECODABLE_CODECS:
         raise RuntimeError(f"Unsupported codec for RTX clip extraction: {info.codec!r}. Expected h264, hevc, or av1.")
     ffmpeg = require_tool("ffmpeg")
@@ -603,22 +968,33 @@ def extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, ove
 
     # Preload TransNetV2 on a background thread while NVDEC decodes : they use different GPU resources
     _preload: dict = {}
-    def _load_model():
-        try:
-            import torch
-            from transnetv2_pytorch import TransNetV2
-            device = torch.device("cuda")
-            m = TransNetV2(device=device)
-            m.eval()
-            _preload["model"] = m
-        except Exception as exc:
-            _preload["error"] = exc
-    model_thread = threading.Thread(target=_load_model, daemon=True)
-    model_thread.start()
+    model_thread = None
+    if model is not None:
+        _preload["model"] = model
+    else:
+        def _load_model():
+            try:
+                import torch
+                from transnetv2_pytorch import TransNetV2
+                device = torch.device("cuda")
+                m = TransNetV2(device=device)
+                m.eval()
+                _preload["model"] = m
+            except Exception as exc:
+                _preload["error"] = exc
+        model_thread = threading.Thread(target=_load_model, daemon=True)
+        model_thread.start()
 
-    frames = decode_frames_nvdec(ffmpeg, input_path, info, started_at)
+    try:
+        frames = decode_frames_nvdec(ffmpeg, input_path, info, started_at)
+    except RuntimeError as error:
+        # Software fallback: the same final `scale` step, so the model sees
+        # near-identical frames (cuts matched exactly on the test episodes).
+        emit({"type": "log", "message": f"NVDEC decode failed, using software decode -> TransNetV2 (GPU): {error}"})
+        frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
 
-    model_thread.join()
+    if model_thread is not None:
+        model_thread.join()
     if "error" in _preload:
         raise _preload["error"]
 
@@ -634,10 +1010,13 @@ def extract_cpu(input_path, info, cpu_threshold, min_clip_seconds, started_at):
     progress("probe", 1, f"{info.codec} at {info.fps:.3f} FPS, {info.duration:.1f}s", started_at)
 
     # Decode with our bundled ffmpeg (shared with the GPU software-decode path)
-    # for full codec coverage, then run PySceneDetect's content-aware detector
-    # over those frames on the CPU.
-    frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
-    cut_frames = scenedetect_cut_frames(frames, info.fps, cpu_threshold, min_clip_seconds, started_at)
+    # for full codec coverage, and run PySceneDetect's content-aware detector
+    # over those frames on the CPU while the decode is still running.
+    if _cpu_overlap_enabled():
+        cut_frames = scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, min_clip_seconds, started_at)
+    else:
+        frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
+        cut_frames = scenedetect_cut_frames(frames, info.fps, cpu_threshold, min_clip_seconds, started_at)
 
     progress("scenes", 96, "Building scene list...", started_at)
     # Map detector cut frames -> interior cut seconds and re-apply the
@@ -693,21 +1072,18 @@ def extract(input_file, mode, threshold, cpu_threshold, min_clip_seconds, batch_
                 emit({"type": "log", "message": f"Codec {info.codec!r} is not NVDEC-decodable; using software decode -> TransNetV2 (GPU)."})
                 return extract_gpu_software_decode(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
 
-            # Phase 1 parity switch: force the splittable ffmpeg-cuvid path
-            # (extract_gpu -> decode_frames_nvdec) even when nelux is importable.
-            # OFF by default -> nelux stays the GPU default and behavior is
-            # unchanged for real users. extract_gpu loads its own TransNetV2, so
-            # active_model is intentionally not threaded in here.
-            if _force_cuvid_detection(force_cuvid):
-                emit({"type": "log", "message": "Forcing cuvid detection path (decode_frames_nvdec); nelux bypassed."})
-                return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at)
+            # Default GPU route: ffmpeg NVDEC decode (decode_frames_nvdec), which
+            # returns the same frames every run. The old nelux route is kept
+            # only behind the dev switch AMV_DEV_GPU_DECODE=nelux for A/B runs
+            # (it repeated or garbled ~2% of H.264 frames, differently each run).
+            if _use_nelux_decode() and not _force_cuvid_detection(force_cuvid):
+                try:
+                    import nelux  # noqa: F401  (import-presence check before the native call)
+                    return extract_gpu_nelux_with_model(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, active_model)
+                except Exception as e:
+                    emit({"type": "log", "message": f"Nelux failed, falling back to ffmpeg NVDEC: {e}"})
 
-            try:
-                import nelux  # noqa: F401  (import-presence check before the native call)
-                return extract_gpu_nelux_with_model(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, active_model)
-            except Exception as e:
-                emit({"type": "log", "message": f"Nelux failed, falling back to legacy NVDEC: {e}"})
-                return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at)
+            return extract_gpu(input_path, info, threshold, min_clip_seconds, batch_frames, overlap, started_at, model=active_model)
         if mode == "cpu":
             return extract_cpu(input_path, info, cpu_threshold, min_clip_seconds, started_at)
         raise RuntimeError("Clip extraction mode must be cpu or gpu.")
@@ -885,8 +1261,25 @@ def server():
                 emit({"type": "error", "message": f"Unknown server command: {command}"})
         except Exception as e:
             emit({"type": "error", "message": f"Server command error: {e}"})
-            
+            if _cuda_context_broken(e):
+                # After a GPU fault this process can no longer use the GPU:
+                # measured, every later episode failed within ~1 s with the
+                # same error until the server was restarted. Exit, so the
+                # app's next extract (or a retry) starts a fresh process.
+                emit({"type": "log", "message": "Clip Server stopping: the GPU reported a fault and this process can no longer use it. The next episode starts a fresh process."})
+                return 1
+
     return 0
+
+
+def _cuda_context_broken(error):
+    """True for CUDA errors that break the whole process (illegal memory
+    access, cuBLAS/cuDNN internal errors, launch failures). Out-of-memory
+    errors are recoverable and do not count."""
+    text = str(error)
+    if "out of memory" in text.lower():
+        return False
+    return any(marker in text for marker in ("CUDA error", "CUBLAS_STATUS", "CUDNN_STATUS", "cudaError"))
 
 
 def main():

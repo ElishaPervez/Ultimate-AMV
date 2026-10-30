@@ -78,7 +78,8 @@ import type {
 import { ClipExportProgressModal } from "./ClipExportProgressModal";
 import type { ClipExportRow, ClipExportSession } from "./ClipExportProgressModal";
 import { ClipPreviewScroller } from "./ClipPreviewScroller";
-import { ClipPreviewTile, offsetMarginWindow } from "./ClipPreviewTile";
+import { ClipPreviewTile, offsetMarginWindow, sameTileProps } from "./ClipPreviewTile";
+import { gridPerfEnabled } from "../../dev/gridPerfSwitches";
 import { ClipRunProgressMessage, ClipRunStatus } from "./ClipRunStatus";
 import {
   beginClipRunProgress,
@@ -101,6 +102,13 @@ import { SceneViewerModal } from "./SceneViewerModal";
 void readClipAudioSettings;
 void writeClipAudioSettings;
 void formatPreciseClipTime;
+
+/* The grid keeps ~100 tiles mounted. Without React.memo every panel re-render
+ * (a visible-row change while scrolling, a selection click) re-rendered all of
+ * them; with it only tiles whose own props changed re-render. */
+const GridClipPreviewTile = gridPerfEnabled("memoTiles")
+  ? React.memo(ClipPreviewTile, sameTileProps)
+  : ClipPreviewTile;
 
 /** The export-bound / flag-off segment shape consumed by the Rust merge/export
  * commands (clip_preview_merge, clip_export_merged). */
@@ -2671,6 +2679,14 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
     });
   }
 
+  // Grid tiles call these refs, which always hold this render's handlers. A
+  // memoized tile that skipped a re-render therefore never acts on old state.
+  const tileClickRef = React.useRef(handleClipClick);
+  tileClickRef.current = handleClipClick;
+  const tileToggleRef = React.useRef<(clipId: string) => void>(() => undefined);
+  tileToggleRef.current = (clipId: string) =>
+    mergeMode ? toggleMergeOrder(clipId) : toggleClipSelection(clipId);
+
   function toggleMergeMode() {
     setMergeMode((value) => {
       if (value) {
@@ -3398,7 +3414,7 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                     sourceKey != null &&
                     (planPending || proxyExpected);
                   return (
-                  <ClipPreviewTile
+                  <GridClipPreviewTile
                     key={clip.id}
                     clip={clip}
                     mergeMode={mergeMode}
@@ -3419,10 +3435,10 @@ export function ClipExtractorPanel({ active }: { active: boolean }) {
                      * exceeds the decoder ceiling, and a fast fling grants no new mounts. */
                     mayMountVideo={featherweightActive && grantedClipIds.has(clip.id) && !proxyFailed}
                     justMerged={justMergedId === clip.id}
-                    onClick={(modifiers) => handleClipClick(clip, modifiers)}
-                    onToggleSelect={() =>
-                      mergeMode ? toggleMergeOrder(clip.id) : toggleClipSelection(clip.id)
-                    }
+                    /* Through refs, so a tile that skipped a re-render still
+                     * reaches this render's handlers and state. */
+                    onClick={(modifiers) => tileClickRef.current(clip, modifiers)}
+                    onToggleSelect={() => tileToggleRef.current(clip.id)}
                   />
                   );
                 })}

@@ -1,0 +1,148 @@
+<!doctype html>
+<!--
+  Stand-in for the Scene Splitter's default ("featherweight") preview grid, run in
+  Edge (the same Chromium engine as WebView2) by grid_bench.py.
+
+  It reproduces the parts that cost time in the real grid:
+  - one live <video> per mounted tile, all pointing at the same whole-episode
+    240p proxy, each seeking to its own scene start and looping that scene
+    (requestVideoFrameCallback, like useOffsetLoop.ts);
+  - a geometry-driven mount set: visible rows + 1 overscan row, at least 12
+    players and at most 35 (MAX_GRID_VIDEO_PLAYERS / _CEILING), new mounts held
+    back while the scroll moves faster than 50 px per frame.
+  It does NOT run React, the app's CSS, or Tauri's asset protocol, so absolute
+  numbers are a floor for the real app, not a copy of it.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: #111; color: #ddd; font: 12px sans-serif; }
+  #scroller { position: absolute; inset: 0; overflow-y: scroll; }
+  #grid { position: relative; }
+  .tile { position: absolute; width: 320px; height: 180px; background: #222; border-radius: 8px; overflow: hidden; }
+  .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile span { position: absolute; left: 6px; bottom: 4px; }
+</style>
+</head>
+<body>
+<div id="scroller"><div id="grid"></div></div>
+<script>
+const COLS = 4, TILE_W = 320, TILE_H = 180, GAP = 12, ROW_H = TILE_H + GAP;
+const MIN_PLAYERS = 12, MAX_PLAYERS = 35, FAST_PX_PER_FRAME = 50, OVERSCAN_ROWS = 1;
+
+window.runGrid = async function runGrid(config) {
+  const { src, scenes, fps, scrollPxPerSecond, durationMs, mode } = config;
+  const scroller = document.getElementById("scroller");
+  const grid = document.getElementById("grid");
+  const rows = Math.ceil(scenes.length / COLS);
+  grid.style.height = `${rows * ROW_H}px`;
+  const tiles = scenes.map((scene, index) => {
+    const el = document.createElement("div");
+    el.className = "tile";
+    el.style.left = `${(index % COLS) * (TILE_W + GAP) + GAP}px`;
+    el.style.top = `${Math.floor(index / COLS) * ROW_H + GAP}px`;
+    el.innerHTML = `<span>Scene ${index + 1}</span>`;
+    grid.appendChild(el);
+    return { el, scene, video: null, mountedAt: 0 };
+  });
+
+  const firstFrameMs = [];
+  let mountCount = 0;
+  let maxLive = 0;
+  let lastTop = scroller.scrollTop;
+  let fast = false;
+
+  function mount(tile) {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.preload = "metadata";
+    video.playsInline = true;
+    const [start, end] = tile.scene;
+    const margin = 1.5 / fps;
+    tile.mountedAt = performance.now();
+    let first = true;
+    const onFrame = (_now, meta) => {
+      if (!tile.video) return;
+      if (first) { first = false; firstFrameMs.push(performance.now() - tile.mountedAt); }
+      if (meta.mediaTime >= end - margin) video.currentTime = start + margin;
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.addEventListener("loadedmetadata", () => {
+      video.currentTime = start + margin;
+      video.play().catch(() => {});
+    }, { once: true });
+    video.requestVideoFrameCallback(onFrame);
+    video.src = src;
+    tile.el.prepend(video);
+    tile.video = video;
+    mountCount += 1;
+  }
+
+  function unmount(tile) {
+    const video = tile.video;
+    tile.video = null;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    video.remove();
+  }
+
+  function updateMounts() {
+    const top = scroller.scrollTop;
+    const height = scroller.clientHeight;
+    const firstRow = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN_ROWS);
+    const lastRow = Math.min(rows - 1, Math.floor((top + height) / ROW_H) + OVERSCAN_ROWS);
+    const visibleCount = (Math.floor((top + height) / ROW_H) - Math.floor(top / ROW_H) + 1) * COLS;
+    const cap = Math.min(MAX_PLAYERS, Math.max(MIN_PLAYERS, visibleCount));
+    const wanted = new Set();
+    for (let row = firstRow; row <= lastRow && wanted.size < cap; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        const index = row * COLS + col;
+        if (index < tiles.length && wanted.size < cap) wanted.add(index);
+      }
+    }
+    tiles.forEach((tile, index) => {
+      if (tile.video && !wanted.has(index)) unmount(tile);
+    });
+    if (!fast) {
+      for (const index of wanted) if (!tiles[index].video) mount(tiles[index]);
+    }
+    maxLive = Math.max(maxLive, tiles.filter((t) => t.video).length);
+  }
+
+  // Settle: mount the first screen and let it start playing.
+  updateMounts();
+  await new Promise((r) => setTimeout(r, 1500));
+  const settleFirstFrames = firstFrameMs.splice(0);
+
+  const intervals = [];
+  const maxTop = grid.scrollHeight - scroller.clientHeight;
+  let last = performance.now();
+  const startedAt = last;
+  let fastUntil = 0;
+  await new Promise((resolve) => {
+    function frame(now) {
+      intervals.push(now - last);
+      last = now;
+      const elapsed = now - startedAt;
+      // Continuous scroll. WebView2 animates each wheel notch over several
+      // frames, so a user wheeling through the grid (a 100 px notch every
+      // ~120 ms) looks like a steady ~800 px/s scroll, not 100 px jumps.
+      scroller.scrollTop = Math.min(maxTop, (elapsed / 1000) * scrollPxPerSecond);
+      const delta = Math.abs(scroller.scrollTop - lastTop);
+      lastTop = scroller.scrollTop;
+      if (delta > FAST_PX_PER_FRAME) fastUntil = now + 150;
+      fast = now < fastUntil;
+      updateMounts();
+      if (elapsed >= durationMs || scroller.scrollTop >= maxTop) resolve();
+      else requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  });
+  tiles.forEach((tile) => { if (tile.video) unmount(tile); });
+  return { intervals, firstFrameMs, settleFirstFrames, mountCount, maxLive, tiles: tiles.length };
+};
+</script>
+</body>
+</html>

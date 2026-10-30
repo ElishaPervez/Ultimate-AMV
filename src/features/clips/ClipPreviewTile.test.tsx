@@ -14,7 +14,7 @@
 import React from 'react'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { ClipPreviewTile } from './ClipPreviewTile'
+import { ClipPreviewTile, sameTileProps } from './ClipPreviewTile'
 import type { ClipPreviewItem } from '../../types/clip'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -420,5 +420,22 @@ describe('ClipPreviewTile — metadata rendering', () => {
     )
     expect(container.querySelector('.clip-source-badge')).not.toBeNull()
     expect(screen.getByText('Merged x3')).toBeInTheDocument()
+  })
+})
+
+describe('sameTileProps (grid tile re-render check)', () => {
+  it('treats fresh click handlers as the same props', () => {
+    const clip = makeReadyClip()
+    const a = { ...defaultProps, clip, onClick: vi.fn(), onToggleSelect: vi.fn() }
+    const b = { ...defaultProps, clip, onClick: vi.fn(), onToggleSelect: vi.fn() }
+    expect(sameTileProps(a, b)).toBe(true)
+  })
+
+  it('re-renders when the clip object, selection or mount permission changes', () => {
+    const clip = makeReadyClip()
+    const base = { ...defaultProps, clip }
+    expect(sameTileProps(base, { ...base, clip: { ...clip } })).toBe(false)
+    expect(sameTileProps(base, { ...base, selected: true })).toBe(false)
+    expect(sameTileProps(base, { ...base, mayMountVideo: true })).toBe(false)
   })
 })

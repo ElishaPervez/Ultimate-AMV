@@ -8,6 +8,7 @@ import {
   type MeasuredClipRow,
   selectClipPlaybackWindow,
 } from './clipPlaybackWindow';
+import { gridPerfEnabled } from '../../dev/gridPerfSwitches';
 
 const FAST_SCROLL_SETTLE_MS = 140;
 const RESIZE_SETTLE_MS = 120;
@@ -48,6 +49,24 @@ export type UseClipPlaybackWindowResult = {
   layoutGeneration: number;
   diagnostics: ClipPlaybackDiagnostics;
 };
+
+const QUIET_DIAGNOSTICS = gridPerfEnabled('quietDiagnostics');
+
+function areDiagnosticsEqual(a: ClipPlaybackDiagnostics, b: ClipPlaybackDiagnostics): boolean {
+  return (
+    a.viewportWidth === b.viewportWidth &&
+    a.viewportHeight === b.viewportHeight &&
+    a.firstVisibleRow === b.firstVisibleRow &&
+    a.lastVisibleRow === b.lastVisibleRow &&
+    a.visibleTileCount === b.visibleTileCount &&
+    a.grantedCount === b.grantedCount &&
+    a.hardCap === b.hardCap &&
+    a.fastScrolling === b.fastScrolling &&
+    a.layoutGeneration === b.layoutGeneration &&
+    a.visibleCountExceededHardCap === b.visibleCountExceededHardCap &&
+    a.anchorClipId === b.anchorClipId
+  );
+}
 
 function areSetsEqual(a: Set<string>, b: Set<string>): boolean {
   if (a === b) return true;
@@ -300,7 +319,7 @@ export function useClipPlaybackWindow({
       setFirstVisibleRow(selection.firstVisibleRow);
       setLastVisibleRow(selection.lastVisibleRow);
 
-      setDiagnostics({
+      const nextDiagnostics: ClipPlaybackDiagnostics = {
         viewportWidth: scrollerRect.width,
         viewportHeight: scrollerRect.height,
         firstVisibleRow: selection.firstVisibleRow,
@@ -312,7 +331,13 @@ export function useClipPlaybackWindow({
         layoutGeneration,
         visibleCountExceededHardCap: selection.visibleCountExceededHardCap,
         anchorClipId: resizeAnchorClipIdRef.current ?? savedHiddenAnchorClipIdRef.current,
-      });
+      };
+      // This runs on every scroll frame. A fresh object every time re-rendered
+      // the whole Scene Splitter panel each frame even when nothing changed, so
+      // keep the previous object when every field is the same.
+      setDiagnostics((prev) =>
+        QUIET_DIAGNOSTICS && areDiagnosticsEqual(prev, nextDiagnostics) ? prev : nextDiagnostics,
+      );
     }
   }, [panelActive, scrollerEl, lightweightEnabled, clipRows, marginPx, requestedCap, hardCap, layoutGeneration, clearSettleTimer]);
 

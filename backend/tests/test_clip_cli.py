@@ -471,6 +471,12 @@ class TestScenedetectCutFrames:
 
 
 class TestExtractCpu:
+    @pytest.fixture(autouse=True)
+    def _sequential_cpu_path(self, monkeypatch):
+        # These tests mock decode_frames_cpu, which only the old
+        # decode-then-score order calls (see TestStreamingCpuDetect).
+        monkeypatch.setenv("AMV_DEV_CPU_OVERLAP", "off")
+
     def _info(self, fps=24.0, duration=10.0, codec="h264"):
         from clip_cli import VideoInfo
         return VideoInfo(codec=codec, fps=fps, duration=duration)
@@ -539,6 +545,301 @@ class TestExtractCpu:
 
         assert cuts == []
         assert len(scenes) == 1
+
+
+# ---------------------------------------------------------------------------
+# scenedetect_cut_frames_streaming: CPU mode scoring while ffmpeg decodes
+# ---------------------------------------------------------------------------
+
+
+class _FakeDecodeProcess:
+    """Stands in for the ffmpeg Popen: stdout yields the given bytes in
+    uneven pieces (so frames straddle reads), stderr is empty."""
+
+    def __init__(self, payload, piece=10_000, returncode=0):
+        import io
+
+        class _Pieces(io.RawIOBase):
+            def __init__(self, data):
+                self._data = data
+                self._pos = 0
+
+            def read(self, n=-1):
+                if self._pos >= len(self._data):
+                    return b""
+                end = min(len(self._data), self._pos + min(piece, n if n and n > 0 else piece))
+                out = self._data[self._pos:end]
+                self._pos = end
+                return out
+
+        self.stdout = _Pieces(payload)
+        self.stderr = io.BytesIO(b"")
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
+class TestStreamingCpuDetect:
+    def _info(self, frames, fps=24.0):
+        from clip_cli import VideoInfo
+        return VideoInfo(codec="h264", fps=fps, duration=frames / fps)
+
+    def _frames(self, count=400, seed=3):
+        import numpy as np
+        from clip_cli import FRAME_W, FRAME_H
+
+        rng = np.random.default_rng(seed)
+        frames = np.zeros((count, FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        start = 0
+        while start < count:
+            length = int(rng.integers(5, 60))
+            base = rng.integers(0, 256, size=(FRAME_H, FRAME_W, 3))
+            for offset in range(min(length, count - start)):
+                noise = rng.integers(-6, 7, size=(FRAME_H, FRAME_W, 3))
+                frames[start + offset] = np.clip(base + noise, 0, 255)
+            start += length
+        return frames
+
+    def test_same_cuts_as_decode_then_score_real_scenedetect(self):
+        pytest.importorskip("scenedetect")
+        from clip_cli import scenedetect_cut_frames, scenedetect_cut_frames_streaming
+
+        frames = self._frames()
+        expected = scenedetect_cut_frames(frames, 24.0, 27.0, 0.35, 0.0)
+        assert expected, "synthetic frames should contain cuts"
+        payload = frames.tobytes() + b"\x01\x02"  # trailing partial frame is ignored
+        with patch("clip_cli.subprocess.Popen", return_value=_FakeDecodeProcess(payload)):
+            streamed = scenedetect_cut_frames_streaming(
+                "ffmpeg", Path("v.mp4"), self._info(len(frames)), 27.0, 0.35, 0.0
+            )
+        assert streamed == expected
+
+    def test_uses_the_same_ffmpeg_command_as_decode_frames_cpu(self):
+        import numpy as np
+        import clip_cli
+
+        frames = np.zeros((48, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect({24})
+        with ctx:
+            with patch("clip_cli.subprocess.Popen", return_value=_FakeDecodeProcess(frames.tobytes())) as popen:
+                cuts = clip_cli.scenedetect_cut_frames_streaming(
+                    "ffmpeg", Path("v.mp4"), self._info(48), 27.0, 0.35, 0.0
+                )
+        assert cuts == [24]
+        assert popen.call_args[0][0] == clip_cli.cpu_decode_command("ffmpeg", Path("v.mp4"))
+
+    def test_ffmpeg_failure_raises(self):
+        import numpy as np
+        import clip_cli
+
+        frames = np.zeros((10, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect(set())
+        with ctx:
+            with patch("clip_cli.subprocess.Popen", return_value=_FakeDecodeProcess(frames.tobytes(), returncode=1)):
+                with pytest.raises(RuntimeError, match="ffmpeg CPU decode failed"):
+                    clip_cli.scenedetect_cut_frames_streaming(
+                        "ffmpeg", Path("v.mp4"), self._info(10), 27.0, 0.35, 0.0
+                    )
+
+    def test_no_frames_raises(self):
+        import clip_cli
+
+        ctx, _det = _install_fake_scenedetect(set())
+        with ctx:
+            with patch("clip_cli.subprocess.Popen", return_value=_FakeDecodeProcess(b"")):
+                with pytest.raises(RuntimeError, match="No frames decoded"):
+                    clip_cli.scenedetect_cut_frames_streaming(
+                        "ffmpeg", Path("v.mp4"), self._info(10), 27.0, 0.35, 0.0
+                    )
+
+    def test_extract_cpu_uses_streaming_by_default(self, monkeypatch, tmp_path):
+        import numpy as np
+        import clip_cli
+
+        monkeypatch.delenv("AMV_DEV_CPU_OVERLAP", raising=False)
+        frames = np.zeros((240, 27, 48, 3), dtype=np.uint8)
+        ctx, _det = _install_fake_scenedetect({120})
+        with ctx:
+            with patch("clip_cli.require_tool", return_value="ffmpeg"):
+                with patch("clip_cli.decode_frames_cpu", side_effect=AssertionError("old path used")):
+                    with patch("clip_cli.subprocess.Popen", return_value=_FakeDecodeProcess(frames.tobytes())):
+                        scenes, cuts = clip_cli.extract_cpu(
+                            tmp_path / "v.mp4", self._info(240), 27.0, 0.35, 0.0
+                        )
+        assert cuts == pytest.approx([5.0])
+        assert len(scenes) == 2
+
+
+# ---------------------------------------------------------------------------
+# decoder_chunks: stall watchdog on the ffmpeg frame pipe
+# ---------------------------------------------------------------------------
+
+
+class _StallingProcess:
+    """Fake ffmpeg: delivers `before` (list of byte pieces), then optionally
+    sleeps `pause` seconds and delivers `after`, otherwise (stall=True) blocks
+    like a frozen decoder until kill() is called, which ends the pipe (EOF),
+    as a real kill does."""
+
+    def __init__(self, before=(), stall=True, pause=0.0, after=()):
+        import threading as _threading
+
+        self.killed = _threading.Event()
+        self.kill_calls = 0
+        pieces = list(before)
+        outer = self
+
+        class _Stdout:
+            def read(self, n):
+                if pieces:
+                    return pieces.pop(0)
+                if stall:
+                    outer.killed.wait(30)
+                    return b""
+                if pause and not getattr(self, "_paused", False):
+                    self._paused = True
+                    outer.killed.wait(pause)
+                    pieces.extend(after)
+                    if pieces and not outer.killed.is_set():
+                        return pieces.pop(0)
+                return b""
+
+        self.stdout = _Stdout()
+
+    def kill(self):
+        self.kill_calls += 1
+        self.killed.set()
+
+
+class TestDecoderWatchdog:
+    def _drain(self, gen):
+        return b"".join(gen)
+
+    def test_frozen_decoder_is_killed_and_raises(self):
+        import time
+        import clip_cli
+
+        proc = _StallingProcess(before=[b"x" * 100])
+        started = time.monotonic()
+        with patch("clip_cli.emit") as emitted:
+            with pytest.raises(clip_cli.DecoderStalled):
+                self._drain(clip_cli.decoder_chunks(proc, 0.3, "NVDEC decode", poll_seconds=0.05))
+        assert proc.kill_calls >= 1
+        assert time.monotonic() - started < 3
+        assert any("no frames" in str(c.args[0].get("message", "")) for c in emitted.call_args_list)
+
+    def test_stall_before_first_frame_also_caught(self):
+        import clip_cli
+
+        proc = _StallingProcess(before=[])
+        with patch("clip_cli.emit"):
+            with pytest.raises(clip_cli.DecoderStalled):
+                self._drain(clip_cli.decoder_chunks(proc, 0.2, "NVDEC decode", poll_seconds=0.05))
+        assert proc.killed.is_set()
+
+    def test_stalled_is_a_runtime_error_so_gpu_falls_back(self):
+        import clip_cli
+
+        assert issubclass(clip_cli.DecoderStalled, RuntimeError)
+
+    def test_slow_consumer_is_not_a_stall(self):
+        import time
+        import clip_cli
+
+        piece = b"y" * (clip_cli.FRAME_BYTES * 512)
+        proc = _StallingProcess(before=[piece, piece, piece], stall=False)
+        got = []
+        for chunk in clip_cli.decoder_chunks(proc, 0.2, "CPU decode", queue_size=1, poll_seconds=0.05):
+            got.append(chunk)
+            time.sleep(0.4)  # the consumer, not ffmpeg, is slow
+        assert b"".join(got) == piece * 3
+        assert proc.kill_calls == 0
+
+    def test_short_pause_under_the_limit_is_fine(self):
+        import clip_cli
+
+        proc = _StallingProcess(before=[b"a" * 10], stall=False, pause=0.2, after=[b"b" * 10])
+        data = self._drain(clip_cli.decoder_chunks(proc, 1.0, "CPU decode", poll_seconds=0.05))
+        assert data == b"a" * 10 + b"b" * 10
+        assert proc.kill_calls == 0
+
+    def test_dev_switch_off_disables_the_kill(self, monkeypatch):
+        import clip_cli
+
+        monkeypatch.setenv("AMV_DEV_DECODE_WATCHDOG", "off")
+        proc = _StallingProcess(before=[b"a" * 10], stall=False, pause=0.5, after=[b"b" * 10])
+        data = self._drain(clip_cli.decoder_chunks(proc, 0.1, "CPU decode", poll_seconds=0.05))
+        assert data == b"a" * 10 + b"b" * 10
+        assert proc.kill_calls == 0
+
+    def test_caller_stopping_early_kills_ffmpeg(self):
+        import contextlib
+        import clip_cli
+
+        proc = _StallingProcess(before=[b"z" * (clip_cli.FRAME_BYTES * 512)] * 3)
+        with pytest.raises(ValueError):
+            with contextlib.closing(clip_cli.decoder_chunks(proc, 30, "CPU decode", poll_seconds=0.05)) as stream:
+                for _chunk in stream:
+                    raise ValueError("scoring failed")
+        assert proc.kill_calls >= 1
+
+    def test_machine_sleep_gap_does_not_count(self):
+        import clip_cli
+
+        # A fake clock that jumps 1 hour once (the PC slept) while the reader
+        # is waiting; the watchdog must restart its timer, not kill ffmpeg.
+        times = {"t": 0.0, "jumped": False}
+
+        def clock():
+            return times["t"]
+
+        proc = _StallingProcess(before=[b"a" * 10], stall=False, pause=0.8, after=[b"b" * 10])
+        import threading as _threading
+
+        def advance():
+            import time as _time
+            for _ in range(30):
+                _time.sleep(0.01)
+                times["t"] += 0.01
+            times["t"] += 3600.0
+            for _ in range(100):
+                _time.sleep(0.01)
+                times["t"] += 0.01
+
+        ticker = _threading.Thread(target=advance, daemon=True)
+        ticker.start()
+        data = self._drain(clip_cli.decoder_chunks(proc, 1.0, "CPU decode", poll_seconds=0.05, clock=clock))
+        ticker.join()
+        assert data == b"a" * 10 + b"b" * 10
+        assert proc.kill_calls == 0
+
+
+class TestGpuFallsBackWhenNvdecStalls:
+    def test_stall_falls_back_to_software_decode(self, tmp_path):
+        import numpy as np
+        import clip_cli
+        from clip_cli import VideoInfo
+
+        info = VideoInfo(codec="h264", fps=24.0, duration=10.0, width=1920, height=1080)
+        frames = np.zeros((240, 27, 48, 3), dtype=np.uint8)
+        scores = np.zeros(240, dtype=np.float32)
+        logs = []
+        with patch("clip_cli.require_tool", return_value="ffmpeg"), \
+                patch("clip_cli.decode_frames_nvdec", side_effect=clip_cli.DecoderStalled("NVDEC decode stalled")), \
+                patch("clip_cli.decode_frames_cpu", return_value=frames) as cpu, \
+                patch("clip_cli.transnet_scores", return_value=(scores, [])), \
+                patch("clip_cli.emit", side_effect=lambda p: logs.append(p)):
+            scenes, cuts = clip_cli.extract_gpu(tmp_path / "v.mp4", info, 0.5, 0.35, 100, 50, 0.0, model=object())
+        assert cpu.called
+        assert cuts == []
+        assert any("software decode" in str(p.get("message", "")) and "stalled" in str(p.get("message", "")) for p in logs)
 
 
 # ---------------------------------------------------------------------------
@@ -704,3 +1005,47 @@ class TestServer:
         error_payloads = [p for p in emitted if p.get("type") == "error"]
         assert len(error_payloads) >= 1
         assert "frobnicate" in error_payloads[0]["message"]
+
+    def _run_server_with_extract_error(self, message):
+        import io
+        from clip_cli import server
+
+        extract = json.dumps({"command": "extract", "input_file": "v.mp4", "mode": "gpu"}) + "\n"
+        fake_stdin = io.StringIO(extract + extract + json.dumps({"command": "quit"}) + "\n")
+        torch_mock = MagicMock()
+        torch_mock.cuda.is_available.return_value = True
+        torch_mock.cuda.get_device_name.return_value = "RTX Test"
+        emitted = []
+        with (
+            patch.dict("sys.modules", {
+                "torch": torch_mock,
+                "nelux": MagicMock(),
+                "transnetv2_pytorch": MagicMock(),
+            }),
+            patch("sys.stdin", fake_stdin),
+            patch("clip_cli.emit", side_effect=lambda p: emitted.append(p)),
+            patch("clip_cli.extract", side_effect=RuntimeError(message)) as extract_mock,
+        ):
+            result = server()
+        return result, emitted, extract_mock.call_count
+
+    def test_gpu_fault_stops_the_server_so_the_next_episode_gets_a_fresh_process(self):
+        result, emitted, calls = self._run_server_with_extract_error(
+            "CUDA error: an illegal memory access was encountered"
+        )
+        assert result == 1
+        assert calls == 1  # the second episode is NOT attempted in the broken process
+        assert [p["type"] for p in emitted if p.get("type") == "error"] == ["error"]
+
+    def test_cublas_fault_also_stops_the_server(self):
+        result, _emitted, calls = self._run_server_with_extract_error(
+            "CUDA error: CUBLAS_STATUS_INTERNAL_ERROR when calling `cublasSgemm(...)`"
+        )
+        assert result == 1
+        assert calls == 1
+
+    def test_out_of_memory_and_ordinary_errors_keep_the_server(self):
+        for message in ("CUDA out of memory. Tried to allocate 2.00 GiB", "ffmpeg NVDEC decode failed: bad file"):
+            result, _emitted, calls = self._run_server_with_extract_error(message)
+            assert result == 0
+            assert calls == 2
