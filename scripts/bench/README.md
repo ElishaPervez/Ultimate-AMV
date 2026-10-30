@@ -93,6 +93,10 @@ and GPU mode on the HEVC file were identical run to run. So for an H.264 GPU
 change, "identical" can only be judged against the run-to-run spread, or after
 the cause (most likely the hardware decode path, since inference on the HEVC
 file is repeatable) is fixed.
+Fixed by commit acce3e9 (worker 3): the cause was the nelux hardware reader
+returning a repeated or garbled frame for ~2% of H.264 frames. GPU detection
+now decodes with ffmpeg NVDEC and was identical over 3 runs on all three files;
+`AMV_DEV_GPU_DECODE=nelux` brings the old reader back for comparison.
 
 Previews (`preview.*`):
 - `proxy_build.nvenc|x264` : the whole-episode 240p proxy the default grid
