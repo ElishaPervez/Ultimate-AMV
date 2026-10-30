@@ -132,6 +132,22 @@ function useWebpThumbnail(src: string | undefined) {
   return thumbnail;
 }
 
+type ClipPreviewTileProps = React.ComponentProps<typeof ClipPreviewTile>;
+
+/* Tile props compared for re-rendering (the grid wraps the tile in React.memo
+ * with this, see ClipExtractorPanel). The two click handlers are left out on
+ * purpose: the panel creates them fresh on every render, but they only forward
+ * to the panel's latest handlers (through refs), so an older copy behaves the
+ * same as a new one. Every other prop is compared by identity. */
+export function sameTileProps(a: ClipPreviewTileProps, b: ClipPreviewTileProps): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof ClipPreviewTileProps>;
+  for (const key of keys) {
+    if (key === "onClick" || key === "onToggleSelect") continue;
+    if (!Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
 export function ClipPreviewTile({
   clip,
   selected,
