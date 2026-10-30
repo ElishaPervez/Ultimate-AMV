@@ -1005,3 +1005,47 @@ class TestServer:
         error_payloads = [p for p in emitted if p.get("type") == "error"]
         assert len(error_payloads) >= 1
         assert "frobnicate" in error_payloads[0]["message"]
+
+    def _run_server_with_extract_error(self, message):
+        import io
+        from clip_cli import server
+
+        extract = json.dumps({"command": "extract", "input_file": "v.mp4", "mode": "gpu"}) + "\n"
+        fake_stdin = io.StringIO(extract + extract + json.dumps({"command": "quit"}) + "\n")
+        torch_mock = MagicMock()
+        torch_mock.cuda.is_available.return_value = True
+        torch_mock.cuda.get_device_name.return_value = "RTX Test"
+        emitted = []
+        with (
+            patch.dict("sys.modules", {
+                "torch": torch_mock,
+                "nelux": MagicMock(),
+                "transnetv2_pytorch": MagicMock(),
+            }),
+            patch("sys.stdin", fake_stdin),
+            patch("clip_cli.emit", side_effect=lambda p: emitted.append(p)),
+            patch("clip_cli.extract", side_effect=RuntimeError(message)) as extract_mock,
+        ):
+            result = server()
+        return result, emitted, extract_mock.call_count
+
+    def test_gpu_fault_stops_the_server_so_the_next_episode_gets_a_fresh_process(self):
+        result, emitted, calls = self._run_server_with_extract_error(
+            "CUDA error: an illegal memory access was encountered"
+        )
+        assert result == 1
+        assert calls == 1  # the second episode is NOT attempted in the broken process
+        assert [p["type"] for p in emitted if p.get("type") == "error"] == ["error"]
+
+    def test_cublas_fault_also_stops_the_server(self):
+        result, _emitted, calls = self._run_server_with_extract_error(
+            "CUDA error: CUBLAS_STATUS_INTERNAL_ERROR when calling `cublasSgemm(...)`"
+        )
+        assert result == 1
+        assert calls == 1
+
+    def test_out_of_memory_and_ordinary_errors_keep_the_server(self):
+        for message in ("CUDA out of memory. Tried to allocate 2.00 GiB", "ffmpeg NVDEC decode failed: bad file"):
+            result, _emitted, calls = self._run_server_with_extract_error(message)
+            assert result == 0
+            assert calls == 2

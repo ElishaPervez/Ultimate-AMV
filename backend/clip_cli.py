@@ -1261,8 +1261,25 @@ def server():
                 emit({"type": "error", "message": f"Unknown server command: {command}"})
         except Exception as e:
             emit({"type": "error", "message": f"Server command error: {e}"})
+            if _cuda_context_broken(e):
+                # After a GPU fault this process can no longer use the GPU:
+                # measured, every later episode failed within ~1 s with the
+                # same error until the server was restarted. Exit, so the
+                # app's next extract (or a retry) starts a fresh process.
+                emit({"type": "log", "message": "Clip Server stopping: the GPU reported a fault and this process can no longer use it. The next episode starts a fresh process."})
+                return 1
 
     return 0
+
+
+def _cuda_context_broken(error):
+    """True for CUDA errors that break the whole process (illegal memory
+    access, cuBLAS/cuDNN internal errors, launch failures). Out-of-memory
+    errors are recoverable and do not count."""
+    text = str(error)
+    if "out of memory" in text.lower():
+        return False
+    return any(marker in text for marker in ("CUDA error", "CUBLAS_STATUS", "CUDNN_STATUS", "cudaError"))
 
 
 def main():
