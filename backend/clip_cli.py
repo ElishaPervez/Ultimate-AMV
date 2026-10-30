@@ -199,6 +199,40 @@ def nvdec_halfway_size(info):
     return half_w, half_h
 
 
+def start_frame_decoder(command):
+    """Start an ffmpeg frame decode and drain its stderr on a side thread.
+
+    Returns (process, stderr_tail) where stderr_tail() joins the drain and
+    returns the last 16 KB of ffmpeg's messages. Draining matters: a damaged
+    episode makes ffmpeg print thousands of decode-error lines, and if nobody
+    reads them the stderr pipe fills, ffmpeg stops, and the frame read waits
+    forever (measured: hung until killed). stdin is closed so ffmpeg never
+    reads the caller's stdin (the server's command pipe).
+    """
+    process = subprocess.Popen(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    tail = bytearray()
+
+    def drain():
+        stream = process.stderr
+        if stream is None:
+            return
+        for line in iter(lambda: stream.readline(), b""):
+            tail.extend(line)
+            if len(tail) > 16 * 1024:
+                del tail[: len(tail) - 16 * 1024]
+
+    drainer = threading.Thread(target=drain, name="ffmpeg-stderr", daemon=True)
+    drainer.start()
+
+    def stderr_tail():
+        drainer.join()
+        return bytes(tail).decode("utf-8", errors="replace")
+
+    return process, stderr_tail
+
+
 def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     import numpy as np
 
@@ -235,7 +269,7 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     ]
 
     progress("decode", 2, f"Decoding analysis frames with {decoder}...", started_at)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process, stderr_tail = start_frame_decoder(command)
     if process.stdout is None:
         raise RuntimeError("Could not read ffmpeg output.")
 
@@ -255,7 +289,7 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
             stage_percent = min(frames / estimated_frames, 1.0)
             progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
 
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    stderr = stderr_tail()
     status = process.wait()
     if status != 0:
         raise RuntimeError(f"ffmpeg NVDEC decode failed:\n{stderr.strip()}")
@@ -299,7 +333,7 @@ def decode_frames_cpu(ffmpeg, input_path, info, started_at):
     command = cpu_decode_command(ffmpeg, input_path)
 
     progress("decode", 2, "Decoding analysis frames with CPU...", started_at)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process, stderr_tail = start_frame_decoder(command)
     if process.stdout is None:
         raise RuntimeError("Could not read ffmpeg output.")
 
@@ -319,7 +353,7 @@ def decode_frames_cpu(ffmpeg, input_path, info, started_at):
             stage_percent = min(frames / estimated_frames, 1.0)
             progress("decode", 2 + stage_percent * 46, f"Decoded {frames:,}/{estimated_frames:,} analysis frames", started_at)
 
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    stderr = stderr_tail()
     status = process.wait()
     if status != 0:
         raise RuntimeError(f"ffmpeg CPU decode failed:\n{stderr.strip()}")
@@ -424,7 +458,7 @@ def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, mi
     estimated_frames = max(1, int(round(info.duration * fps)))
 
     progress("decode", 2, "Decoding and analyzing frames with CPU...", started_at)
-    process = subprocess.Popen(cpu_decode_command(ffmpeg, input_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process, stderr_tail = start_frame_decoder(cpu_decode_command(ffmpeg, input_path))
     if process.stdout is None:
         raise RuntimeError("Could not read ffmpeg output.")
 
@@ -486,7 +520,7 @@ def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, mi
         raise
     reader.join()
 
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    stderr = stderr_tail()
     status = process.wait()
     if reader_errors:
         raise RuntimeError(f"Could not read ffmpeg output: {reader_errors[0]}")
