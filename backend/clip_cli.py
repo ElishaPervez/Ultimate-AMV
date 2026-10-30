@@ -337,6 +337,7 @@ CPU_DECODE_STALL_SECONDS = 180.0
 # Dev-only: "off" disables the watchdog (reads wait forever, as before).
 _DECODE_WATCHDOG_ENV = "AMV_DEV_DECODE_WATCHDOG"
 _DECODER_READ_BYTES = FRAME_BYTES * 512
+_DECODER_WAKE_BYTES = FRAME_BYTES * 32
 
 
 class DecoderStalled(RuntimeError):
@@ -363,16 +364,20 @@ def decoder_chunks(process, stall_seconds, label, queue_size=64, poll_seconds=1.
 
     chunks = queue.Queue(maxsize=queue_size)
     state = {"waiting_since": None, "error": None}
-    # read1 returns as soon as ffmpeg has written anything (one pipe read),
-    # so the stall timer sees every byte, not just every 2 MB.
-    read_some = getattr(process.stdout, "read1", None) or process.stdout.read
+    # Read 32 frames at a time: small enough that the stall timer restarts
+    # at least every 32 frames (a decoder slower than 0.5 frames/s would be
+    # needed to trip the 60 s limit), large enough that the read loop stays
+    # in C. Reading every pipe write separately (read1) made CPU mode ~1.6 s
+    # slower per 1080p episode: this thread then competed with the scene
+    # scorer for Python's interpreter lock ~34,000 times per episode.
+    read_some = process.stdout.read
 
     def pump():
         pending = bytearray()
         try:
             while True:
                 state["waiting_since"] = clock()
-                piece = read_some(_DECODER_READ_BYTES)
+                piece = read_some(_DECODER_WAKE_BYTES)
                 state["waiting_since"] = None
                 if not piece:
                     break

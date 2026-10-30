@@ -697,7 +697,7 @@ class _StallingProcess:
         outer = self
 
         class _Stdout:
-            def read1(self, n):
+            def read(self, n):
                 if pieces:
                     return pieces.pop(0)
                 if stall:
