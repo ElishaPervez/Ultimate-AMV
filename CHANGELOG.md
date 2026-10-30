@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] : 2026-10-30
+
+### Changed
+- Merged exports are now named with the next free number, like single exports (for example 5.mp4), instead of joining the source clip numbers into names like "905+906+907+908".
+- Lossless merges are about twice as fast, because each clip is now cut from the source once instead of twice.
+- Smart cut is much faster on clips where it used to quietly re-encode the whole clip. It now re-encodes only the first and last few frames and copies the rest untouched.
+- The export menu and README now describe smart cut as re-encoding only the first and last few frames and copying the rest untouched.
+
+### Fixed
+- Fixed short silent gaps and sound slowly drifting out of sync at the joins of merged exports, in re-encode, lossless and smart cut modes.
+- Fixed smart cut exports not ending on the last frame you picked. They now end on exactly that frame.
+- Fixed smart cut of MKV sources exporting the wrong footage or running very slowly.
+- Fixed smart cut producing corrupted frames on H.264 sources whose keyframes depend on earlier frames (open GOP). When the copied part cannot start cleanly, the whole clip is re-encoded instead.
+- Fixed smart cut dropping a frame from phone recordings and other sources with a coarse 1/600 s clock. Every frame is now kept.
+- Fixed smart cut MP4 merges coming out the wrong length.
+- Fixed a frame flashing for 1 ms or showing twice where the re-encoded opening of a smart cut meets the copied part.
+- Fixed re-encoded exports, merges and the merged preview stopping a frame early or late. They now stop on the exact last frame of the clip, the same frame smart cut ends on.
+- Fixed merges of variable frame rate sources dropping frames when exported as MKV. MP4 exports of variable frame rate sources are still converted to a constant frame rate and can still drop frames.
+- Fixed a cancelled or failed export leaving a half-written numbered file behind.
+
 ## [0.16.0] : 2026-10-17
 
 ### Added
@@ -357,6 +377,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-rendered after a filter change; they now cross-fade
   cleanly.
 
+[0.17.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.17.0
 [0.16.0]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.16.0
 [0.15.2]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.2
 [0.15.1]: https://github.com/ElishaPervez/Ultimate-AMV/releases/tag/v0.15.1
