@@ -401,6 +401,27 @@ def probe_json(env, path, entries):
     return json.loads(out or "{}")
 
 
+COPYABLE_AAC_PROFILES = ("LC", "HE-AAC", "HE-AACv2")
+
+
+def proxy_audio_args(env, source, legacy=None):
+    """Mirror of clips.rs proxy_audio_args: copy a mono/stereo AAC LC/HE first audio track,
+    otherwise encode 96k stereo Opus. AMV_DEV_PROXY_AUDIO=legacy (the same dev switch the
+    debug app reads) restores the old plain AAC re-encode, for A/B runs."""
+    if legacy is None:
+        legacy = os.environ.get("AMV_DEV_PROXY_AUDIO", "").lower() == "legacy"
+    if legacy:
+        return ["-c:a", "aac", "-b:a", "96k", "-ac", "2"]
+    out = subprocess.run([env.ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                          "stream=codec_name,profile,channels", "-of", "json", str(source)],
+                         capture_output=True, text=True, timeout=120).stdout
+    first = next(iter(json.loads(out or "{}").get("streams", [])), None)
+    if first and first.get("codec_name") == "aac" and first.get("profile") in COPYABLE_AAC_PROFILES \
+            and first.get("channels") in (1, 2):
+        return ["-c:a", "copy"]
+    return ["-c:a", "libopus", "-b:a", "96k", "-ac", "2"]
+
+
 def proxy_args(env, source, output, encoder, height=240):
     """Mirror of clips.rs run_source_proxy_job (untagged source -> bt709 setparams)."""
     setparams = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
@@ -418,8 +439,9 @@ def proxy_args(env, source, output, encoder, height=240):
         args += [f"scale=-2:'min({height},ih)',{setparams}",
                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-g", "12", "-keyint_min", "12",
                  "-sc_threshold", "0", "-bf", "0", "-pix_fmt", "yuv420p"]
-    args += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
-             "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-movflags", "+faststart", str(output)]
+    args += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
+    args += proxy_audio_args(env, source)
+    args += ["-movflags", "+faststart", str(output)]
     return args
 
 

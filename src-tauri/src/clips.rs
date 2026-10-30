@@ -5420,8 +5420,8 @@ fn lowercase_extension(path: &Path) -> Option<String> {
 }
 
 // Probe a source once and decide direct-vs-proxy. FRIENDLY (direct) requires
-// ALL clauses; any failure routes to the always-in-scope, always-H.264/AAC
-// proxy. The proxy itself never needs this plan — it is friendly by
+// ALL clauses; any failure routes to the always-in-scope, always-H.264 proxy
+// (AAC or Opus sound). The proxy itself never needs this plan — it is friendly by
 // construction.
 #[tauri::command]
 pub(crate) async fn clip_playback_plan(
@@ -5536,7 +5536,7 @@ fn compute_playback_plan(
 // scope source. Whole-file (NO -ss) so scene timecodes map 1:1 onto the proxy
 // timeline; capped at the chosen preview height (the Settings "Preview quality"
 // dropdown — default 240p, never upscaled), short fixed GOP + no B-frames so
-// currentTime seeks land near a keyframe; yuv420p + AAC + faststart mp4 so it is
+// currentTime seeks land near a keyframe; yuv420p + AAC/Opus + faststart mp4 so it is
 // friendly by construction and always lives under $APPDATA (in asset scope).
 // Mirrors generate_scene_clip: NVENC fast path with a libx264 fallback (CPU/GPU
 // parity), content-fingerprint cache key (which folds in the height so distinct
@@ -5623,7 +5623,8 @@ fn generate_source_proxy(
     // Carry the source's color metadata onto the proxy so offset playback looks
     // identical to the original (defaults to BT.709 limited when untagged).
     // ffprobe is optional — without it we still encode with the BT.709 default.
-    let color = if ensure_tool(&ffprobe).is_ok() {
+    let ffprobe_ok = ensure_tool(&ffprobe).is_ok();
+    let color = if ffprobe_ok {
         probe_color_metadata(&ffprobe, &input)
     } else {
         ColorMetadata::default()
@@ -5664,6 +5665,20 @@ fn generate_source_proxy(
 
     let duration = probe_duration(&ffprobe, &input).unwrap_or(0.0);
 
+    // Sound decision for the proxy: copy a playable AAC track, else Opus.
+    // Without ffprobe we cannot tell, so we encode. Old cached proxies (AAC
+    // sound) stay valid; the cache key is unchanged on purpose.
+    let first_audio = if ffprobe_ok {
+        probe_first_audio_stream(&ffprobe, &input)
+    } else {
+        None
+    };
+    let audio_args = proxy_audio_args(first_audio.as_ref(), legacy_proxy_audio_requested());
+    // Copy or Opus can fail where plain AAC works (a track the MP4 muxer
+    // rejects, an ffmpeg build without Opus), so a failure retries with it.
+    let plain_aac_args = plain_aac_proxy_audio_args();
+    let audio_not_plain_aac = audio_args != plain_aac_args;
+
     // Atomic write: encode to a per-process tmp file, then rename into place so
     // a concurrent reader never sees a half-written proxy.
     let tmp_output = cache_dir.join(format!("{proxy_key}.{}.tmp.mp4", std::process::id()));
@@ -5671,25 +5686,29 @@ fn generate_source_proxy(
 
     let primary = run_source_proxy_job(
         &window, &ffmpeg, &input, &tmp_output, duration, &source_path, &request_id, use_nvenc, &color, h,
+        &audio_args,
     );
 
     if let Err(error) = primary {
         // NVENC can refuse exotic sources where libx264 still succeeds; mirror
-        // generate_scene_clip's fallback. A user cancel (PID kill) must NOT be
-        // retried — it surfaces as a cancellation, not an encoder failure.
+        // generate_scene_clip's fallback. A copied or Opus sound track that
+        // fails is also retried, with plain AAC sound. A user
+        // cancel (PID kill) must NOT be retried: it surfaces as a
+        // cancellation, not an encoder failure.
         if error.contains("cancelled") {
             let _ = fs::remove_file(&tmp_output);
             return Err(error);
         }
-        if use_nvenc {
+        if use_nvenc || audio_not_plain_aac {
             log_warn(
                 "clip.source_proxy.fallback",
-                "NVENC proxy build failed; retrying with libx264",
-                json!({ "error": &error }),
+                "Proxy build failed; retrying with libx264 and plain AAC sound",
+                json!({ "error": &error, "nvenc": use_nvenc, "audioArgs": &audio_args }),
             );
             let _ = fs::remove_file(&tmp_output);
             run_source_proxy_job(
                 &window, &ffmpeg, &input, &tmp_output, duration, &source_path, &request_id, false, &color, h,
+                &plain_aac_args,
             )?;
         } else {
             let _ = fs::remove_file(&tmp_output);
@@ -5703,6 +5722,180 @@ fn generate_source_proxy(
     Ok(output.to_string_lossy().to_string())
 }
 
+// What the preview proxy needs to know about the source's FIRST audio track
+// (the one `-map 0:a:0?` picks) to decide whether its sound can be copied.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ProxyAudioStream {
+    codec: String,
+    profile: Option<String>,
+    channels: Option<u32>,
+}
+
+// Probe the first audio track. None = no audio track, or ffprobe failed; both
+// lead to the re-encode branch, which is also harmless for silent sources.
+fn probe_first_audio_stream(ffprobe: &Path, input: &Path) -> Option<ProxyAudioStream> {
+    let output = cmd(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,profile,channels",
+            "-of",
+            "json",
+        ])
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let stream = parsed.get("streams")?.as_array()?.first()?.clone();
+    Some(ProxyAudioStream {
+        codec: stream.get("codec_name")?.as_str()?.to_ascii_lowercase(),
+        profile: stream
+            .get("profile")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        channels: stream
+            .get("channels")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v as u32),
+    })
+}
+
+// AAC profiles WebView2 plays from an MP4 (plain AAC and the HE variants).
+// Main / LTP / SSR are rare and not reliably decoded, so they get re-encoded.
+const PROXY_COPYABLE_AAC_PROFILES: &[&str] = &["LC", "HE-AAC", "HE-AACv2"];
+
+// True when the first audio track can go into the proxy untouched: AAC of a
+// profile the webview plays, mono or stereo (multichannel is re-encoded to
+// stereo as before, so the preview never depends on the webview's downmix).
+fn proxy_audio_copyable(stream: &ProxyAudioStream) -> bool {
+    stream.codec == "aac"
+        && stream
+            .profile
+            .as_deref()
+            .map(|profile| PROXY_COPYABLE_AAC_PROFILES.contains(&profile))
+            .unwrap_or(false)
+        && matches!(stream.channels, Some(1) | Some(2))
+}
+
+// DEV-only A/B switch: AMV_DEV_PROXY_AUDIO=legacy restores the old full-quality
+// AAC re-encode for every source. Compiled out of release builds.
+fn legacy_proxy_audio_requested() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("AMV_DEV_PROXY_AUDIO")
+            .map(|value| value.eq_ignore_ascii_case("legacy"))
+            .unwrap_or(false)
+}
+
+// Sound arguments for the preview proxy (both encoder branches use the same
+// ones, CPU/GPU parity). The proxy's sound is heard in the scene viewer, so it
+// is kept. ffmpeg's default AAC encoder needed ~43 s per 24-minute episode and
+// made the sound, not the picture, the slow part of the build. Now:
+// - an AAC track the webview plays is copied untouched (no time, no loss);
+// - anything else (FLAC, Opus, AC3, multichannel...) becomes 96k stereo Opus,
+//   ~8 s per episode, which WebView2 plays from an MP4. ffmpeg's "fast" AAC
+//   coder was tried and rejected: it ignores the bitrate (~15 kbps) and audibly
+//   dulls the treble.
+// `legacy` (dev A/B switch) and the failure retry use plain AAC, which every
+// ffmpeg build can write.
+fn proxy_audio_args(first_audio: Option<&ProxyAudioStream>, legacy: bool) -> Vec<String> {
+    if legacy {
+        return plain_aac_proxy_audio_args();
+    }
+    if first_audio.map(proxy_audio_copyable).unwrap_or(false) {
+        return vec!["-c:a".to_string(), "copy".to_string()];
+    }
+    vec![
+        "-c:a".to_string(),
+        "libopus".to_string(),
+        "-b:a".to_string(),
+        "96k".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+    ]
+}
+
+// The original proxy sound settings: 96k stereo AAC with ffmpeg's built-in
+// encoder. Slow, but available in every ffmpeg build.
+fn plain_aac_proxy_audio_args() -> Vec<String> {
+    vec![
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        "96k".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod proxy_audio_tests {
+    use super::*;
+
+    fn stream(codec: &str, profile: Option<&str>, channels: Option<u32>) -> ProxyAudioStream {
+        ProxyAudioStream {
+            codec: codec.to_string(),
+            profile: profile.map(str::to_string),
+            channels,
+        }
+    }
+
+    #[test]
+    fn stereo_and_mono_aac_lc_and_he_are_copied() {
+        for profile in ["LC", "HE-AAC", "HE-AACv2"] {
+            for channels in [1, 2] {
+                let s = stream("aac", Some(profile), Some(channels));
+                assert_eq!(proxy_audio_args(Some(&s), false), vec!["-c:a", "copy"]);
+            }
+        }
+    }
+
+    #[test]
+    fn other_sound_is_encoded_to_stereo_opus() {
+        let fast = vec!["-c:a", "libopus", "-b:a", "96k", "-ac", "2"];
+        let cases = [
+            stream("flac", None, Some(2)),
+            stream("opus", None, Some(2)),
+            stream("ac3", None, Some(6)),
+            stream("eac3", None, Some(6)),
+            stream("aac", Some("LC"), Some(6)),
+            stream("aac", Some("Main"), Some(2)),
+            stream("aac", None, Some(2)),
+            stream("aac", Some("LC"), None),
+        ];
+        for s in cases {
+            assert_eq!(proxy_audio_args(Some(&s), false), fast, "{s:?}");
+        }
+        assert_eq!(proxy_audio_args(None, false), fast);
+    }
+
+    #[test]
+    fn legacy_switch_restores_the_old_encode() {
+        let s = stream("aac", Some("LC"), Some(2));
+        let legacy = vec!["-c:a", "aac", "-b:a", "96k", "-ac", "2"];
+        assert_eq!(proxy_audio_args(Some(&s), true), legacy);
+        assert_eq!(proxy_audio_args(None, true), legacy);
+        assert_eq!(plain_aac_proxy_audio_args(), legacy);
+    }
+
+    // Real-file check of the probe, run only when AMV_PROXY_AUDIO_PROBE is set
+    // to "<ffprobe path>|<media path>|<expected: copy or encode>".
+    #[test]
+    fn probe_decision_on_real_file() {
+        let Ok(spec) = std::env::var("AMV_PROXY_AUDIO_PROBE") else { return };
+        let parts: Vec<&str> = spec.split('|').collect();
+        let stream = probe_first_audio_stream(Path::new(parts[0]), Path::new(parts[1]));
+        let args = proxy_audio_args(stream.as_ref(), false);
+        let decision = if args[1] == "copy" { "copy" } else { "encode" };
+        assert_eq!(decision, parts[2], "{stream:?}");
+    }
+}
+
 fn run_source_proxy_job(
     window: &tauri::Window,
     ffmpeg: &Path,
@@ -5714,6 +5907,7 @@ fn run_source_proxy_job(
     use_nvenc: bool,
     color: &ColorMetadata,
     height: u32,
+    audio_args: &[String],
 ) -> Result<(), String> {
     // Whole-file transcode (NO -ss) so the proxy timeline matches the source
     // 1:1. The decode prefix and -vf chain diverge by encoder so the NVENC path
@@ -5830,13 +6024,11 @@ fn run_source_proxy_job(
     // Output-side color tags matching the in-graph setparams above.
     args.extend(color_tag_args(color));
 
+    // Sound: copied when the source track is webview-playable AAC, otherwise
+    // stereo Opus (see proxy_audio_args).
+    args.extend(audio_args.iter().cloned());
+
     args.extend([
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-b:a".to_string(),
-        "96k".to_string(),
-        "-ac".to_string(),
-        "2".to_string(),
         "-movflags".to_string(),
         "+faststart".to_string(),
         "-progress".to_string(),
