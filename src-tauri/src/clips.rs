@@ -5421,7 +5421,7 @@ fn lowercase_extension(path: &Path) -> Option<String> {
 
 // Probe a source once and decide direct-vs-proxy. FRIENDLY (direct) requires
 // ALL clauses; any failure routes to the always-in-scope, always-H.264 proxy
-// (AAC or Opus sound). The proxy itself never needs this plan — it is friendly by
+// (AAC or Opus sound). The proxy itself never needs this plan: it is friendly by
 // construction.
 #[tauri::command]
 pub(crate) async fn clip_playback_plan(
