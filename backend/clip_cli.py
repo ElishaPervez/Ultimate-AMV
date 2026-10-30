@@ -270,11 +270,11 @@ def decode_frames_nvdec(ffmpeg, input_path, info, started_at):
     return np.frombuffer(payload[:usable], dtype=np.uint8).reshape(frame_count, FRAME_H, FRAME_W, 3).copy()
 
 
-def decode_frames_cpu(ffmpeg, input_path, info, started_at):
-    import numpy as np
-
-    estimated_frames = max(1, int(round(info.duration * info.fps)))
-    command = [
+def cpu_decode_command(ffmpeg, input_path):
+    """Software decode + shrink to 48x27 RGB frames on stdout (CPU mode, and
+    the GPU modes' software fallback). Both CPU readers below use this exact
+    command, so they produce the same frames."""
+    return [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -290,6 +290,13 @@ def decode_frames_cpu(ffmpeg, input_path, info, started_at):
         "rgb24",
         "pipe:1",
     ]
+
+
+def decode_frames_cpu(ffmpeg, input_path, info, started_at):
+    import numpy as np
+
+    estimated_frames = max(1, int(round(info.duration * info.fps)))
+    command = cpu_decode_command(ffmpeg, input_path)
 
     progress("decode", 2, "Decoding analysis frames with CPU...", started_at)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -381,6 +388,116 @@ def scenedetect_cut_frames(frames, fps, cpu_threshold, min_clip_seconds, started
     progress("analyze", 94, "Finished PySceneDetect CPU scene analysis", started_at)
     # Detector may report cuts out of order across versions; keep them sorted
     # and unique so the downstream cut→scene boundary math behaves.
+    return sorted(set(cut_frames))
+
+
+# Dev-only A/B switch for CPU mode. Unset (the default) = score each frame
+# with PySceneDetect while ffmpeg is still decoding the rest of the episode
+# (scenedetect_cut_frames_streaming). "off" = the old order: decode the whole
+# episode first, then score (decode_frames_cpu + scenedetect_cut_frames).
+# Both feed the detector the same frames in the same order, so the cuts are
+# identical. Not wired into app config/Settings.
+_CPU_OVERLAP_ENV = "AMV_DEV_CPU_OVERLAP"
+
+
+def _cpu_overlap_enabled():
+    return os.environ.get(_CPU_OVERLAP_ENV, "").strip().lower() not in ("0", "off", "false", "no")
+
+
+def scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, min_clip_seconds, started_at):
+    """CPU mode: run PySceneDetect on frames as ffmpeg delivers them.
+
+    Same ffmpeg command, same detector settings and the same frame order as
+    decode_frames_cpu + scenedetect_cut_frames, so the cuts are identical;
+    the ~1.6 s of scoring just happens while ffmpeg is still decoding instead
+    of after it. A reader thread drains ffmpeg's pipe so ffmpeg never waits
+    on the scoring. Returns sorted unique cut frame indices.
+    """
+    import queue
+
+    import numpy as np
+    from scenedetect import ContentDetector, FrameTimecode
+
+    fps = info.fps
+    min_scene_len = max(1, int(round(min_clip_seconds * fps)))
+    detector = ContentDetector(threshold=cpu_threshold, min_scene_len=min_scene_len)
+    estimated_frames = max(1, int(round(info.duration * fps)))
+
+    progress("decode", 2, "Decoding and analyzing frames with CPU...", started_at)
+    process = subprocess.Popen(cpu_decode_command(ffmpeg, input_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if process.stdout is None:
+        raise RuntimeError("Could not read ffmpeg output.")
+
+    # Bounded so a stalled scorer cannot buffer a whole episode twice
+    # (each item is up to 512 frames, ~2 MB).
+    chunks = queue.Queue(maxsize=64)
+    reader_errors = []
+
+    def pump():
+        try:
+            while True:
+                chunk = process.stdout.read(FRAME_BYTES * 512)
+                if not chunk:
+                    break
+                chunks.put(chunk)
+        except Exception as error:  # surfaced after the loop
+            reader_errors.append(error)
+        finally:
+            chunks.put(None)
+
+    reader = threading.Thread(target=pump, name="cpu-decode-reader", daemon=True)
+    reader.start()
+
+    cut_frames = []
+    index = 0
+    pending = b""
+    last_emit = 0.0
+    try:
+        while True:
+            chunk = chunks.get()
+            if chunk is None:
+                break
+            data = pending + chunk if pending else chunk
+            whole = len(data) // FRAME_BYTES
+            if whole:
+                block = np.frombuffer(data, dtype=np.uint8, count=whole * FRAME_BYTES).reshape(
+                    whole, FRAME_H, FRAME_W, 3
+                ).copy()
+                for frame in block:
+                    # ContentDetector converts to HSV via cv2, which expects BGR.
+                    bgr = frame[:, :, ::-1]
+                    for cut in detector.process_frame(FrameTimecode(index, fps), bgr):
+                        cut_frames.append(int(cut))
+                    index += 1
+            pending = data[whole * FRAME_BYTES:]
+
+            now = time.perf_counter()
+            if now - last_emit >= 0.25:
+                last_emit = now
+                stage_percent = min(index / estimated_frames, 1.0)
+                progress("decode", 2 + stage_percent * 46, f"Decoded and analyzed {index:,}/{estimated_frames:,} frames", started_at)
+    except BaseException:
+        # Scoring raised: stop ffmpeg, then drain the queue so the reader
+        # thread is not left blocked on a full queue.
+        process.kill()
+        while chunks.get() is not None:
+            pass
+        reader.join()
+        raise
+    reader.join()
+
+    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    status = process.wait()
+    if reader_errors:
+        raise RuntimeError(f"Could not read ffmpeg output: {reader_errors[0]}")
+    if status != 0:
+        raise RuntimeError(f"ffmpeg CPU decode failed:\n{stderr.strip()}")
+    if index <= 0:
+        raise RuntimeError("No frames decoded.")
+
+    progress("decode", 48, f"Decoded {index:,} analysis frames", started_at)
+    progress("analyze", 50, "Running PySceneDetect ContentDetector (CPU)...", started_at)
+    progress("analyze", 94, "Finished PySceneDetect CPU scene analysis", started_at)
     return sorted(set(cut_frames))
 
 
@@ -685,10 +802,13 @@ def extract_cpu(input_path, info, cpu_threshold, min_clip_seconds, started_at):
     progress("probe", 1, f"{info.codec} at {info.fps:.3f} FPS, {info.duration:.1f}s", started_at)
 
     # Decode with our bundled ffmpeg (shared with the GPU software-decode path)
-    # for full codec coverage, then run PySceneDetect's content-aware detector
-    # over those frames on the CPU.
-    frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
-    cut_frames = scenedetect_cut_frames(frames, info.fps, cpu_threshold, min_clip_seconds, started_at)
+    # for full codec coverage, and run PySceneDetect's content-aware detector
+    # over those frames on the CPU while the decode is still running.
+    if _cpu_overlap_enabled():
+        cut_frames = scenedetect_cut_frames_streaming(ffmpeg, input_path, info, cpu_threshold, min_clip_seconds, started_at)
+    else:
+        frames = decode_frames_cpu(ffmpeg, input_path, info, started_at)
+        cut_frames = scenedetect_cut_frames(frames, info.fps, cpu_threshold, min_clip_seconds, started_at)
 
     progress("scenes", 96, "Building scene list...", started_at)
     # Map detector cut frames -> interior cut seconds and re-apply the
