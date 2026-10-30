@@ -117,6 +117,25 @@ Grid scroll (`grid.*`, from grid_bench.py in real Edge):
 - `tile_first_frame` / `initial_screen_first_frame` : mount to first painted
   video frame per tile.
 
+Real grid (`gridapp.*`, from grid_app_bench.py, added by worker 6):
+- Runs a production build of the app's OWN React panel (default: the whole
+  desktop shell with the Scene Splitter open) in Edge, with the Tauri backend
+  mocked by `grid-app\tauriMock.ts`: a real 501-scene list, the real 240p
+  preview file, 1 or N episodes (`--eps 12` = the batch case). Build first:
+  `npx vite build --config scripts/bench/grid-app/vite.config.ts` (add
+  `GRID_BENCH_PROFILING=1` for the `--dist prof` build, which records every
+  React commit and its render time).
+- Scrolls with REAL mouse-wheel input by default (`--driver wheel`). Do not
+  judge smoothness with `--driver script` (scrollTop set every animation
+  frame): when only 24 fps videos change on screen, Edge deliberately drops
+  its display to every other refresh to save power, so a script-driven
+  scroll reads as ~46 fps even though wheel scrolling runs at the full
+  refresh rate. That is what the stand-in's "steady scroll at ~47 fps" was.
+- `--cpu-throttle 4` slows the page's main thread 4x to stand in for a weak
+  CPU (the effect of render work only shows there on this fast PC).
+- `--variants off,on` flips the grid's A/B switches
+  (`src\dev\gridPerfSwitches.ts`, only readable in dev and bench builds).
+
 ## Limits (read before trusting a number)
 
 - The grid harness is a stand-in for the React grid (no React renders, app
