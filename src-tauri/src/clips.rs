@@ -1194,14 +1194,21 @@ fn smart_cut_keyframe_is_clean_start(ffmpeg: &Path, input: &Path, codec: &str, s
 // plenty.
 const SMART_CUT_JOIN_CHECK_BODY_FRAMES: usize = 48;
 
+// Encoder arguments for every re-encoded piece of a smart cut: frames keep the
+// source's own times (on the demuxer's clock) and pass through one for one,
+// instead of being snapped onto a 1/fps grid (see run_smart_cut_clip).
+const SMART_CUT_SOURCE_TIMING_ARGS: [&str; 4] = ["-fps_mode", "passthrough", "-enc_time_base:v", "demux"];
+
 // Whether the first `frames` stored frames of a joined smart cut decode into
-// exactly that many pictures with steadily rising times. The frame-by-frame
-// check of the body copy only reads timestamps; this one runs the decoder over
-// the join itself, so a join the decoder cannot follow (frames dropped or
-// shown out of order) is caught. Decodes the head plus about a second of the
-// body, never the whole clip. ffprobe decodes on one thread unless told
-// otherwise (6.5 s against 0.9 s for 119 frames of 1080p).
-fn smart_cut_join_decodes(ffprobe: &Path, video: &Path, frames: usize) -> bool {
+// exactly that many pictures, each at least half a frame after the one before.
+// The frame-by-frame check of the body copy only reads timestamps; this one
+// runs the decoder over the join itself, so a join the decoder cannot follow
+// (frames dropped or shown out of order) is caught, and so is a frame that
+// would flash by in a millisecond because the next one lands almost on top of
+// it. Decodes the head plus about a second of the body, never the whole clip.
+// ffprobe decodes on one thread unless told otherwise (6.5 s against 0.9 s for
+// 119 frames of 1080p).
+fn smart_cut_join_decodes(ffprobe: &Path, video: &Path, frames: usize, fps: f64) -> bool {
     let output = cmd(ffprobe)
         .args(["-v", "error", "-threads", "0", "-select_streams", "v:0", "-show_entries", "frame=pts_time"])
         .arg("-read_intervals")
@@ -1218,14 +1225,19 @@ fn smart_cut_join_decodes(ffprobe: &Path, video: &Path, frames: usize) -> bool {
         .filter(|line| !line.trim().is_empty())
         .map(|line| line.split(',').next().and_then(|field| field.trim().parse::<f64>().ok()))
         .collect();
-    decoded_times_follow_on(&times, frames)
+    decoded_times_follow_on(&times, frames, fps)
 }
 
-// `frames` pictures, every one timed, each later than the last.
-fn decoded_times_follow_on(times: &[Option<f64>], frames: usize) -> bool {
+// `frames` pictures, every one timed, each at least half a frame (at `fps`)
+// after the one before.
+fn decoded_times_follow_on(times: &[Option<f64>], frames: usize, fps: f64) -> bool {
+    let min_gap = 0.5 / fps;
     times.len() == frames
         && times.iter().all(Option::is_some)
-        && times.windows(2).all(|pair| pair[1] > pair[0])
+        && times.windows(2).all(|pair| match (pair[0], pair[1]) {
+            (Some(earlier), Some(later)) => later - earlier >= min_gap,
+            _ => false,
+        })
 }
 
 #[cfg(test)]
@@ -1534,14 +1546,20 @@ mod smart_cut_tests {
     fn a_join_decodes_cleanly_only_with_every_frame_in_rising_order() {
         use super::decoded_times_follow_on;
         let times = |list: &[f64]| list.iter().map(|t| Some(*t)).collect::<Vec<_>>();
-        assert!(decoded_times_follow_on(&times(&[0.0, 0.042, 0.083, 0.125]), 4));
+        let fps = 24000.0 / 1001.0;
+        assert!(decoded_times_follow_on(&times(&[0.0, 0.042, 0.083, 0.125]), 4, fps));
         // A frame lost at the join.
-        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.125]), 4));
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.125]), 4, fps));
         // Two frames shown out of order, or one shown twice.
-        assert!(!decoded_times_follow_on(&times(&[0.0, 0.083, 0.042, 0.125]), 4));
-        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.042, 0.125]), 4));
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.083, 0.042, 0.125]), 4, fps));
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.042, 0.125]), 4, fps));
+        // A frame that would flash by in a millisecond: the opening's last
+        // frame landing just before the copied part's first.
+        assert!(!decoded_times_follow_on(&times(&[0.0, 0.042, 0.124, 0.125]), 4, fps));
+        // MKV's millisecond rounding is not mistaken for a squeezed frame.
+        assert!(decoded_times_follow_on(&times(&[0.0, 0.041, 0.084, 0.125]), 4, fps));
         // A picture the decoder could not time.
-        assert!(!decoded_times_follow_on(&[Some(0.0), None, Some(0.083), Some(0.125)], 4));
+        assert!(!decoded_times_follow_on(&[Some(0.0), None, Some(0.083), Some(0.125)], 4, fps));
     }
 
     #[test]
@@ -4481,6 +4499,16 @@ fn run_smart_cut_clip(
         }
         append_clip_stream_maps(&mut args, &["0:v:0"]);
         args.extend(head_encoder.iter().cloned());
+        // Keep every frame at its source time (counted from the seek point).
+        // By default the encoder snaps frame times onto a 1/fps grid, and a
+        // start that falls half a frame between two frames (the 1.5-frame
+        // start offset) left frames on a tie: about 1 in 5 openings came out
+        // with a frame one slot late, landing a millisecond before (or on)
+        // the copied part's first frame, so that frame flashed for 1 ms and
+        // its neighbour showed twice (measured on MKV and 1/600 s MP4). On
+        // the source's own clock the pieces line up exactly where the join
+        // places them, and no frame is ever dropped or doubled to fit a grid.
+        args.extend(SMART_CUT_SOURCE_TIMING_ARGS.iter().map(|arg| arg.to_string()));
         args.push("-vf".to_string());
         args.push(setparams_filter(color));
         args.extend(color_tag_args(color));
@@ -4672,7 +4700,7 @@ fn run_smart_cut_clip(
             // Decode across the head-to-body join (see smart_cut_join_decodes).
             // A join the decoder cannot follow gets the whole clip re-encoded.
             let check_frames = head_frames + plan.frames.min(SMART_CUT_JOIN_CHECK_BODY_FRAMES);
-            if head_frames == 0 || smart_cut_join_decodes(ffprobe, &video, check_frames) {
+            if head_frames == 0 || smart_cut_join_decodes(ffprobe, &video, check_frames, fps) {
                 joined = true;
             } else {
                 log_warn(
